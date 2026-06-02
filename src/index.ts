@@ -47,9 +47,102 @@ app.post('/api/checkpoint/:token', async (req, res) => {
   res.status(200).json({ received: true });
 });
 
-// Health check
-app.get('/health', (_req, res) => {
-  res.json({ status: 'ok', ts: new Date().toISOString() });
+// Agents list — Dashboard + CLI use this
+app.get('/api/agents', async (_req, res) => {
+  try {
+    const { readAgentsJson } = await import('./cli/lib/env-file.js');
+    const { getCachedAgents } = await import('./notion/org-cache.js');
+    const agentConfigs = await readAgentsJson();
+    const orgAgents = await getCachedAgents().catch(() => []);
+
+    const agents = agentConfigs.map(cfg => {
+      const org = orgAgents.find(a => a.name.toLowerCase().includes(cfg.name.toLowerCase()));
+      return {
+        name: cfg.name,
+        adapter: cfg.adapter,
+        contextLevel: cfg.contextLevel,
+        timeoutMin: cfg.timeoutMin,
+        status: org ? 'Available' : 'Offline',
+        lastActive: null,
+      };
+    });
+
+    res.json(agents);
+  } catch {
+    res.json([]);
+  }
+});
+
+// Manual run (bypass @mention — CLI uses this)
+app.post('/api/run', async (req, res) => {
+  const { pageId, agentName } = req.body;
+  if (!pageId) {
+    res.status(400).json({ error: 'pageId required' });
+    return;
+  }
+
+  const { getTask } = await import('./notion/client.js');
+  const { classifyEvent } = await import('./orchestrator/orchestrator-agent.js');
+  const { enqueueDispatch } = await import('./queue/dispatcher.js');
+
+  try {
+    const task = await getTask(pageId);
+    const agent = agentName ?? task.assignedAgent ?? 'claude-code';
+    const decision = await classifyEvent({
+      taskId: pageId,
+      taskName: task.name,
+      taskStatus: task.status,
+      assignedAgent: agent,
+      mentionContext: 'manual run via norc CLI',
+    });
+    if (decision.action === 'execute') {
+      await enqueueDispatch(decision);
+      res.json({ queued: true, agent });
+    } else {
+      res.json({ queued: false, reason: decision.anomalyReason });
+    }
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Server-sent events log stream for `norc logs`
+const logListeners = new Set<(line: string) => void>();
+
+export function emitLog(line: string): void {
+  process.stdout.write(line + '\n');
+  for (const fn of logListeners) fn(line);
+}
+
+app.get('/api/logs/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  const agentFilter = req.query.agent as string | undefined;
+
+  const send = (line: string) => {
+    if (agentFilter && !line.toLowerCase().includes(agentFilter.toLowerCase())) return;
+    res.write(`data: ${line}\n\n`);
+  };
+
+  logListeners.add(send);
+  req.on('close', () => logListeners.delete(send));
+});
+
+// Health check (includes Redis status)
+app.get('/health', async (_req, res) => {
+  let redisStatus = 'unknown';
+  try {
+    const Redis = (await import('ioredis')).default;
+    const r = new Redis(process.env.REDIS_URL ?? 'redis://localhost:6379');
+    const pong = await r.ping();
+    redisStatus = pong === 'PONG' ? 'ok' : 'error';
+    r.disconnect();
+  } catch {
+    redisStatus = 'error';
+  }
+  res.json({ status: 'ok', redis: redisStatus, ts: new Date().toISOString() });
 });
 
 const PORT = Number(process.env.PORT ?? 3001);
