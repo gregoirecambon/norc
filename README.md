@@ -23,7 +23,7 @@ docker compose version
 ### 2. Clone NORC
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/norc.git
+git clone https://github.com/gregoirecambon/norc.git
 cd norc
 ```
 
