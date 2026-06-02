@@ -148,6 +148,10 @@ app.get('/health', async (_req, res) => {
 const PORT = Number(process.env.PORT ?? 3001);
 
 async function main() {
+  // Load Notion credentials from ~/.norc/config.json before starting
+  const { loadConfigIntoEnv } = await import('./cli/lib/config.js');
+  await loadConfigIntoEnv();
+
   // On startup: detect stale runs from previous session
   console.log('[norc] checking for stale runs...');
   await detectStaleRuns().catch(err => console.error('[norc] stale run check failed:', err));
