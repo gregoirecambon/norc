@@ -3,6 +3,7 @@ import { stdin as input, stdout as output } from 'process';
 import { execSync } from 'child_process';
 import chalk from 'chalk';
 import ora from 'ora';
+import { config as dotenvConfig } from 'dotenv';
 import {
   readConfig,
   writeConfig,
@@ -10,6 +11,7 @@ import {
 } from '../lib/config.js';
 import { readInitState, markStepComplete, isStepComplete } from '../lib/init-state.js';
 import { createNorcDatabases } from '../lib/notion-setup.js';
+import { writeEnvVar } from '../lib/env-file.js';
 
 // NOTE: readline is NOT created at module level.
 // execSync with stdio:'inherit' (or sharing stdin) corrupts a module-level readline.
@@ -44,6 +46,9 @@ async function pollForVerificationToken(timeoutMs = 5 * 60 * 1000): Promise<stri
 }
 
 export async function runInit(): Promise<void> {
+  // Load .env so NORC_PUBLIC_URL is available even when resuming mid-wizard
+  dotenvConfig();
+
   console.log('\n' + chalk.bold('NORC Setup'));
   console.log(chalk.dim('Press Ctrl+C at any time to pause. Re-run `norc init` to resume.\n'));
 
@@ -106,7 +111,8 @@ export async function runInit(): Promise<void> {
       const manual = await ask2('Or enter your public URL now (leave empty to skip):');
       if (manual.startsWith('http')) {
         process.env.NORC_PUBLIC_URL = manual;
-        ok('URL set for this session (add it to .env to persist)');
+        await writeEnvVar('NORC_PUBLIC_URL', manual);
+        ok('URL saved to .env: ' + manual);
       } else {
         warn('Skipping. Webhooks will not work until NORC_PUBLIC_URL is set.');
       }
@@ -218,8 +224,7 @@ export async function runInit(): Promise<void> {
   if (!await isStepComplete(5)) {
     step(5, 'Connect Notion webhooks + Register your first agent');
 
-    const config = await readConfig();
-    const publicUrl = process.env.NORC_PUBLIC_URL ?? config.notionParentPageId ?? 'YOUR_PUBLIC_URL';
+    const webhookUrl = `${process.env.NORC_PUBLIC_URL ?? 'YOUR_PUBLIC_URL'}/webhooks/notion`;
 
     // ── 5a: Webhook verification ─────────────────────────────────────────
     console.log('\n  ' + chalk.bold('5a. Set up the Notion webhook'));
@@ -228,7 +233,7 @@ export async function runInit(): Promise<void> {
     hint('1. Go to: notion.so/my-integrations → your integration → Webhooks tab');
     hint('2. Click "Add webhook"');
     hint('3. Enter this URL:');
-    console.log('     ' + chalk.cyan(`${process.env.NORC_PUBLIC_URL ?? publicUrl}/webhooks/notion`));
+    console.log('     ' + chalk.cyan(webhookUrl));
     hint('4. Click "Verify" — Notion will POST a verification token to NORC');
     console.log();
 
@@ -237,7 +242,7 @@ export async function runInit(): Promise<void> {
 
     if (!token) {
       verifySpinner.fail('Timed out waiting for Notion verification token.');
-      hint('Make sure the URL is correct and reachable from the internet (`curl ' + (process.env.NORC_PUBLIC_URL ?? '') + '/health`).');
+      hint('Make sure the URL is correct and reachable from the internet (`curl ' + webhookUrl.replace('/webhooks/notion', '/health') + '`).');
       hint('Re-run `norc init` to try again — Docker will still be running.');
       return;
     }
