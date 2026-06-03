@@ -1,0 +1,389 @@
+import { WebSocket } from 'ws';
+import { randomUUID, generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
+import type { PingResult } from '../types.js';
+
+function rawDataToString(data: unknown): string {
+  if (typeof data === 'string') return data;
+  if (Buffer.isBuffer(data)) return data.toString('utf8');
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString('utf8');
+  if (Array.isArray(data)) {
+    return Buffer.concat(
+      data.map(e => Buffer.isBuffer(e) ? e : Buffer.from(String(e), 'utf8')),
+    ).toString('utf8');
+  }
+  return String(data ?? '');
+}
+
+function asRecord(v: unknown): Record<string, unknown> | null {
+  if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+  return v as Record<string, unknown>;
+}
+
+// ─── WebSocket operator connection (for ping only) ───────────────────────────
+
+async function probeGateway(url: string, authToken: string | null, timeoutMs = 3000): Promise<'ok' | 'challenge_only' | 'failed'> {
+  return new Promise(resolve => {
+    let completed = false;
+    const ws = new WebSocket(url, { maxPayload: 2 * 1024 * 1024 });
+
+    const timeout = setTimeout(() => {
+      try { ws.close(); } catch { /* ignore */ }
+      if (!completed) { completed = true; resolve('failed'); }
+    }, timeoutMs);
+
+    const finish = (status: 'ok' | 'challenge_only' | 'failed') => {
+      if (completed) return;
+      completed = true;
+      clearTimeout(timeout);
+      try { ws.close(); } catch { /* ignore */ }
+      resolve(status);
+    };
+
+    ws.on('message', raw => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+
+      const event = asRecord(parsed);
+      if (event?.type === 'event' && event.event === 'connect.challenge') {
+        const nonce = asRecord(event.payload)?.nonce;
+        if (typeof nonce !== 'string' || !nonce) { finish('failed'); return; }
+
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: randomUUID(),
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: { id: 'openclaw-probe', version: '0.1.0', platform: process.platform, mode: 'probe' },
+            role: 'operator',
+            scopes: ['operator.admin'],
+            ...(authToken ? { auth: { token: authToken } } : {}),
+          },
+        }));
+        return;
+      }
+
+      if (event?.type === 'res') {
+        finish(event.ok === true ? 'ok' : 'challenge_only');
+      }
+    });
+
+    ws.on('error', () => finish('failed'));
+    ws.on('close', () => { if (!completed) finish('failed'); });
+  });
+}
+
+// ─── Node (role=node) WebSocket connection ───────────────────────────────────
+
+// Ed25519 SPKI DER has a 12-byte ASN.1 header before the 32-byte raw key
+const ED25519_SPKI_PREFIX_LEN = 12;
+
+export interface WsKeypair {
+  privateKeyPem: string;
+  publicKeyB64: string;
+  deviceId: string;
+}
+
+export function generateWsKeypair(): WsKeypair {
+  const { privateKey, publicKey } = generateKeyPairSync('ed25519');
+  const spkiDer = publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
+  const rawPub = spkiDer.subarray(ED25519_SPKI_PREFIX_LEN);
+  const publicKeyB64 = rawPub.toString('base64url');
+  const deviceId = createHash('sha256').update(rawPub).digest('hex');
+  const privateKeyPem = privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
+  return { privateKeyPem, publicKeyB64, deviceId };
+}
+
+// Builds the OpenClaw v3 device-auth signature payload.
+// Scopes are joined with comma; empty string for no scopes.
+function buildDeviceSignaturePayload(params: {
+  deviceId: string;
+  role: 'operator' | 'node';
+  scopes: string[];
+  signedAtMs: number;
+  nonce: string;
+}): string {
+  const clientId = params.role === 'node' ? 'node-host' : 'gateway-client';
+  const clientMode = params.role === 'node' ? 'node' : 'backend';
+  return [
+    'v3',
+    params.deviceId,
+    clientId,
+    clientMode,
+    params.role,
+    params.scopes.join(','),
+    String(params.signedAtMs),
+    '',               // token (none for device-identity auth)
+    params.nonce,
+    process.platform, // platform
+    '',               // deviceFamily
+  ].join('|');
+}
+
+// Connects to an OpenClaw gateway using a device keypair.
+// role='operator' with scopes=['operator.write'] is used for challenge delivery.
+// role='node' is used only for the initial pairing request.
+// Returns the open WebSocket on success, throws on failure.
+async function connectWithDeviceIdentity(
+  url: string,
+  keypair: WsKeypair,
+  role: 'operator' | 'node',
+  scopes: string[],
+  timeoutMs = 12_000,
+): Promise<WebSocket> {
+  const clientId = role === 'node' ? 'node-host' : 'gateway-client';
+  const clientMode = role === 'node' ? 'node' : 'backend';
+
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const ws = new WebSocket(url, { maxPayload: 2 * 1024 * 1024 });
+
+    const finish = (err?: Error) => {
+      if (done) return;
+      done = true;
+      if (err) { try { ws.close(); } catch { /* */ } reject(err); }
+      else resolve(ws);
+    };
+
+    const timer = setTimeout(
+      () => finish(new Error('WebSocket device connect timed out')),
+      timeoutMs,
+    );
+
+    ws.on('message', raw => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+      const frame = asRecord(parsed);
+
+      if (frame?.type === 'event' && frame.event === 'connect.challenge') {
+        const nonce = asRecord(frame.payload)?.nonce;
+        if (typeof nonce !== 'string' || !nonce) {
+          clearTimeout(timer);
+          finish(new Error('Invalid connect.challenge nonce'));
+          return;
+        }
+        const signedAtMs = Date.now();
+        const payload = buildDeviceSignaturePayload({ deviceId: keypair.deviceId, role, scopes, signedAtMs, nonce });
+        const signature = cryptoSign(null, Buffer.from(payload, 'utf8'), keypair.privateKeyPem).toString('base64url');
+
+        ws.send(JSON.stringify({
+          type: 'req',
+          id: randomUUID(),
+          method: 'connect',
+          params: {
+            minProtocol: 3,
+            maxProtocol: 3,
+            client: { id: clientId, version: '0.1.0', platform: process.platform, mode: clientMode },
+            role,
+            scopes,
+            device: { id: keypair.deviceId, publicKey: keypair.publicKeyB64, signedAt: signedAtMs, nonce, signature },
+          },
+        }));
+        return;
+      }
+
+      if (frame?.type === 'res') {
+        clearTimeout(timer);
+        if (frame.ok === true) {
+          finish();
+        } else {
+          finish(new Error(
+            `Connect rejected: ${JSON.stringify(asRecord(frame.error)?.message ?? frame.error)}`,
+          ));
+        }
+      }
+    });
+
+    ws.on('error', e => { clearTimeout(timer); finish(e as Error); });
+    ws.on('close', (code, reason) => {
+      clearTimeout(timer);
+      if (!done) finish(new Error(`Connection closed: ${code} ${reason.toString()}`));
+    });
+  });
+}
+
+export type WsPairResult =
+  | { status: 'paired' }
+  | { status: 'pending' }
+  | { status: 'failed'; error: string };
+
+// Initiates node pairing: connects as node, which auto-creates a pairing request
+// in OpenClaw's Control UI. Returns 'paired' if already registered, 'pending' if
+// the pairing request was just created and needs approval, 'failed' on error.
+export async function initiateWsPairing(
+  config: Record<string, unknown>,
+  agentName: string,
+): Promise<WsPairResult> {
+  const url = typeof config['url'] === 'string' ? config['url'].trim() : '';
+  if (!url) return { status: 'failed', error: 'adapterConfig.url is required' };
+
+  const keypair = readKeypairFromConfig(config);
+  if (!keypair) return { status: 'failed', error: 'No keypair found — generate one first' };
+
+  // Connect as operator with operator.write scope.
+  // On first connect (not yet approved): OpenClaw creates a pairing request and rejects → pending.
+  // After admin approval in Control UI: connection succeeds → paired.
+  const OPERATOR_SCOPES = ['operator.write', 'operator.read'];
+  try {
+    const ws = await connectWithDeviceIdentity(url, keypair, 'operator', OPERATOR_SCOPES);
+    ws.close();
+    return { status: 'paired' };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // "pairing required" / "NOT_PAIRED" / "role-upgrade": device identity was valid,
+    // OpenClaw created a pairing request — user needs to approve in Control UI,
+    // granting operator role with operator.write scope.
+    if (
+      msg.includes('pairing required') ||
+      msg.includes('NOT_PAIRED') ||
+      msg.includes('not approved yet') ||
+      msg.includes('role-upgrade')
+    ) {
+      return { status: 'pending' };
+    }
+    return { status: 'failed', error: msg };
+  }
+}
+
+function readKeypairFromConfig(config: Record<string, unknown>): WsKeypair | null {
+  const privateKeyPem = typeof config['wsPrivateKey'] === 'string' ? config['wsPrivateKey'] : null;
+  const publicKeyB64 = typeof config['wsPublicKey'] === 'string' ? config['wsPublicKey'] : null;
+  const deviceId = typeof config['wsDeviceId'] === 'string' ? config['wsDeviceId'] : null;
+  if (!privateKeyPem || !publicKeyB64 || !deviceId) return null;
+  return { privateKeyPem, publicKeyB64, deviceId };
+}
+
+// ─── Challenge delivery ───────────────────────────────────────────────────────
+
+export async function sendOpenclawChallenge(
+  config: Record<string, unknown>,
+  agentName: string,
+  handshakeId: string,
+  nonce: string,
+  callbackUrl: string,
+): Promise<void> {
+  const wsUrl = typeof config['url'] === 'string' ? config['url'].trim() : '';
+  if (!wsUrl) throw new Error('adapterConfig.url is required');
+
+  const authToken = typeof config['authToken'] === 'string' ? config['authToken'] : null;
+  const keypair = readKeypairFromConfig(config);
+  const ocAgentId = typeof config['agentId'] === 'string' && config['agentId'].trim()
+    ? config['agentId'].trim()
+    : agentName;
+
+  const tokenReminder = authToken
+    ? `\n\nIf this test ever fails again with a gateway auth error:\n  openclaw config set gateway.auth.mode token\n  openclaw config set gateway.auth.token ${authToken}\n  openclaw gateway restart`
+    : '';
+  const message = `Norc handshake test. Make a POST request to ${callbackUrl} with JSON body {"nonce":"${nonce}"}. Use bash or any available tool.${tokenReminder}`;
+
+  if (keypair) {
+    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, handshakeId, message);
+  } else {
+    await sendChallengeViaHttp(wsUrl, authToken, ocAgentId, handshakeId, message);
+  }
+}
+
+const OPERATOR_SCOPES = ['operator.write', 'operator.read'];
+
+async function sendChallengeViaWebSocket(
+  wsUrl: string,
+  keypair: WsKeypair,
+  ocAgentId: string,
+  handshakeId: string,
+  message: string,
+): Promise<void> {
+  const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
+
+  const reqId = randomUUID();
+  await new Promise<void>((resolve, reject) => {
+    const ackTimeout = setTimeout(() => {
+      try { ws.close(); } catch { /* */ }
+      reject(new Error('Timed out waiting for agent method ack'));
+    }, 10_000);
+
+    ws.on('message', raw => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+      const frame = asRecord(parsed);
+      if (frame?.id === reqId) {
+        clearTimeout(ackTimeout);
+        try { ws.close(); } catch { /* */ }
+        if (frame.ok === true) resolve();
+        else reject(new Error(`agent method rejected: ${JSON.stringify(frame.error)}`));
+      }
+    });
+
+    ws.send(JSON.stringify({
+      type: 'req',
+      id: reqId,
+      method: 'agent',
+      params: {
+        message,
+        agentId: ocAgentId,
+        sessionKey: `agent:${ocAgentId}:norc:handshake:${handshakeId}`,
+        idempotencyKey: handshakeId,
+        timeout: 60000,
+      },
+    }));
+  });
+}
+
+async function sendChallengeViaHttp(
+  wsUrl: string,
+  authToken: string | null,
+  ocAgentId: string,
+  handshakeId: string,
+  message: string,
+): Promise<void> {
+  if (!authToken) throw new Error('adapterConfig.authToken is required when WebSocket pairing is not set up — use the "Setup WebSocket" button or set authToken in Adapter Config');
+
+  const httpBase = wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+
+  const response = await fetch(`${httpBase}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+      'x-openclaw-session-key': `agent:${ocAgentId}:norc:handshake:${handshakeId}`,
+    },
+    body: JSON.stringify({
+      model: `openclaw/${ocAgentId}`,
+      messages: [{ role: 'user', content: message }],
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(30_000),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`OpenClaw HTTP ${response.status}: ${text.slice(0, 200)}`);
+  }
+}
+
+// ─── Ping ─────────────────────────────────────────────────────────────────────
+
+export async function pingOpenclaw(config: Record<string, unknown>, start: number): Promise<PingResult> {
+  const url = typeof config['url'] === 'string' ? config['url'].trim() : '';
+  if (!url) return { ok: false, latencyMs: 0, error: 'adapterConfig.url is required for openclaw adapter' };
+
+  let parsedUrl: URL;
+  try { parsedUrl = new URL(url); } catch {
+    return { ok: false, latencyMs: 0, error: `Invalid URL: ${url}` };
+  }
+  if (parsedUrl.protocol !== 'ws:' && parsedUrl.protocol !== 'wss:') {
+    return { ok: false, latencyMs: 0, error: `URL must use ws:// or wss://, got ${parsedUrl.protocol}` };
+  }
+
+  const authToken = typeof config['authToken'] === 'string' ? config['authToken'] : null;
+
+  try {
+    const result = await probeGateway(url, authToken);
+    const latencyMs = Date.now() - start;
+    if (result === 'ok') return { ok: true, latencyMs };
+    if (result === 'challenge_only') return { ok: true, latencyMs, detail: 'challenge_only — gateway reachable but credentials rejected' };
+    return { ok: false, latencyMs, error: 'Gateway probe failed (timeout or connection refused)' };
+  } catch (err) {
+    return { ok: false, latencyMs: Date.now() - start, error: err instanceof Error ? err.message : 'Unknown error' };
+  }
+}

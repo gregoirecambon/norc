@@ -4,3 +4,6 @@ dist/
 .env.norc
 .norc/init-state.json
 *.js.map
+*.db
+*.db-shm
+*.db-wal
