@@ -23,7 +23,7 @@ services:
         condition: service_healthy
     restart: unless-stopped
     volumes:
-      - ~/.norc:/root/.norc:ro
+      - ~/.norc:/root/.norc:rw
     environment:
       REDIS_URL: redis://redis:6379
 

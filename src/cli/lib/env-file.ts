@@ -36,10 +36,14 @@ export async function readEnvVar(key: string): Promise<string | null> {
 export interface AgentEntry {
   name: string;
   orgDbPageId: string;
-  adapter: 'ClaudeCodeAdapter';
+  adapter: 'ClaudeCodeAdapter' | 'generic';
   authEnv: string;
   timeoutMin: number;
   contextLevel: 'task' | 'project' | 'strategic';
+  parentAgent?: string;
+  registeredAt?: string;
+  capabilities?: string[];
+  lastDispatchAt?: string;
 }
 
 export async function readAgentsJson(): Promise<AgentEntry[]> {

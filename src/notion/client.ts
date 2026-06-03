@@ -119,6 +119,30 @@ export async function getOrgDbAgentByName(name: string): Promise<any | null> {
   return agents.find(a => a.name.toLowerCase().includes(name.toLowerCase())) ?? null;
 }
 
+export async function createOrgDbAgentPage(agent: {
+  name: string;
+  adapter: string;
+  contextLevel: string;
+  capabilities: string[];
+}): Promise<string> {
+  const orgDbId = process.env.NOTION_ORG_DB_ID;
+  if (!orgDbId) return '';
+
+  const page = await notionRequest(() =>
+    notion.pages.create({
+      parent: { database_id: orgDbId },
+      properties: {
+        Name: { title: [{ text: { content: agent.name } }] },
+        Type: { select: { name: 'AI Agent' } },
+        Specialty: { rich_text: [{ text: { content: agent.capabilities.join(', ') || agent.adapter } }] },
+        'Context Level': { select: { name: agent.contextLevel } },
+      },
+    })
+  ) as any;
+
+  return page.id ?? '';
+}
+
 export async function updateAgentLastActive(pageId: string): Promise<void> {
   await notionRequest(() =>
     notion.pages.update({

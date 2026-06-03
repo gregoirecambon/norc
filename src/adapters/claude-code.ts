@@ -48,12 +48,31 @@ export async function executeClaudeCode(input: AgentInput): Promise<AgentOutput>
       clearTimeout(timeoutHandle);
       await unlink(promptFile).catch(() => {});
 
+      // Parse NORC_OUTPUT sentinel line — must be the last non-empty line
+      let nextAgent: string | undefined;
+      let parsedSummary: string | undefined;
+      const lines = stdout.trimEnd().split('\n');
+      for (let i = lines.length - 1; i >= 0; i--) {
+        const line = lines[i].trim();
+        if (line.startsWith('NORC_OUTPUT:')) {
+          try {
+            const json = JSON.parse(line.slice('NORC_OUTPUT:'.length).trim());
+            if (json.next_agent) nextAgent = json.next_agent;
+            if (json.summary) parsedSummary = json.summary;
+          } catch {
+            // Malformed sentinel — ignore, fall through to default summary
+          }
+          break;
+        }
+      }
+
       resolve({
         success: code === 0,
         exitCode: code ?? -1,
         stdout,
         stderr,
-        summary: stdout.slice(0, 300) || stderr.slice(0, 300) || 'No output',
+        summary: parsedSummary ?? (stdout.slice(0, 300) || stderr.slice(0, 300) || 'No output'),
+        nextAgent,
       });
     });
   });

@@ -74,6 +74,26 @@ agentCmd
     await updateAgentSkill(name);
   });
 
+agentCmd
+  .command('invite')
+  .description('Print the invitation prompt to share with a new agent')
+  .action(async () => {
+    const API = process.env.NORC_API_URL ?? 'http://localhost:3001';
+    try {
+      const res = await fetch(`${API}/api/agents/invite`);
+      if (!res.ok) throw new Error(`${res.status}`);
+      const { prompt } = await res.json() as { prompt: string };
+      console.log('\n' + chalk.bold('NORC Agent Invitation Prompt') + '\n');
+      console.log(chalk.dim('─'.repeat(60)));
+      console.log(prompt);
+      console.log(chalk.dim('─'.repeat(60)));
+      console.log(chalk.dim('\nPaste this into your agent\'s system prompt or CLAUDE.md.\n'));
+    } catch (err: any) {
+      console.error(chalk.red('Could not fetch invite prompt: ' + err.message));
+      console.log(chalk.dim('Is NORC running? Try: docker compose up -d'));
+    }
+  });
+
 // norc run
 program
   .command('run <notion-url>')

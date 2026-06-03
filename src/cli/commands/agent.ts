@@ -12,33 +12,46 @@ const SKILLS_DIR = join(NORC_DIR, 'skills');
 const EXECUTION_PROTOCOL = `
 ## NORC Orchestration Protocol
 
-You are registered as an agent in a NORC orchestration system.
+### BOOTSTRAP ONCE (run this on first load)
 
-When you receive a task that contains [NORC EXECUTION CONTRACT], follow these rules:
+If you have not yet registered with NORC, execute:
 
-1. REPORT COMPLETION: When done, POST to the callback_url in the contract with:
-   - status: "done" or "failed"
-   - output: your full output text
-   - summary: 1-2 sentence summary of what you did
-   - next_agent: (optional) name of another agent to delegate to
+curl -X POST {NORC_URL}/api/agents/register \\
+  -H "Authorization: Bearer {YOUR_REGISTRATION_TOKEN}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"name":"{YOUR_AGENT_NAME}","adapter":"generic","capabilities":[],"contextLevel":"project"}'
 
-   Example:
-   curl -X POST {callback_url} \\
-     -H "Authorization: Bearer {callback_token}" \\
+Replace {YOUR_AGENT_NAME} with a slug like "my-agent" (lowercase, hyphens ok).
+Replace {YOUR_REGISTRATION_TOKEN} with the NORC_REGISTRATION_TOKEN from your operator.
+Replace {NORC_URL} with the NORC server URL from your operator.
+Wait for: {"registered":true} before proceeding.
+
+### FOR EACH TASK containing [NORC EXECUTION CONTRACT]
+
+1. REPORT COMPLETION: When done, POST to the callback_url from the contract:
+
+   curl -X POST <callback_url from contract> \\
+     -H "Authorization: Bearer <callback_token from contract>" \\
      -H "Content-Type: application/json" \\
-     -d '{"status":"done","output":"...","summary":"...", "next_agent": null}'
+     -d '{"status":"done","output":"...","summary":"1-2 sentence summary"}'
 
-2. REPORT FAILURE: If you cannot complete, POST with status="failed" and a clear reason.
+   Also emit this sentinel as the LAST LINE of your output (machine-parsed):
+   NORC_OUTPUT: {"status":"done","summary":"<summary>","next_agent":null}
+
+2. REPORT FAILURE: If you cannot complete, use status="failed":
+   NORC_OUTPUT: {"status":"failed","summary":"<reason>","next_agent":null}
    Never silently stop.
 
-3. DELEGATE WORK: If you need another agent, include their name in next_agent.
+3. DELEGATE WORK: Set next_agent to another agent's name:
+   NORC_OUTPUT: {"status":"done","summary":"<summary>","next_agent":"<agent-name>"}
    NORC will dispatch them and pass your output as context.
 
-4. CHECKPOINT: For long tasks (>5 min), POST to checkpoint_url after each major step:
-   curl -X POST {checkpoint_url} \\
-     -H "Authorization: Bearer {callback_token}" \\
+4. CHECKPOINT (tasks >5 min): POST to checkpoint_url from the contract after each major step:
+
+   curl -X POST <checkpoint_url from contract> \\
+     -H "Authorization: Bearer <callback_token from contract>" \\
      -H "Content-Type: application/json" \\
-     -d '{"taskId":"{context_ref}","completedStep":1,"summary":"step complete"}'
+     -d '{"taskId":"<contextRef from contract>","completedStep":1,"summary":"step complete"}'
 
 5. STAY IN SCOPE: Only take actions relevant to the described task.
 `;

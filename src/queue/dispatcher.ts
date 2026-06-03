@@ -81,7 +81,7 @@ const worker = new Worker(
 
     const prompt = buildPrompt(ctx, contract);
 
-    // Wait for agent callback with lock renewal
+    // Wait for agent to complete (BullMQ auto-renews locks via lockRenewTime)
     const output = await new Promise<any>((resolve, reject) => {
       registerCallbackToken(callbackToken, taskId, resolve);
 
@@ -91,16 +91,10 @@ const worker = new Worker(
         reject(new Error(`Agent timeout after ${timeoutMs / 60000} min`));
       }, timeoutMs);
 
-      // keepAlive: renew BullMQ lock every 30s during long-running agent work
-      const keepAliveInterval = setInterval(() => {
-        job.updateProgress(Date.now()).catch(() => {});
-      }, 30_000);
-
       // Dispatch to adapter
       executeClaudeCode({ systemPrompt: prompt, task: ctx.taskName, timeoutMs, env: {}, contract })
         .then(result => {
           clearTimeout(timeoutHandle);
-          clearInterval(keepAliveInterval);
           if (!result.success) {
             reject(new Error(`Adapter failed: ${result.stderr}`));
           }
@@ -109,7 +103,6 @@ const worker = new Worker(
         })
         .catch(err => {
           clearTimeout(timeoutHandle);
-          clearInterval(keepAliveInterval);
           reject(err);
         });
     });
@@ -128,6 +121,15 @@ const worker = new Worker(
       `**@${assignedAgent}** completed ✓\n\n${summary}`
     );
     await updateTaskStatus(taskId, 'Done');
+
+    // Record last dispatch time for dashboard
+    const { readAgentsJson, writeAgentsJson } = await import('../cli/lib/env-file.js');
+    const agentList = await readAgentsJson();
+    const agentIdx = agentList.findIndex(a => a.name === assignedAgent);
+    if (agentIdx >= 0) {
+      agentList[agentIdx].lastDispatchAt = new Date().toISOString();
+      await writeAgentsJson(agentList);
+    }
 
     // Handle next_agent delegation
     if (output.nextAgent) {

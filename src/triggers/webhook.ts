@@ -52,6 +52,9 @@ export async function handleNotionWebhook(req: Request, res: Response): Promise<
   // Acknowledge immediately — Notion expects fast response
   res.status(200).json({ received: true });
 
+  // test_mode bypass: skip real Notion processing
+  if (event.test_mode === true) return;
+
   // Only process page_updated events on the Tasks database
   if (event.type !== 'page_updated' && event.type !== 'comment_created') return;
 

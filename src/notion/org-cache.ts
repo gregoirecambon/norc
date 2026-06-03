@@ -38,7 +38,10 @@ export async function findAgentByPageId(pageId: string): Promise<AgentRecord | n
 export async function findAgentByName(name: string): Promise<AgentRecord | null> {
   const agents = await getCachedAgents();
   const lower = name.toLowerCase();
-  return agents.find(a => a.name.toLowerCase().includes(lower)) ?? null;
+  // Exact match first — prevents "code" matching "claude-code"
+  return agents.find(a => a.name.toLowerCase() === lower)
+    ?? agents.find(a => a.name.toLowerCase().includes(lower))
+    ?? null;
 }
 
 export async function isAgentPageId(pageId: string): Promise<boolean> {
@@ -48,3 +51,6 @@ export async function isAgentPageId(pageId: string): Promise<boolean> {
 export async function invalidateCache(): Promise<void> {
   await getRedis().del(CACHE_KEY);
 }
+
+process.on('exit', () => { redis?.disconnect(); });
+process.on('SIGTERM', () => { redis?.disconnect(); process.exit(0); });

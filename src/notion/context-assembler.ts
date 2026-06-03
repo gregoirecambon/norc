@@ -151,5 +151,17 @@ export function buildPrompt(ctx: ContextAssembly, contract: object): string {
 
   sections.push(`[NORC ORCHESTRATION PROTOCOL]\n${JSON.stringify(contract, null, 2)}`);
 
+  sections.push(`[REQUIRED OUTPUT FORMAT]
+When your task is complete, you MUST emit this sentinel as the last line of your output:
+NORC_OUTPUT: {"status":"done","summary":"<1-2 sentence summary>","next_agent":null}
+
+If you need to delegate to another agent, set next_agent to their name:
+NORC_OUTPUT: {"status":"done","summary":"<summary>","next_agent":"<agent-name>"}
+
+If the task failed:
+NORC_OUTPUT: {"status":"failed","summary":"<reason>","next_agent":null}
+
+This sentinel line is machine-parsed. Do not omit it, wrap it in markdown, or add text after it.`);
+
   return sections.join('\n\n---\n\n');
 }
