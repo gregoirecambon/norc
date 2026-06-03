@@ -14,7 +14,7 @@ program
   .command('init')
   .description('Set up NORC — interactive 6-step wizard')
   .option('--reset', 'Start from scratch, ignoring saved progress')
-  .action(async (opts) => {
+  .action(async (opts: { reset?: boolean }) => {
     if (opts.reset) {
       const { resetInitState } = await import('./lib/init-state.js');
       await resetInitState();
@@ -32,7 +32,7 @@ agentCmd
   .option('-t, --technology <tech>', 'Agent technology (e.g. "Claude Code")')
   .option('-a, --auth-env <env>', 'API key environment variable (e.g. ANTHROPIC_API_KEY)')
   .option('-c, --context-level <level>', 'Context level: task | project | strategic', 'project')
-  .action(async (name, opts) => {
+  .action(async (name: string, opts: { technology?: string; authEnv?: string; contextLevel: 'task' | 'project' | 'strategic' }) => {
     const { createInterface } = await import('readline/promises');
     const { stdin: input, stdout: output } = await import('process');
     const rl = createInterface({ input, output });
@@ -61,7 +61,7 @@ agentCmd
 agentCmd
   .command('test <name>')
   .description('Send a test task to an agent')
-  .action(async (name) => {
+  .action(async (name: string) => {
     const { testAgent } = await import('./commands/agent.js');
     await testAgent(name);
   });
@@ -69,7 +69,7 @@ agentCmd
 agentCmd
   .command('update <name>')
   .description('Regenerate the skill file for an agent')
-  .action(async (name) => {
+  .action(async (name: string) => {
     const { updateAgentSkill } = await import('./commands/agent.js');
     await updateAgentSkill(name);
   });
@@ -79,7 +79,7 @@ program
   .command('run <notion-url>')
   .description('Manually trigger an agent on a Notion page (bypass @mention)')
   .option('-a, --agent <name>', 'Agent name to dispatch')
-  .action(async (notionUrl, opts) => {
+  .action(async (notionUrl: string, opts: { agent?: string }) => {
     const pageIdMatch = notionUrl.match(/([a-f0-9]{32}|[a-f0-9-]{36})/i);
     if (!pageIdMatch) {
       console.error(chalk.red('Could not extract a page ID from the URL'));
@@ -111,7 +111,7 @@ program
   .command('logs')
   .description('Tail the NORC log stream')
   .option('-a, --agent <name>', 'Filter by agent name')
-  .action(async (opts) => {
+  .action(async (opts: { agent?: string }) => {
     const { tailLogs } = await import('./commands/status.js');
     await tailLogs(opts.agent);
   });
