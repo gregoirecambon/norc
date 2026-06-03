@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 
-const API = import.meta.env.VITE_NORC_API ?? 'http://localhost:3001';
+const API = import.meta.env.VITE_NORC_API ?? '';
 
 interface Agent {
   name: string;
@@ -175,8 +175,7 @@ export default function Agents() {
           <div style={{ padding: 14, background: 'var(--surface1)' }}>
             <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginBottom: 10 }}>
               Paste this into your agent's system prompt (OpenClaw persona, Cursor rules file, Claude Code CLAUDE.md, etc.).
-              The agent will self-register with NORC on first run.
-              Replace <code style={{ background: 'var(--surface2)', padding: '1px 4px', borderRadius: 3 }}>{'{YOUR_REGISTRATION_TOKEN}'}</code> with your <code>NORC_REGISTRATION_TOKEN</code>.
+              The agent will self-register with NORC on first run. The token is one-time use — a new one is generated after each registration.
             </p>
 
             {inviteLoading ? (
@@ -185,7 +184,7 @@ export default function Agents() {
               </div>
             ) : inviteError ? (
               <div style={{ padding: 10, background: 'var(--surface2)', borderRadius: 4, color: 'var(--accent-red, #f87171)', fontSize: 12 }}>
-                Invite unavailable — NORC_PUBLIC_URL may not be configured ({inviteError})
+                Invite unavailable — set <code>NORC_PUBLIC_URL</code> in your .env and restart ({inviteError})
               </div>
             ) : (
               <>

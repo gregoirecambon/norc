@@ -17,6 +17,7 @@ export interface NorcConfig {
   notionParentPageId?: string;
   companyPageId?: string;
   setupComplete?: boolean;
+  registrationToken?: string;
 }
 
 export async function readConfig(): Promise<NorcConfig> {
@@ -43,6 +44,10 @@ export function generateWebhookSecret(): string {
   return 'norc_' + randomBytes(24).toString('hex');
 }
 
+export function generateRegistrationToken(): string {
+  return randomBytes(32).toString('hex');
+}
+
 // Load config into process.env so the rest of the codebase
 // can use process.env without knowing about config.json
 export async function loadConfigIntoEnv(): Promise<void> {
@@ -57,4 +62,7 @@ export async function loadConfigIntoEnv(): Promise<void> {
   if (config.notionProjectsDbId)       process.env.NOTION_PROJECTS_DB_ID       = config.notionProjectsDbId;
   if (config.notionPipelineConfigDbId) process.env.NOTION_PIPELINE_CONFIG_DB_ID = config.notionPipelineConfigDbId;
   if (config.companyPageId)            process.env.NORC_COMPANY_PAGE_ID        = config.companyPageId;
+  if (config.registrationToken && !process.env.NORC_REGISTRATION_TOKEN) {
+    process.env.NORC_REGISTRATION_TOKEN = config.registrationToken;
+  }
 }

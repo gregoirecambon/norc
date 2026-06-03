@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 
-const API = import.meta.env.VITE_NORC_API ?? 'http://localhost:3001';
+const API = import.meta.env.VITE_NORC_API ?? '';
 
 interface AgentStatus {
   name: string;

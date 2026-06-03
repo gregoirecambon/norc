@@ -112,11 +112,28 @@ app.post('/api/agents/register', async (req, res) => {
     norcVersion: '1.0',
     registeredAt,
   });
+
+  // Rotate registration token — one-time use per agent
+  try {
+    const { readConfig, writeConfig, generateRegistrationToken } = await import('./cli/lib/config.js');
+    const newToken = generateRegistrationToken();
+    const cfg = await readConfig();
+    await writeConfig({ ...cfg, registrationToken: newToken });
+    process.env.NORC_REGISTRATION_TOKEN = newToken;
+    console.log(`[norc] Registration token rotated after agent "${name}" registered`);
+  } catch (err: any) {
+    console.warn('[norc] Failed to rotate registration token:', err.message);
+  }
 });
 
-// Invitation prompt — returns template with placeholders, never real token
+// Invitation prompt — returns ready-to-use prompt with current one-time token
 app.get('/api/agents/invite', (_req, res) => {
-  const norcUrl = process.env.NORC_PUBLIC_URL ?? 'https://your-norc-url';
+  const norcUrl = process.env.NORC_PUBLIC_URL ?? '';
+  const registrationToken = process.env.NORC_REGISTRATION_TOKEN ?? '';
+  if (!norcUrl) {
+    res.status(503).json({ error: 'not_configured', message: 'NORC_PUBLIC_URL is not set' });
+    return;
+  }
   const prompt = `## NORC Orchestration Protocol
 
 ### BOOTSTRAP ONCE (run this on first load)
@@ -124,13 +141,12 @@ app.get('/api/agents/invite', (_req, res) => {
 If you have not yet registered with NORC, execute:
 
 curl -X POST ${norcUrl}/api/agents/register \\
-  -H "Authorization: Bearer {YOUR_REGISTRATION_TOKEN}" \\
+  -H "Authorization: Bearer ${registrationToken}" \\
   -H "Content-Type: application/json" \\
   -d '{"name":"{YOUR_AGENT_NAME}","adapter":"generic","capabilities":[],"contextLevel":"project"}'
 
 Replace {YOUR_AGENT_NAME} with a slug like "my-agent" (lowercase, hyphens ok).
-Replace {YOUR_REGISTRATION_TOKEN} with the NORC_REGISTRATION_TOKEN value from your operator.
-Wait for: {"registered":true} before proceeding.
+Wait for: {"registered":true} before proceeding. This token is one-time use — request a new invite from the dashboard after each registration.
 
 ### FOR EACH TASK containing [NORC EXECUTION CONTRACT]
 
@@ -356,8 +372,19 @@ async function main() {
   }
 
   // Load Notion credentials from ~/.norc/config.json before starting
-  const { loadConfigIntoEnv } = await import('./cli/lib/config.js');
+  const { loadConfigIntoEnv, readConfig, writeConfig, generateRegistrationToken } = await import('./cli/lib/config.js');
   await loadConfigIntoEnv();
+
+  // Auto-generate NORC_REGISTRATION_TOKEN if not present in env or config
+  if (!process.env.NORC_REGISTRATION_TOKEN) {
+    const cfg = await readConfig();
+    const token = cfg.registrationToken ?? generateRegistrationToken();
+    if (!cfg.registrationToken) {
+      await writeConfig({ ...cfg, registrationToken: token });
+    }
+    process.env.NORC_REGISTRATION_TOKEN = token;
+    console.log('[norc] Generated NORC_REGISTRATION_TOKEN (stored in ~/.norc/config.json)');
+  }
 
   // On startup: detect stale runs from previous session
   console.log('[norc] checking for stale runs...');
