@@ -7,14 +7,13 @@ import {
   readConfig,
   writeConfig,
   setConfigValue,
-  generateWebhookSecret,
 } from '../lib/config.js';
 import { readInitState, markStepComplete, isStepComplete } from '../lib/init-state.js';
-import { createNorcDatabases, registerWebhook } from '../lib/notion-setup.js';
-import { Client } from '@notionhq/client';
+import { createNorcDatabases } from '../lib/notion-setup.js';
 
-const rl = createInterface({ input, output });
-const ask = (q: string) => rl.question(chalk.cyan('? ') + q + ' ');
+// NOTE: readline is NOT created at module level.
+// execSync with stdio:'inherit' (or sharing stdin) corrupts a module-level readline.
+// Each step creates its own rl instance and closes it before any subprocess runs.
 
 function cmd(c: string): boolean {
   try { execSync(`which ${c}`, { stdio: 'ignore' }); return true; }
@@ -26,6 +25,22 @@ function fail(msg: string) { console.log(chalk.red('  ✗ ') + msg); }
 function hint(msg: string) { console.log(chalk.dim('    ' + msg)); }
 function step(n: number, label: string) {
   console.log('\n' + chalk.bold.white(`Step ${n}/5 — ${label}`));
+}
+
+// Poll GET /api/init/verify-token every 2s until Notion delivers the verification token.
+async function pollForVerificationToken(timeoutMs = 5 * 60 * 1000): Promise<string | null> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    try {
+      const res = await fetch('http://localhost:3001/api/init/verify-token');
+      if (res.ok) {
+        const data = await res.json() as { token: string | null };
+        if (data.token) return data.token;
+      }
+    } catch { /* engine not ready yet — keep polling */ }
+    await new Promise(r => setTimeout(r, 2000));
+  }
+  return null;
 }
 
 export async function runInit(): Promise<void> {
@@ -78,6 +93,9 @@ export async function runInit(): Promise<void> {
     console.log(chalk.dim('  Notion needs a public HTTPS URL to deliver webhooks.'));
     console.log(chalk.dim('  Set NORC_PUBLIC_URL in your .env file before starting Docker.\n'));
 
+    const rl2 = createInterface({ input, output });
+    const ask2 = (q: string) => rl2.question(chalk.cyan('? ') + q + ' ');
+
     const publicUrl = process.env.NORC_PUBLIC_URL;
     if (!publicUrl) {
       warn('NORC_PUBLIC_URL is not set in .env.');
@@ -85,7 +103,7 @@ export async function runInit(): Promise<void> {
       hint('Examples:');
       hint('  Cloudflare Tunnel: cloudflared tunnel --url http://localhost:3001');
       hint('  ngrok:             ngrok http 3001');
-      const manual = await ask('Or enter your public URL now (leave empty to skip):');
+      const manual = await ask2('Or enter your public URL now (leave empty to skip):');
       if (manual.startsWith('http')) {
         process.env.NORC_PUBLIC_URL = manual;
         ok('URL set for this session (add it to .env to persist)');
@@ -96,50 +114,47 @@ export async function runInit(): Promise<void> {
       ok('Public URL: ' + publicUrl);
     }
 
+    rl2.close();
     await markStepComplete(2);
   } else {
     ok('Step 2 complete (network)');
   }
 
-  // ── Step 3: Notion ───────────────────────────────────────────────────────
+  // ── Step 3: Notion API key + Databases ──────────────────────────────────
+  // Webhook registration happens in Step 5 (after Docker starts in Step 4).
   if (!await isStepComplete(3)) {
     step(3, 'Notion');
 
-    // 3a — API key
+    const rl3 = createInterface({ input, output });
+    const ask3 = (q: string) => rl3.question(chalk.cyan('? ') + q + ' ');
+
     console.log(chalk.dim('\n  3a. Create a Notion integration'));
     console.log(chalk.dim('  Opening notion.so/my-integrations...'));
     try { execSync('open https://www.notion.so/my-integrations', { stdio: 'ignore' }); }
     catch { hint('Open https://www.notion.so/my-integrations'); }
     hint('Click "New integration" → give it a name → copy the secret.');
 
-    const apiKey = await ask('\n  Paste your Notion API key (secret_... or ntn_...):');
+    const apiKey = await ask3('\n  Paste your Notion API key (secret_... or ntn_...):');
     if (!apiKey.startsWith('secret_') && !apiKey.startsWith('ntn_')) {
       fail('Key should start with secret_ or ntn_. Try again.');
-      rl.close();
+      rl3.close();
       return;
     }
 
-    // 3b — Generate webhook secret (NORC-owned)
-    const webhookSecret = generateWebhookSecret();
-    console.log('\n  ' + chalk.bold('Your NORC webhook secret (generated):'));
-    console.log('  ' + chalk.cyan(webhookSecret));
-    console.log(chalk.dim('  You will enter this in Notion when registering the webhook (step 5).'));
-    console.log(chalk.dim('  NORC stores it automatically — you never need to add it to .env.\n'));
-
-    // 3c — Parent page for databases
-    console.log(chalk.dim('  3b. Share a Notion page with your integration'));
+    console.log(chalk.dim('\n  3b. Share a Notion page with your integration'));
     hint('In Notion: open any page → ··· → Connections → add your integration');
     hint('Then copy that page\'s URL');
-    const parentUrl = await ask('\n  Paste the URL of the shared page:');
+    const parentUrl = await ask3('\n  Paste the URL of the shared page:');
     const pageIdMatch = parentUrl.match(/([a-f0-9]{32})/i) ?? parentUrl.match(/([a-f0-9-]{36})/i);
     if (!pageIdMatch) {
       fail('Could not extract a page ID from that URL.');
-      rl.close();
+      rl3.close();
       return;
     }
     const parentPageId = pageIdMatch[1].replace(/-/g, '');
 
-    // 3d — Create all 4 databases
+    rl3.close();
+
     const spinner = ora('Creating NORC databases in your Notion workspace...').start();
     try {
       const dbs = await createNorcDatabases(apiKey, parentPageId);
@@ -149,24 +164,9 @@ export async function runInit(): Promise<void> {
       ok('Projects');
       ok('Pipeline Config');
 
-      // Attempt auto-register webhook
-      const publicUrl = process.env.NORC_PUBLIC_URL;
-      let webhookRegistered = false;
-      if (publicUrl) {
-        const webhookSpinner = ora('Registering Notion webhook...').start();
-        const webhookId = await registerWebhook(apiKey, dbs.tasksDbId, publicUrl, webhookSecret);
-        if (webhookId) {
-          webhookSpinner.succeed('Webhook registered automatically');
-          webhookRegistered = true;
-        } else {
-          webhookSpinner.warn('Auto-registration failed — you will register manually (step 5)');
-        }
-      }
-
-      // Save everything to config.json — no env vars needed by the user
+      // Save API key + DB IDs now. Webhook secret is saved in Step 5 after Docker is running.
       await writeConfig({
         notionApiKey: apiKey,
-        notionWebhookSecret: webhookSecret,
         notionOrgDbId: dbs.orgDbId,
         notionTasksDbId: dbs.tasksDbId,
         notionProjectsDbId: dbs.projectsDbId,
@@ -174,20 +174,10 @@ export async function runInit(): Promise<void> {
         notionParentPageId: parentPageId,
       });
 
-      if (!webhookRegistered) {
-        console.log('\n  ' + chalk.bold('Manual webhook setup required:'));
-        hint('Go to notion.so/my-integrations → your integration → Webhooks');
-        hint('URL:    ' + (publicUrl ?? 'NORC_PUBLIC_URL') + '/webhooks/notion');
-        hint('Secret: ' + webhookSecret);
-        hint('Events: page updated, comment created');
-        hint('Scope:  Tasks database');
-      }
-
       await markStepComplete(3);
     } catch (err: any) {
       spinner.fail('Failed: ' + err.message);
       hint('Check that you shared the page with your integration and the API key is correct.');
-      rl.close();
       return;
     }
   } else {
@@ -200,14 +190,14 @@ export async function runInit(): Promise<void> {
 
     const spinner = ora('Starting Docker services (Redis + engine + dashboard)...').start();
     try {
-      execSync('docker compose up -d', { stdio: 'inherit' });
+      // Use ['ignore', 'inherit', 'inherit'] — NOT 'inherit'.
+      // Passing stdin to Docker corrupts the readline state in subsequent steps.
+      execSync('docker compose up -d', { stdio: ['ignore', 'inherit', 'inherit'] });
       spinner.succeed('Services started');
 
-      // Wait briefly for the engine to boot
       await new Promise(r => setTimeout(r, 3000));
-      const { execSync: ex } = await import('child_process');
       try {
-        ex('curl -sf http://localhost:3001/health > /dev/null');
+        execSync('curl -sf http://localhost:3001/health', { stdio: 'ignore' });
         ok('Engine health check passed');
         await markStepComplete(4);
       } catch {
@@ -221,13 +211,69 @@ export async function runInit(): Promise<void> {
     ok('Step 4 complete (stack running)');
   }
 
-  // ── Step 5: First agent ──────────────────────────────────────────────────
+  // ── Step 5: Webhook verification + First agent ───────────────────────────
+  // Resuming at Step 5 is safe:
+  //   - Webhook verification: user clicks "Verify" again in Notion (idempotent)
+  //   - Agent registration: appendAgent() overwrites by name (idempotent)
   if (!await isStepComplete(5)) {
-    step(5, 'Register your first agent');
+    step(5, 'Connect Notion webhooks + Register your first agent');
 
-    const name     = await ask('Agent name (e.g. claude-code):');
-    const tech     = await ask('Technology (Claude Code / Codex / Cursor / OpenClaw):');
-    const authEnv  = await ask('API key env var (e.g. ANTHROPIC_API_KEY):');
+    const config = await readConfig();
+    const publicUrl = process.env.NORC_PUBLIC_URL ?? config.notionParentPageId ?? 'YOUR_PUBLIC_URL';
+
+    // ── 5a: Webhook verification ─────────────────────────────────────────
+    console.log('\n  ' + chalk.bold('5a. Set up the Notion webhook'));
+    console.log(chalk.dim('  The NORC engine is running and ready to receive Notion\'s verification ping.\n'));
+
+    hint('1. Go to: notion.so/my-integrations → your integration → Webhooks tab');
+    hint('2. Click "Add webhook"');
+    hint('3. Enter this URL:');
+    console.log('     ' + chalk.cyan(`${process.env.NORC_PUBLIC_URL ?? publicUrl}/webhooks/notion`));
+    hint('4. Click "Verify" — Notion will POST a verification token to NORC');
+    console.log();
+
+    const verifySpinner = ora('Waiting for Notion to send the verification token (up to 5 min)...').start();
+    const token = await pollForVerificationToken(5 * 60 * 1000);
+
+    if (!token) {
+      verifySpinner.fail('Timed out waiting for Notion verification token.');
+      hint('Make sure the URL is correct and reachable from the internet (`curl ' + (process.env.NORC_PUBLIC_URL ?? '') + '/health`).');
+      hint('Re-run `norc init` to try again — Docker will still be running.');
+      return;
+    }
+
+    verifySpinner.succeed('Verification token received from Notion!');
+
+    console.log('\n  ' + chalk.bold('Paste this token back into Notion to complete verification:'));
+    console.log('\n  ' + chalk.cyan.bold(token) + '\n');
+    hint('(This is also your webhook signing secret — NORC stores it automatically)');
+
+    await setConfigValue('notionWebhookSecret', token);
+    ok('Webhook secret saved to ~/.norc/config.json');
+
+    // Restart the NORC container so it loads the new webhook secret via loadConfigIntoEnv().
+    // Without this, HMAC validation would fail on the first real Notion event.
+    console.log(chalk.dim('\n  Restarting NORC engine to load webhook secret...'));
+    try {
+      execSync('docker compose restart norc', { stdio: ['ignore', 'inherit', 'inherit'] });
+      ok('NORC engine restarted');
+    } catch {
+      warn('Could not restart automatically — run `docker compose restart norc` manually');
+    }
+
+    // ── 5b: First agent ─────────────────────────────────────────────────
+    // Create readline AFTER all execSync calls — stdin is clean at this point.
+    const rl5 = createInterface({ input, output });
+    const ask5 = (q: string) => rl5.question(chalk.cyan('? ') + q + ' ');
+
+    console.log('\n  ' + chalk.bold('5b. Confirm token + Register your first agent'));
+    await ask5('Press Enter once you have pasted the token into Notion and clicked Save:');
+
+    const name    = await ask5('Agent name (e.g. claude-code):');
+    const tech    = await ask5('Technology (Claude Code / Codex / Cursor / OpenClaw):');
+    const authEnv = await ask5('API key env var (e.g. ANTHROPIC_API_KEY):');
+
+    rl5.close();
 
     const { addAgent } = await import('./agent.js');
     await addAgent(name, tech, authEnv);
@@ -238,7 +284,7 @@ export async function runInit(): Promise<void> {
 
     await markStepComplete(5);
   } else {
-    ok('Step 5 complete (first agent registered)');
+    ok('Step 5 complete (webhook connected + first agent registered)');
   }
 
   // ── Done ─────────────────────────────────────────────────────────────────
@@ -249,5 +295,4 @@ export async function runInit(): Promise<void> {
   console.log(chalk.dim('  Status:    ') + chalk.cyan('norc status\n'));
 
   try { execSync('open http://localhost:3000', { stdio: 'ignore' }); } catch {}
-  rl.close();
 }

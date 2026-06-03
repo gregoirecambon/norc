@@ -1,6 +1,10 @@
 import 'dotenv/config';
 import express from 'express';
-import { handleNotionWebhook } from './triggers/webhook.js';
+import {
+  handleNotionWebhook,
+  getPendingVerificationToken,
+  clearPendingVerificationToken,
+} from './triggers/webhook.js';
 import { resolveCallback } from './queue/dispatcher.js';
 import { detectStaleRuns } from './startup/stale-run-detector.js';
 import { writeCheckpoint, appendComment } from './notion/client.js';
@@ -10,6 +14,17 @@ app.use(express.json());
 
 // Notion webhook ingestion (public endpoint)
 app.post('/webhooks/notion', handleNotionWebhook);
+
+// Webhook verification token polling — norc init calls this while waiting for Notion's ping
+app.get('/api/init/verify-token', (_req, res) => {
+  const token = getPendingVerificationToken();
+  if (token) {
+    clearPendingVerificationToken();
+    res.json({ token });
+  } else {
+    res.json({ token: null });
+  }
+});
 
 // Agent callback (public endpoint)
 app.post('/api/callback/:token', async (req, res) => {
