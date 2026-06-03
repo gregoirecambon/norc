@@ -201,13 +201,21 @@ export async function runInit(): Promise<void> {
       execSync('docker compose up -d', { stdio: ['ignore', 'inherit', 'inherit'] });
       spinner.succeed('Services started');
 
-      await new Promise(r => setTimeout(r, 3000));
-      try {
-        execSync('curl -sf http://localhost:3001/health', { stdio: 'ignore' });
+      // Poll up to 30 s — the engine can take a moment to start after Redis is healthy
+      let engineReady = false;
+      for (let i = 0; i < 10; i++) {
+        await new Promise(r => setTimeout(r, 3000));
+        try {
+          execSync('curl -sf http://localhost:3001/health', { stdio: 'ignore' });
+          engineReady = true;
+          break;
+        } catch { /* keep waiting */ }
+      }
+      if (engineReady) {
         ok('Engine health check passed');
         await markStepComplete(4);
-      } catch {
-        warn('Engine not responding yet — check `docker compose logs norc`');
+      } else {
+        warn('Engine not responding after 30 s — check `docker compose logs norc`');
       }
     } catch (err: any) {
       spinner.fail(err.message);
