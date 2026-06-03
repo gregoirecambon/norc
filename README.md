@@ -6,12 +6,17 @@ Mention `@Claude Code Agent` anywhere in Notion. NORC assembles context from the
 
 ## VPS Setup (fresh Ubuntu 22.04+)
 
-### 1. Install Docker
+### 1. Install Docker and Node.js
 
 ```bash
+# Docker
 curl -fsSL https://get.docker.com | sh
 sudo usermod -aG docker $USER
 newgrp docker
+
+# Node.js 22 (needed for the norc CLI)
+curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+sudo apt-get install -y nodejs
 ```
 
 ### 2. Clone NORC
@@ -61,7 +66,7 @@ docker compose up -d
 ### 5. Run the setup wizard
 
 ```bash
-npm install -g .
+sudo npm install -g .
 norc init
 ```
 
