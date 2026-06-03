@@ -66,6 +66,8 @@ docker compose up -d
 ### 5. Run the setup wizard
 
 ```bash
+npm install      # install deps (includes TypeScript compiler)
+npm run build    # compile TypeScript → dist/
 sudo npm install -g .
 norc init
 ```
