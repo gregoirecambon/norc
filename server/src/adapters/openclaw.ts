@@ -2,6 +2,14 @@ import { WebSocket } from 'ws';
 import { randomUUID, generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
 import type { PingResult } from '../types.js';
 
+// OpenClaw wire-protocol negotiation range advertised on connect.
+// The gateway accepts a client when maxProtocol >= its version && minProtocol <= its version.
+// Advertising [3, 4] supports both older v3 gateways and current v4 gateways
+// (OpenClaw 2026.5.x bumped PROTOCOL_VERSION 3 → 4). The device-auth signature
+// payload is unchanged — the gateway still verifies the "v3" canonical format.
+const MIN_PROTOCOL = 3;
+const MAX_PROTOCOL = 4;
+
 function rawDataToString(data: unknown): string {
   if (typeof data === 'string') return data;
   if (Buffer.isBuffer(data)) return data.toString('utf8');
@@ -53,8 +61,8 @@ async function probeGateway(url: string, authToken: string | null, timeoutMs = 3
           id: randomUUID(),
           method: 'connect',
           params: {
-            minProtocol: 3,
-            maxProtocol: 3,
+            minProtocol: MIN_PROTOCOL,
+            maxProtocol: MAX_PROTOCOL,
             client: { id: 'openclaw-probe', version: '0.1.0', platform: process.platform, mode: 'probe' },
             role: 'operator',
             scopes: ['operator.admin'],
@@ -172,8 +180,8 @@ async function connectWithDeviceIdentity(
           id: randomUUID(),
           method: 'connect',
           params: {
-            minProtocol: 3,
-            maxProtocol: 3,
+            minProtocol: MIN_PROTOCOL,
+            maxProtocol: MAX_PROTOCOL,
             client: { id: clientId, version: '0.1.0', platform: process.platform, mode: clientMode },
             role,
             scopes,

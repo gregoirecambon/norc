@@ -1,43 +1,29 @@
 services:
-  redis:
-    image: redis:7-alpine
-    command: redis-server --appendonly yes
-    ports:
-      - "6379:6379"
-    volumes:
-      - redis-data:/data
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 3s
-      retries: 5
-
-  norc:
-    build: .
-    env_file: .env
-    ports:
-      - "${PORT:-3001}:${PORT:-3001}"
-    depends_on:
-      redis:
-        condition: service_healthy
-    restart: unless-stopped
-    volumes:
-      - ~/.norc:/root/.norc:rw
-    environment:
-      REDIS_URL: redis://redis:6379
-
-  dashboard:
+  server:
     build:
-      context: ./dashboard
-      dockerfile: Dockerfile
+      context: ./server
+    env_file:
+      - path: .env
+        required: false
     ports:
-      - "3000:3000"
+      - "${PORT:-3001}:3001"
+    volumes:
+      - norc-data:/data
+    environment:
+      PORT: 3001
+      DATABASE_PATH: /data/norc.db
+    restart: unless-stopped
+
+  ui:
+    build:
+      context: ./ui
+    ports:
+      - "3000:80"
     depends_on:
-      - norc
+      - server
     restart: unless-stopped
     environment:
-      NORC_API_URL: http://norc:${PORT:-3001}
+      NEXUS_API_URL: http://server:3001
 
 volumes:
-  redis-data:
+  norc-data:

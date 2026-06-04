@@ -4,10 +4,11 @@ import type { AgentRow } from '../api/agents.js';
 
 interface Props {
   agents: AgentRow[];
+  embedded?: boolean;
 }
 
-export function PlatformsPanel({ agents }: Props) {
-  const [open, setOpen] = useState(false);
+export function PlatformsPanel({ agents, embedded }: Props) {
+  const [open, setOpen] = useState(!!embedded);
   const [platforms, setPlatforms] = useState<Platform[]>([]);
   const [loading, setLoading] = useState(true);
   const [showForm, setShowForm] = useState(false);

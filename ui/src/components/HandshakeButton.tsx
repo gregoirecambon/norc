@@ -75,7 +75,7 @@ export function HandshakeButton({ agent, onResult }: Props) {
   const color =
     state === 'ok' ? 'var(--accent-green)'
     : state === 'error' ? 'var(--accent-red)'
-    : state === 'waiting' ? 'var(--accent-yellow, #f0a)'
+    : state === 'waiting' ? 'var(--accent-amber)'
     : 'var(--text-dim)';
 
   const label =
@@ -90,15 +90,17 @@ export function HandshakeButton({ agent, onResult }: Props) {
       disabled={state === 'sending' || state === 'waiting'}
       onClick={handleClick}
       style={{
-        fontSize: 11,
-        padding: '3px 8px',
-        borderRadius: 4,
+        fontSize: 12,
+        padding: '4px 10px',
+        borderRadius: 'var(--radius-sm)',
         border: '1px solid var(--border)',
-        background: 'var(--surface2)',
+        background: state === 'ok' ? 'var(--tint-mint)' : state === 'error' ? '#fde8e8' : 'var(--surface2)',
         color,
         cursor: (state === 'sending' || state === 'waiting') ? 'default' : 'pointer',
         opacity: (state === 'sending' || state === 'waiting') ? 0.7 : 1,
         whiteSpace: 'nowrap',
+        fontFamily: 'var(--font-sans)',
+        transition: 'all 120ms',
       }}
     >
       {label}

@@ -12,9 +12,26 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { generateWsKeypair, initiateWsPairing } from '../adapters/openclaw.js';
+import { getOrgContext, upsertAgentPage, archiveAgentPage } from '../lib/notion-orgdb.js';
 import type { AdapterType } from '../types.js';
 
 const router: ExpressRouter = Router();
+
+/**
+ * Push an agent to the Notion Org DB if the workspace is provisioned.
+ * Best-effort: never throws, never blocks the caller.
+ */
+async function syncAgentBestEffort(agent: { id: string; name: string; adapterType: string; status: string; orgDbPageId: string | null }): Promise<void> {
+  const ctx = getOrgContext();
+  if (!ctx) return;
+  try {
+    const { pageId } = await upsertAgentPage(ctx.apiKey, ctx.orgDbId, agent, agent.orgDbPageId ?? undefined);
+    db.update(agents).set({ orgDbPageId: pageId }).where(eq(agents.id, agent.id)).run();
+    emitEvent({ type: 'agent.updated', data: { id: agent.id, orgDbPageId: pageId } });
+  } catch (err) {
+    emitLog(`agent ${agent.name} Notion sync failed: ${err instanceof Error ? err.message : 'unknown error'}`);
+  }
+}
 
 const SKILL_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -51,6 +68,7 @@ router.get('/', (_req, res) => {
     lastLatencyMs: r.lastLatencyMs ?? null,
     registeredAt: r.registeredAt,
     metadata: parseJson(r.metadata),
+    orgDbPageId: r.orgDbPageId ?? null,
   })));
 });
 
@@ -71,11 +89,58 @@ router.get('/invite', async (_req, res) => {
   res.json({ token, norcUrl, prompt });
 });
 
-const RegisterSchema = z.object({
+const ADAPTER_TYPES = ['openclaw', 'claude-api', 'http', 'claude-local', 'codex-local'] as const;
+
+const AgentBodySchema = z.object({
   name: z.string().regex(/^[a-z0-9][a-z0-9_-]*$/, 'lowercase letters, digits, hyphens, underscores only'),
-  adapterType: z.enum(['openclaw', 'claude-api', 'http']),
+  adapterType: z.enum(ADAPTER_TYPES),
   adapterConfig: z.record(z.unknown()).default({}),
   metadata: z.record(z.unknown()).default({}),
+});
+
+const RegisterSchema = AgentBodySchema;
+
+// POST /api/agents/create — dashboard manual creation (no external token required)
+router.post('/create', zodMiddleware(AgentBodySchema), (req, res) => {
+  const { name, adapterType, metadata } = req.body as z.infer<typeof AgentBodySchema>;
+  let { adapterConfig } = req.body as z.infer<typeof AgentBodySchema>;
+
+  const existing = db.select().from(agents).where(eq(agents.name, name)).all();
+  if (existing.length > 0) {
+    res.status(409).json({ error: 'name_taken', message: `Agent "${name}" is already registered` });
+    return;
+  }
+
+  let generatedAuthToken: string | undefined;
+  if (adapterType === 'openclaw' && !adapterConfig['authToken']) {
+    generatedAuthToken = randomBytes(24).toString('hex');
+    adapterConfig = { ...adapterConfig, authToken: generatedAuthToken };
+  }
+
+  const id = randomUUID();
+  const agentSecret = randomBytes(32).toString('hex');
+  const now = Date.now();
+  db.insert(agents).values({
+    id, name,
+    adapterType: adapterType as AdapterType,
+    adapterConfig: JSON.stringify(adapterConfig),
+    agentSecret,
+    status: 'untested',
+    registeredAt: now,
+    metadata: JSON.stringify(metadata),
+  }).run();
+
+  const agentRow = {
+    id, name, adapterType,
+    adapterConfig: redactConfig(JSON.stringify(adapterConfig)),
+    status: 'untested' as const,
+    lastPingedAt: null, lastLatencyMs: null, registeredAt: now, metadata,
+    orgDbPageId: null,
+  };
+  emitLog(`agent ${name} created via dashboard (adapter: ${adapterType})`);
+  emitEvent({ type: 'agent.registered', data: agentRow });
+  void syncAgentBestEffort({ id, name, adapterType, status: 'untested', orgDbPageId: null });
+  res.status(201).json({ ...agentRow, ...(generatedAuthToken ? { authToken: generatedAuthToken } : {}) });
 });
 
 // POST /api/agents/register
@@ -134,9 +199,11 @@ router.post('/register', zodMiddleware(RegisterSchema), (req, res) => {
     lastLatencyMs: null,
     registeredAt: now,
     metadata,
+    orgDbPageId: null,
   };
   emitLog(`agent ${name} registered (adapter: ${adapterType})`);
   emitEvent({ type: 'agent.registered', data: agentRow });
+  void syncAgentBestEffort({ id, name, adapterType, status: 'untested', orgDbPageId: null });
   res.status(201).json({
     registered: true,
     agentId: id,
@@ -235,11 +302,39 @@ router.post('/:id/ws-pair/verify', async (req, res) => {
   res.json({ status: result.status, ...(result.status === 'failed' ? { error: result.error } : {}) });
 });
 
-// DELETE /api/agents/:id
-router.delete('/:id', (req, res) => {
+// POST /api/agents/:id/sync-notion — manual (re)sync to the Org DB
+router.post('/:id/sync-notion', async (req, res) => {
   const { id } = req.params;
   const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
   if (!row) { res.status(404).json({ error: 'not_found' }); return; }
+
+  const ctx = getOrgContext();
+  if (!ctx) {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the Notion workspace first.' });
+    return;
+  }
+
+  try {
+    const { pageId, url } = await upsertAgentPage(ctx.apiKey, ctx.orgDbId, row, row.orgDbPageId ?? undefined);
+    db.update(agents).set({ orgDbPageId: pageId }).where(eq(agents.id, id)).run();
+    emitLog(`agent ${row.name} synced to Notion Org DB`);
+    emitEvent({ type: 'agent.updated', data: { id, orgDbPageId: pageId } });
+    res.json({ orgDbPageId: pageId, url });
+  } catch (err) {
+    res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
+  }
+});
+
+// DELETE /api/agents/:id
+router.delete('/:id', async (req, res) => {
+  const { id } = req.params;
+  const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
+  if (!row) { res.status(404).json({ error: 'not_found' }); return; }
+
+  if (row.orgDbPageId) {
+    const ctx = getOrgContext();
+    if (ctx) await archiveAgentPage(ctx.apiKey, row.orgDbPageId);
+  }
 
   db.delete(agents).where(eq(agents.id, id)).run();
   emitLog(`agent ${row.name} deleted`);

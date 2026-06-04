@@ -1,15 +1,24 @@
-import Agents from './pages/Agents.js';
+import { useState } from 'react';
+import Sidebar from './components/Sidebar.js';
+import AgentsPage from './pages/Agents.js';
+import LogsPage from './pages/Logs.js';
+import SettingsPage from './pages/Settings.js';
+import NotionPage from './pages/Notion.js';
+
+export type Page = 'agents' | 'logs' | 'settings' | 'notion';
 
 export default function App() {
+  const [page, setPage] = useState<Page>('agents');
+
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', minHeight: '100vh', background: 'var(--bg)', color: 'var(--text-primary)' }}>
-      <header style={{ padding: '0 20px', height: 44, display: 'flex', alignItems: 'center', borderBottom: '1px solid var(--border)', background: 'var(--surface1)', flexShrink: 0 }}>
-        <span style={{ fontWeight: 700, fontSize: 14, letterSpacing: 1, color: 'var(--text-primary)' }}>norc</span>
-        <span style={{ marginLeft: 'auto', fontSize: 11, color: 'var(--text-dim)' }}>v0.1</span>
-      </header>
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'auto' }}>
-        <Agents />
-      </div>
+    <div style={{ display: 'flex', height: '100vh', overflow: 'hidden' }}>
+      <Sidebar currentPage={page} onNavigate={setPage} />
+      <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--surface2)' }}>
+        {page === 'agents'   && <AgentsPage />}
+        {page === 'logs'     && <LogsPage />}
+        {page === 'settings' && <SettingsPage />}
+        {page === 'notion'   && <NotionPage />}
+      </main>
     </div>
   );
 }

@@ -1,14 +1,54 @@
 import { useState } from 'react';
 import { StatusBadge } from './StatusBadge.js';
 import { HandshakeButton } from './HandshakeButton.js';
-import { deleteAgent, updateAgentConfig, initiateWsPairing, verifyWsPairing, type AgentRow } from '../api/agents.js';
+import { deleteAgent, updateAgentConfig, initiateWsPairing, verifyWsPairing, syncAgentToNotion, type AgentRow } from '../api/agents.js';
 
 interface Props {
   agents: AgentRow[];
   loading: boolean;
+  provisioned: boolean;
   onPingResult: (id: string, status: 'connected' | 'unreachable', latencyMs: number) => void;
   onDeleted: (id: string) => void;
   onConfigUpdated: (id: string, adapterConfig: Record<string, unknown>) => void;
+  onSynced: (id: string, orgDbPageId: string) => void;
+}
+
+function NotionSyncCell({ agent, provisioned, onSynced }: { agent: AgentRow; provisioned: boolean; onSynced: (id: string, orgDbPageId: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const synced = !!agent.orgDbPageId;
+
+  const handleSync = async () => {
+    setBusy(true); setError('');
+    try {
+      const { orgDbPageId } = await syncAgentToNotion(agent.id);
+      onSynced(agent.id, orgDbPageId);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Sync failed');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+      {synced && <span style={{ fontSize: 11, color: 'var(--accent-green, #3c9)' }} title="Page exists in the Notion Org DB">✓ Synced</span>}
+      <button
+        onClick={handleSync}
+        disabled={busy || !provisioned}
+        title={provisioned ? (synced ? 'Update this agent\'s Org DB page' : 'Create this agent\'s Org DB page') : 'Provision the Notion workspace first'}
+        style={{
+          fontSize: 11, padding: '2px 8px', borderRadius: 4,
+          border: '1px solid var(--border)', background: 'var(--surface2)',
+          color: 'var(--text-secondary)', cursor: (busy || !provisioned) ? 'default' : 'pointer',
+          opacity: provisioned ? 1 : 0.5,
+        }}
+      >
+        {busy ? 'Syncing…' : synced ? 'Re-sync' : 'Sync'}
+      </button>
+      {error && <span style={{ fontSize: 10, color: '#e05' }} title={error}>!</span>}
+    </div>
+  );
 }
 
 function timeAgo(epochMs: number | null): string {
@@ -24,6 +64,8 @@ const ADAPTER_LABEL: Record<string, string> = {
   'openclaw': 'OpenClaw',
   'claude-api': 'Claude API',
   'http': 'HTTP',
+  'claude-local': 'Claude Code',
+  'codex-local': 'Codex',
 };
 
 function ConfigDetail({ config }: { config: Record<string, unknown> }) {
@@ -55,6 +97,17 @@ const ADAPTER_FIELDS: Record<string, [string, string, boolean, string][]> = {
   ],
   http: [
     ['url', 'Endpoint URL', false, 'text'],
+  ],
+  'claude-local': [
+    ['cwd', 'Working Directory', false, 'text'],
+    ['model', 'Model', false, 'text'],
+    ['effort', 'Effort', false, 'text'],
+    ['command', 'Command', false, 'text'],
+  ],
+  'codex-local': [
+    ['cwd', 'Working Directory', false, 'text'],
+    ['model', 'Model', false, 'text'],
+    ['command', 'Command', false, 'text'],
   ],
 };
 
@@ -205,7 +258,7 @@ function WsPairingPanel({ agent, onUpdated }: { agent: AgentRow; onUpdated: (con
   );
 }
 
-export function AgentTable({ agents, loading, onPingResult, onDeleted, onConfigUpdated }: Props) {
+export function AgentTable({ agents, loading, provisioned, onPingResult, onDeleted, onConfigUpdated, onSynced }: Props) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [editing, setEditing] = useState<Set<string>>(new Set());
 
@@ -251,16 +304,17 @@ export function AgentTable({ agents, loading, onPingResult, onDeleted, onConfigU
           <th style={{ padding: '6px 12px', textAlign: 'left' }}>Latency</th>
           <th style={{ padding: '6px 12px', textAlign: 'left' }}>Last Tested</th>
           <th style={{ padding: '6px 12px', textAlign: 'left' }}>Connection</th>
+          <th style={{ padding: '6px 12px', textAlign: 'left' }}>Notion</th>
           <th style={{ padding: '6px 12px', textAlign: 'left' }}></th>
         </tr>
       </thead>
       <tbody>
         {loading
           ? Array.from({ length: 2 }, (_, i) => (
-              <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)' }}>
-                {Array.from({ length: 8 }, (_, j) => (
+              <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                {Array.from({ length: 9 }, (_, j) => (
                   <td key={j} style={{ padding: '10px 12px' }}>
-                    {j > 0 && <div style={{ height: 11, background: 'var(--surface2)', borderRadius: 3, width: j === 1 ? 90 : 50 }} />}
+                    {j > 0 && <div style={{ height: 11, background: 'var(--surface1)', borderRadius: 3, width: j === 1 ? 90 : 50 }} />}
                   </td>
                 ))}
               </tr>
@@ -270,7 +324,7 @@ export function AgentTable({ agents, loading, onPingResult, onDeleted, onConfigU
               const rows = [
                 <tr
                   key={a.id}
-                  style={{ borderBottom: isExpanded ? 'none' : '1px solid rgba(255,255,255,0.03)', cursor: 'pointer' }}
+                  style={{ borderBottom: isExpanded ? 'none' : '1px solid var(--border)', cursor: 'pointer' }}
                   onClick={() => toggleExpand(a.id)}
                 >
                   <td style={{ padding: '9px 8px', color: 'var(--text-dim)', fontSize: 10, userSelect: 'none' }}>
@@ -285,6 +339,9 @@ export function AgentTable({ agents, loading, onPingResult, onDeleted, onConfigU
                   <td style={{ padding: '9px 12px', color: 'var(--text-dim)' }}>{timeAgo(a.lastPingedAt)}</td>
                   <td style={{ padding: '9px 12px' }} onClick={e => e.stopPropagation()}>
                     <HandshakeButton agent={a} onResult={onPingResult} />
+                  </td>
+                  <td style={{ padding: '9px 12px' }} onClick={e => e.stopPropagation()}>
+                    <NotionSyncCell agent={a} provisioned={provisioned} onSynced={onSynced} />
                   </td>
                   <td style={{ padding: '9px 12px' }} onClick={e => e.stopPropagation()}>
                     <button
@@ -305,9 +362,9 @@ export function AgentTable({ agents, loading, onPingResult, onDeleted, onConfigU
               if (isExpanded) {
                 const isEditing = editing.has(a.id);
                 rows.push(
-                  <tr key={`${a.id}-config`} style={{ borderBottom: '1px solid rgba(255,255,255,0.03)', background: 'var(--surface1)' }}>
+                  <tr key={`${a.id}-config`} style={{ borderBottom: '1px solid var(--border)', background: 'var(--surface1)' }}>
                     <td />
-                    <td colSpan={7} style={{ padding: '8px 12px 12px' }}>
+                    <td colSpan={8} style={{ padding: '8px 12px 12px' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
                         <span style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
                           Adapter Config

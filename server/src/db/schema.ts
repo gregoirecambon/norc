@@ -11,6 +11,7 @@ export const agents = sqliteTable('agents', {
   lastLatencyMs: integer('last_latency_ms'),
   registeredAt: integer('registered_at').notNull(),
   metadata: text('metadata').notNull().default('{}'),
+  orgDbPageId: text('org_db_page_id'),
 });
 
 export const registrationTokens = sqliteTable('registration_tokens', {
@@ -54,4 +55,26 @@ export const handshakes = sqliteTable('handshakes', {
   completedAt: integer('completed_at'),
   latencyMs: integer('latency_ms'),
   error: text('error'),
+});
+
+export const notionIntegration = sqliteTable('notion_integration', {
+  id:                 text('id').primaryKey(),
+  apiKey:             text('api_key').notNull(),
+  workspaceName:      text('workspace_name'),
+  botName:            text('bot_name'),
+  webhookVerifyToken: text('webhook_verify_token'),
+  status:             text('status').notNull().default('pending_key'),
+  parentPageId:       text('parent_page_id'),
+  workspaceStatus:    text('workspace_status').notNull().default('not_provisioned'),
+  createdAt:          integer('created_at').notNull(),
+  updatedAt:          integer('updated_at').notNull(),
+});
+
+export const notionDatabases = sqliteTable('notion_databases', {
+  id:               text('id').primaryKey(),
+  kind:             text('kind').notNull(),       // 'org' | 'tasks' | 'projects' | 'pipeline'
+  notionDatabaseId: text('notion_database_id').notNull(),
+  title:            text('title').notNull(),
+  url:              text('url'),
+  createdAt:        integer('created_at').notNull(),
 });

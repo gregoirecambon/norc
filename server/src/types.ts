@@ -1,4 +1,4 @@
-export type AdapterType = 'openclaw' | 'claude-api' | 'http';
+export type AdapterType = 'openclaw' | 'claude-api' | 'http' | 'claude-local' | 'codex-local';
 export type AgentStatus = 'connected' | 'unreachable' | 'untested';
 
 export interface Agent {

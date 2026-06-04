@@ -1,37 +1,79 @@
+/* NORC Design System — Notion-inspired light theme */
 :root {
-  --bg: #0d0d0f;
-  --surface1: #141416;
-  --surface2: #1c1c1f;
-  --surface3: #242428;
-  --border: rgba(255, 255, 255, 0.07);
-  --text-primary: #e8e8ec;
-  --text-secondary: #9090a0;
-  --text-dim: #555560;
-  --accent-green: #34d399;
-  --accent-red: #f87171;
-  --accent-amber: #fbbf24;
-  --accent-blue: #60a5fa;
+  /* Core surfaces */
+  --bg:       #f6f5f4;
+  --surface1: #f0eeec;
+  --surface2: #ffffff;
+  --surface3: #fafaf9;
+
+  /* Borders */
+  --border:        #e5e3df;
+  --border-strong: #c8c4be;
+
+  /* Text */
+  --text-primary:   #37352f;
+  --text-secondary: #5d5b54;
+  --text-dim:       #787671;
+
+  /* Brand */
+  --primary:    #5645d4;
+  --primary-hv: #4534b3;
+  --on-primary: #ffffff;
+
+  /* Semantic */
+  --accent-green: #1aae39;
+  --accent-red:   #e03131;
+  --accent-amber: #dd5b00;
+  --accent-blue:  #0075de;
+
+  /* Tints */
+  --tint-lavender:      #e6e0f5;
+  --tint-lavender-text: #391c57;
+  --tint-mint:          #d9f3e1;
+  --tint-mint-text:     #0e6b27;
+  --tint-peach:         #ffe8d4;
+  --tint-peach-text:    #793400;
+  --tint-sky:           #dcecfa;
+  --tint-sky-text:      #0c4a82;
+
+  /* Typography */
+  --font-sans: 'Inter', -apple-system, system-ui, 'Segoe UI', Helvetica, sans-serif;
   --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+
+  /* Shape */
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+
+  /* Depth */
+  --shadow-card: rgba(15, 15, 15, 0.08) 0px 4px 12px 0px;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: 14px;
   line-height: 1.5;
   background: var(--bg);
   color: var(--text-primary);
   -webkit-font-smoothing: antialiased;
 }
 
-button { font-family: inherit; }
+button { font-family: inherit; cursor: pointer; }
 code { font-family: var(--font-mono); font-size: 0.9em; }
 
 textarea, input {
   font-family: inherit;
   color: var(--text-primary);
   background: var(--surface2);
-  border: 1px solid var(--border);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  outline: none;
+}
+
+textarea:focus, input:focus {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(86, 69, 212, 0.12);
 }

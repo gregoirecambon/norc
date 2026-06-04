@@ -12,6 +12,7 @@ export interface AgentRegisteredEvent {
     lastLatencyMs: number | null;
     registeredAt: number;
     metadata: Record<string, unknown>;
+    orgDbPageId: string | null;
   };
 }
 
@@ -22,7 +23,7 @@ export interface AgentDeletedEvent {
 
 export interface AgentUpdatedEvent {
   type: 'agent.updated';
-  data: { id: string; adapterConfig: Record<string, unknown> };
+  data: { id: string; adapterConfig?: Record<string, unknown>; orgDbPageId?: string | null };
 }
 
 export interface HandshakeUpdatedEvent {
@@ -30,7 +31,43 @@ export interface HandshakeUpdatedEvent {
   data: { handshakeId: string; agentId: string; status: string; latencyMs: number | null; error: string | null };
 }
 
-export type NorcEvent = AgentRegisteredEvent | AgentDeletedEvent | AgentUpdatedEvent | HandshakeUpdatedEvent;
+export interface NotionIntegrationUpdatedEvent {
+  type: 'notion.integration.updated';
+  data: {
+    status: string;
+    workspaceName: string | null;
+    botName: string | null;
+    webhookVerifyToken: string | null;
+    webhookUrl: string;
+  };
+}
+
+export interface NotionVerificationReceivedEvent {
+  type: 'notion.verification_received';
+  data: {
+    verificationToken: string;
+    workspaceName: string | null;
+    botName: string | null;
+  };
+}
+
+export interface NotionWorkspaceUpdatedEvent {
+  type: 'notion.workspace.updated';
+  data: {
+    workspaceStatus: string;
+    parentPageId: string | null;
+    databases: { kind: string; notionDatabaseId: string; title: string; url: string | null }[];
+  };
+}
+
+export type NorcEvent =
+  | AgentRegisteredEvent
+  | AgentDeletedEvent
+  | AgentUpdatedEvent
+  | HandshakeUpdatedEvent
+  | NotionIntegrationUpdatedEvent
+  | NotionVerificationReceivedEvent
+  | NotionWorkspaceUpdatedEvent;
 
 const listeners = new Set<(event: NorcEvent) => void>();
 

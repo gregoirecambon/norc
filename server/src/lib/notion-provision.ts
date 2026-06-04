@@ -1,0 +1,167 @@
+// Programmatic provisioning of the NORC workspace databases in Notion.
+// Uses raw fetch against the Notion REST API (no @notionhq/client SDK), matching
+// the pattern in notion-api.ts. Notion-Version pinned to 2022-06-28.
+
+const NOTION_API = 'https://api.notion.com/v1';
+const NOTION_VERSION = '2022-06-28';
+
+export type DbKind = 'org' | 'tasks' | 'projects' | 'pipeline';
+
+export interface ProvisionedDb {
+  kind: DbKind;
+  notionDatabaseId: string;
+  title: string;
+  url: string | null;
+}
+
+function headers(apiKey: string): Record<string, string> {
+  return {
+    'Authorization': `Bearer ${apiKey}`,
+    'Notion-Version': NOTION_VERSION,
+    'Content-Type': 'application/json',
+  };
+}
+
+/**
+ * Extract a Notion page ID from a URL or raw ID and format it as a dashed UUID.
+ * Notion page URLs end with a 32-char hex id (optionally after a slug and dash).
+ */
+export function parsePageId(input: string): string {
+  const match = input.match(/([0-9a-fA-F]{32})/);
+  if (!match) {
+    throw new Error('Could not find a Notion page ID in that input');
+  }
+  const hex = match[1]!.toLowerCase();
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/** Confirm the integration can read the page (i.e. the user shared it). */
+export async function checkPageAccess(apiKey: string, pageId: string): Promise<void> {
+  const res = await fetch(`${NOTION_API}/pages/${pageId}`, { headers: headers(apiKey) });
+  if (res.ok) return;
+
+  if (res.status === 404 || res.status === 403) {
+    throw new Error(
+      "NORC can't access that page. In Notion, open the page → ••• → Connections → add your integration, then try again.",
+    );
+  }
+  const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+  const msg = typeof body['message'] === 'string' ? body['message'] : `Notion returned ${res.status}`;
+  throw new Error(msg);
+}
+
+async function createDatabase(
+  apiKey: string,
+  parentPageId: string,
+  title: string,
+  properties: Record<string, unknown>,
+): Promise<{ id: string; url: string | null }> {
+  const res = await fetch(`${NOTION_API}/databases`, {
+    method: 'POST',
+    headers: headers(apiKey),
+    body: JSON.stringify({
+      parent: { type: 'page_id', page_id: parentPageId },
+      title: [{ type: 'text', text: { content: title } }],
+      properties,
+    }),
+  });
+
+  const body = await res.json() as Record<string, unknown>;
+  if (!res.ok) {
+    const msg = typeof body['message'] === 'string' ? body['message'] : `Failed to create "${title}"`;
+    throw new Error(msg);
+  }
+  return { id: body['id'] as string, url: (body['url'] as string) ?? null };
+}
+
+async function updateDatabase(
+  apiKey: string,
+  databaseId: string,
+  properties: Record<string, unknown>,
+): Promise<void> {
+  const res = await fetch(`${NOTION_API}/databases/${databaseId}`, {
+    method: 'PATCH',
+    headers: headers(apiKey),
+    body: JSON.stringify({ properties }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+    const msg = typeof body['message'] === 'string' ? body['message'] : 'Failed to add database relations';
+    throw new Error(msg);
+  }
+}
+
+// --- Property schema helpers ---------------------------------------------
+
+const sel = (...names: string[]) => ({ select: { options: names.map(name => ({ name })) } });
+const multiSel = (...names: string[]) => ({ multi_select: { options: names.map(name => ({ name })) } });
+const text = () => ({ rich_text: {} });
+const relation = (databaseId: string) => ({
+  relation: { database_id: databaseId, type: 'single_property', single_property: {} },
+});
+
+// --- Phase 1: base (non-relation) property schemas ------------------------
+
+const orgProps: Record<string, unknown> = {
+  'Name': { title: {} },
+  'Type': sel('Human', 'AI Agent'),
+  'Technology': sel('Claude Code', 'Codex', 'Cursor', 'OpenClaw'),
+  'Specialty': text(),
+  'Status': sel('Available', 'Busy', 'Offline'),
+  'System Prompt': text(),
+  'Capabilities': multiSel('code', 'design', 'review', 'qa', 'copywriting'),
+  'Context Level': sel('task', 'project', 'strategic'),
+  'Owner': { people: {} },
+  'Last Active': { date: {} },
+};
+
+const tasksProps: Record<string, unknown> = {
+  'Name': { title: {} },
+  'Status': sel('Backlog', 'In Progress', 'Done', 'Failed'),
+  'KPIs': text(),
+  'Agent Output': text(),
+  'Pipeline Run ID': text(),
+  'Retry Count': { number: {} },
+  'Last Checkpoint': text(),
+};
+
+const projectsProps: Record<string, unknown> = {
+  'Name': { title: {} },
+  'Docs': text(),
+  'KPIs': text(),
+  'Objective': text(),
+};
+
+const pipelineProps: Record<string, unknown> = {
+  'Pipeline Name': { title: {} },
+  'Steps': text(),
+  'Trigger Type': sel('mention', 'status-change', 'scheduled'),
+};
+
+/**
+ * Create the 4 NORC databases under `parentPageId` and wire their relations.
+ * Two-phase: create all databases first (relations need target IDs), then PATCH
+ * relation properties once every database ID is known.
+ */
+export async function provisionWorkspace(apiKey: string, parentPageId: string): Promise<ProvisionedDb[]> {
+  // Phase 1 — create databases with non-relation properties.
+  const org = await createDatabase(apiKey, parentPageId, 'Org DB', orgProps);
+  const tasks = await createDatabase(apiKey, parentPageId, 'Tasks', tasksProps);
+  const projects = await createDatabase(apiKey, parentPageId, 'Projects', projectsProps);
+  const pipeline = await createDatabase(apiKey, parentPageId, 'Pipeline Config', pipelineProps);
+
+  // Phase 2 — add cross-database relations now that all IDs exist.
+  await updateDatabase(apiKey, org.id, { 'Active Tasks': relation(tasks.id) });
+  await updateDatabase(apiKey, tasks.id, {
+    'Project': relation(projects.id),
+    'Assigned To': relation(org.id),
+  });
+  await updateDatabase(apiKey, projects.id, { 'Agents': relation(org.id) });
+
+  return [
+    { kind: 'org', notionDatabaseId: org.id, title: 'Org DB', url: org.url },
+    { kind: 'tasks', notionDatabaseId: tasks.id, title: 'Tasks', url: tasks.url },
+    { kind: 'projects', notionDatabaseId: projects.id, title: 'Projects', url: projects.url },
+    { kind: 'pipeline', notionDatabaseId: pipeline.id, title: 'Pipeline Config', url: pipeline.url },
+  ];
+}
