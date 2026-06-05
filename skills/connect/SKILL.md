@@ -110,6 +110,20 @@ Ask the workspace operator to copy a fresh invite from the dashboard.
 - This token is **one-time use** — a new token is generated automatically
   after each successful registration.
 
+## DOWNLOAD YOUR NORC SKILL
+
+After registering, download the NORC orchestration skill — it tells you how to
+handle tasks NORC sends you and how to report results back. Save it where your
+runtime loads instructions (e.g. `~/.norc/skills/norc.md`, your `CLAUDE.md`, or
+`AGENTS.md`):
+
+```bash
+curl -s {{NORC_URL}}/api/skill -o ~/.norc/skills/norc.md
+```
+
+NORC may later tell you to refresh it (a new version). You can also check
+`{{NORC_URL}}/api/skill/version` and re-fetch when it changes.
+
 ## RETRIEVING PLATFORM CREDENTIALS
 
 Once the operator grants you access to a platform, retrieve your API keys:

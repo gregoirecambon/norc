@@ -61,7 +61,7 @@ const SaveKeySchema = z.object({ apiKey: z.string().min(1) });
 router.post('/key', zodMiddleware(SaveKeySchema), async (req, res) => {
   const { apiKey } = req.body as z.infer<typeof SaveKeySchema>;
 
-  let botInfo: { workspaceName: string; botName: string };
+  let botInfo: { workspaceName: string; botName: string; botUserId: string | null };
   try {
     botInfo = await validateNotionKey(apiKey);
   } catch (err) {
@@ -81,6 +81,7 @@ router.post('/key', zodMiddleware(SaveKeySchema), async (req, res) => {
       apiKey,
       workspaceName: botInfo.workspaceName,
       botName: botInfo.botName,
+      botUserId: botInfo.botUserId,
       status: 'pending_webhook',
       createdAt: now,
       updatedAt: now,
@@ -91,6 +92,7 @@ router.post('/key', zodMiddleware(SaveKeySchema), async (req, res) => {
       apiKey,
       workspaceName: botInfo.workspaceName,
       botName: botInfo.botName,
+      botUserId: botInfo.botUserId,
       status: 'pending_webhook',
       webhookVerifyToken: null,
       updatedAt: now,

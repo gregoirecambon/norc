@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { StatusBadge } from './StatusBadge.js';
 import { HandshakeButton } from './HandshakeButton.js';
-import { deleteAgent, updateAgentConfig, initiateWsPairing, verifyWsPairing, syncAgentToNotion, type AgentRow } from '../api/agents.js';
+import { deleteAgent, updateAgentConfig, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
 
 interface Props {
   agents: AgentRow[];
@@ -397,6 +397,7 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                           onUpdated={config => onConfigUpdated(a.id, config)}
                         />
                       )}
+                      <SkillUpdatePanel agent={a} />
                       <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
                         ID: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{a.id}</span>
                         &nbsp;&nbsp;Registered: <span style={{ color: 'var(--text-secondary)' }}>{new Date(a.registeredAt).toLocaleString()}</span>
@@ -411,5 +412,44 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
         }
       </tbody>
     </table>
+  );
+}
+
+function SkillUpdatePanel({ agent }: { agent: AgentRow }) {
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+
+  const run = async () => {
+    setState('busy'); setMsg('');
+    try {
+      const r = await updateAgentSkills(agent.id);
+      setState('done');
+      setMsg(r.pushed ? `Pushed skill v${r.version} over the socket` : (r.reason ?? 'Not pushed'));
+    } catch (e) {
+      setState('error');
+      setMsg(e instanceof Error ? e.message : 'failed');
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+      <button
+        onClick={run}
+        disabled={state === 'busy'}
+        title="Tell this agent to re-download its NORC skill"
+        style={{
+          fontSize: 11, padding: '2px 8px', borderRadius: 4,
+          border: '1px solid var(--border)', background: 'var(--surface2)',
+          color: 'var(--text-secondary)', cursor: state === 'busy' ? 'default' : 'pointer',
+        }}
+      >
+        {state === 'busy' ? 'Updating…' : 'Update skills'}
+      </button>
+      {msg && (
+        <span style={{ fontSize: 11, color: state === 'error' ? 'var(--accent-red)' : 'var(--text-dim)' }}>
+          {msg}
+        </span>
+      )}
+    </div>
   );
 }

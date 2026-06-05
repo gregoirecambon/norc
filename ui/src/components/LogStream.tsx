@@ -9,8 +9,14 @@ export function LogStream() {
   useEffect(() => {
     const es = new EventSource('/api/logs/stream');
     es.onmessage = e => {
+      // Stream payload is JSON { ts, line }; fall back to the raw string.
+      let line = e.data as string;
+      try {
+        const parsed = JSON.parse(e.data as string) as { line?: string };
+        if (typeof parsed.line === 'string') line = parsed.line;
+      } catch { /* keep raw */ }
       setLines(prev => {
-        const next = [...prev, e.data as string];
+        const next = [...prev, line];
         return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
       });
     };

@@ -92,6 +92,22 @@ export async function syncAgentToNotion(id: string): Promise<{ orgDbPageId: stri
   return res.json() as Promise<{ orgDbPageId: string; url: string | null }>;
 }
 
+export interface SkillUpdateResponse {
+  pushed: boolean;
+  reason?: string;
+  version: number;
+  skillUrl: string;
+}
+
+export async function updateAgentSkills(id: string): Promise<SkillUpdateResponse> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(id)}/update-skills`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
+    throw new Error(body.message ?? body.error ?? `${res.status}`);
+  }
+  return res.json() as Promise<SkillUpdateResponse>;
+}
+
 export async function deleteAgent(id: string): Promise<void> {
   await fetch(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }

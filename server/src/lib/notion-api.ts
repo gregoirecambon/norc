@@ -1,6 +1,7 @@
 export interface NotionBotInfo {
   workspaceName: string;
   botName: string;
+  botUserId: string | null;
 }
 
 export async function validateNotionKey(apiKey: string): Promise<NotionBotInfo> {
@@ -21,6 +22,9 @@ export async function validateNotionKey(apiKey: string): Promise<NotionBotInfo> 
   const bot = body['bot'] as Record<string, unknown> | undefined;
   const workspaceName = typeof bot?.['workspace_name'] === 'string' ? bot['workspace_name'] : 'Unknown workspace';
   const botName = typeof body['name'] === 'string' ? body['name'] : 'Unknown bot';
+  // `GET /users/me` with an integration token returns that bot's own user object;
+  // the top-level `id` is the bot user id we match incoming comment authors against.
+  const botUserId = typeof body['id'] === 'string' ? body['id'] : null;
 
-  return { workspaceName, botName };
+  return { workspaceName, botName, botUserId };
 }

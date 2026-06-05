@@ -80,6 +80,16 @@ openclaw config set gateway.auth.token YOUR_AUTH_TOKEN_FROM_RESPONSE
 openclaw gateway restart
 \`\`\`
 
+## Step 3 — Download your NORC skill
+
+This is the protocol for handling tasks NORC sends you and reporting results back:
+
+\`\`\`bash
+curl -s ${norcUrl}/api/skill -o ~/.norc/skills/norc.md
+\`\`\`
+
+NORC can later push you an updated version (the "Update skills" button).
+
 The token is single-use and rotates automatically after registration.`;
   }
 
@@ -106,13 +116,19 @@ curl -s -X POST ${norcUrl}/api/agents/register \\
   }'
 \`\`\`
 
-After running this once, the agent is visible in the Norc dashboard and ready to receive tasks. The token is single-use and rotates automatically.`;
+Then download your NORC skill (the protocol for handling tasks + reporting back):
+
+\`\`\`bash
+curl -s ${norcUrl}/api/skill -o ~/.norc/skills/norc.md
+\`\`\`
+
+After running these once, the agent is visible in the Norc dashboard and ready to receive tasks. The token is single-use and rotates automatically.`;
 }
 
 const KIND_TIP: Record<AgentKind, { heading: string; body: string }> = {
-  'claude-code': { heading: 'CLAUDE.md', body: 'Paste this into your project\'s CLAUDE.md — Claude Code will execute the command on first run.' },
-  'codex':       { heading: 'Instructions file', body: 'Paste this into your ~/.codex/instructions.md or a project-level instructions file.' },
-  'openclaw':    { heading: 'Terminal', body: 'Run these commands in your terminal. Step 2 is required — without it the connection test will fail.' },
+  'claude-code': { heading: 'CLAUDE.md', body: 'Paste this into your project\'s CLAUDE.md — Claude Code runs the commands on first run, including downloading the NORC skill.' },
+  'codex':       { heading: 'Instructions file', body: 'Paste this into your ~/.codex/instructions.md or a project-level instructions file. It registers the agent and downloads the NORC skill.' },
+  'openclaw':    { heading: 'Terminal', body: 'Run these commands in your terminal. Step 2 is required (auth) and Step 3 downloads the NORC skill.' },
 };
 
 function InviteTab({

@@ -60,6 +60,11 @@ export interface NotionWorkspaceUpdatedEvent {
   };
 }
 
+export interface MentionDetectedEvent {
+  type: 'mention.detected';
+  data: { agentId: string; agentName: string; pageId: string; anchorKind: string };
+}
+
 export type NorcEvent =
   | AgentRegisteredEvent
   | AgentDeletedEvent
@@ -67,7 +72,8 @@ export type NorcEvent =
   | HandshakeUpdatedEvent
   | NotionIntegrationUpdatedEvent
   | NotionVerificationReceivedEvent
-  | NotionWorkspaceUpdatedEvent;
+  | NotionWorkspaceUpdatedEvent
+  | MentionDetectedEvent;
 
 const listeners = new Set<(event: NorcEvent) => void>();
 

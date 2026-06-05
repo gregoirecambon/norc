@@ -4,6 +4,8 @@ import { db } from '../db/client.js';
 import { notionIntegration } from '../db/schema.js';
 import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
+import { verifyNotionSignature } from '../lib/notion-webhook-verify.js';
+import { processWebhookEvent } from '../lib/orchestrator.js';
 
 const router: ExpressRouter = Router();
 
@@ -60,8 +62,20 @@ router.post('/', (req, res) => {
     return;
   }
 
-  // Future: process real webhook events here
-  res.json({ ok: true });
+  // Real event — verify the X-Notion-Signature HMAC against the stored
+  // verification token before doing anything with the payload.
+  const integration = db.select().from(notionIntegration).all()[0] ?? null;
+  const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
+  const signature = req.header('X-Notion-Signature');
+  if (!integration || !verifyNotionSignature(rawBody, signature, integration.webhookVerifyToken)) {
+    emitLog(`webhook rejected: ${!integration ? 'no Notion integration configured' : 'invalid or missing signature'}`);
+    res.status(401).json({ error: 'invalid_signature' });
+    return;
+  }
+
+  // Ack immediately so Notion doesn't retry, then process out of band.
+  res.status(200).json({ ok: true });
+  void processWebhookEvent(body);
 });
 
 export { router as notionWebhookRouter };

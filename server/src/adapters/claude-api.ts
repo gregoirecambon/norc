@@ -1,5 +1,37 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { PingResult } from '../types.js';
+import type { DispatchResult } from './index.js';
+
+/** Run a real agent turn via the Anthropic API; returns the reply text. */
+export async function dispatchClaudeApi(
+  config: Record<string, unknown>,
+  system: string,
+  prompt: string,
+): Promise<DispatchResult> {
+  const apiKey = typeof config['apiKey'] === 'string' ? config['apiKey'].trim() : '';
+  const model = typeof config['model'] === 'string' && config['model'] ? config['model'] : 'claude-sonnet-4-6';
+  const baseURL = typeof config['baseUrl'] === 'string' ? config['baseUrl'].trim() : undefined;
+  if (!apiKey) return { ok: false, supported: true, error: 'adapterConfig.apiKey is required' };
+
+  const client = new Anthropic({ apiKey, baseURL, timeout: 120_000, maxRetries: 1 });
+  try {
+    const res = await client.messages.create({
+      model,
+      max_tokens: 4096,
+      ...(system ? { system } : {}),
+      messages: [{ role: 'user', content: prompt }],
+    });
+    const text = res.content
+      .filter((b): b is Anthropic.TextBlock => b.type === 'text')
+      .map(b => b.text)
+      .join('\n')
+      .trim();
+    return { ok: true, supported: true, text };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : 'Unknown error';
+    return { ok: false, supported: true, error };
+  }
+}
 
 export async function sendClaudeApiChallenge(
   config: Record<string, unknown>,

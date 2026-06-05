@@ -12,7 +12,9 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { generateWsKeypair, initiateWsPairing } from '../adapters/openclaw.js';
+import { notifySkillUpdate } from '../adapters/index.js';
 import { getOrgContext, upsertAgentPage, archiveAgentPage } from '../lib/notion-orgdb.js';
+import { NORC_SKILL_VERSION } from '../lib/skill.js';
 import type { AdapterType } from '../types.js';
 
 const router: ExpressRouter = Router();
@@ -87,6 +89,32 @@ router.get('/invite', async (_req, res) => {
   }
 
   res.json({ token, norcUrl, prompt });
+});
+
+// POST /api/agents/:id/update-skills — tell the agent to re-download its NORC skill.
+router.post('/:id/update-skills', async (req, res) => {
+  const { id } = req.params as { id: string };
+  const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
+  if (!row) { res.status(404).json({ error: 'not_found' }); return; }
+
+  const norcUrl = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
+  const skillUrl = `${norcUrl}/api/skill`;
+  let config: Record<string, unknown>;
+  try { config = JSON.parse(row.adapterConfig); } catch { config = {}; }
+
+  try {
+    const result = await notifySkillUpdate(
+      { name: row.name, adapterType: row.adapterType as AdapterType, adapterConfig: config },
+      skillUrl,
+      NORC_SKILL_VERSION,
+    );
+    emitLog(`update-skills "${row.name}" (${row.adapterType}): ${result.pushed ? `pushed v${NORC_SKILL_VERSION}` : `not pushed — ${result.reason}`}`);
+    res.json({ ...result, version: NORC_SKILL_VERSION, skillUrl });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'failed';
+    emitLog(`update-skills "${row.name}" failed: ${message}`);
+    res.status(502).json({ pushed: false, error: 'push_failed', message });
+  }
 });
 
 const ADAPTER_TYPES = ['openclaw', 'claude-api', 'http', 'claude-local', 'codex-local'] as const;

@@ -21,9 +21,19 @@ import { meRouter } from './routes/me.js';
 import { handshakesRouter, makeCompletionRouter } from './routes/handshakes.js';
 import { notionRouter } from './routes/notion.js';
 import { notionWebhookRouter } from './routes/notionWebhook.js';
+import { makeRunsRouter } from './routes/runs.js';
+import { skillRouter } from './routes/skill.js';
+import { sweepStaleRuns } from './lib/runs.js';
 
 const app = express();
 app.use(cors());
+// Capture the raw request body for the Notion webhook path BEFORE the global
+// JSON parser consumes it — HMAC signature verification must hash the exact
+// raw bytes. This parser also populates req.body, so the global parser below
+// sees it already parsed and skips re-parsing.
+app.use('/webhooks/notion', express.json({
+  verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
+}));
 app.use(express.json());
 
 // Health
@@ -45,6 +55,8 @@ app.use('/api/events', eventsRouter);
 app.use('/api/platforms', platformsRouter);
 app.use('/api/me', meRouter);
 app.use('/api/notion', notionRouter);
+app.use('/api/skill', skillRouter);
+app.use('/api/runs', makeRunsRouter());
 app.use('/webhooks/notion', notionWebhookRouter);
 
 // Expire stale pending handshakes
@@ -60,6 +72,14 @@ setInterval(() => {
     emitEvent({ type: 'handshake.updated', data: { handshakeId: h.id, agentId: h.agentId, status: 'timed_out', latencyMs: null, error: 'Timed out' } });
   }
 }, 15_000);
+
+// Time out agent runs left in flight (e.g. an async agent that never reported back).
+setInterval(() => {
+  const timedOut = sweepStaleRuns(30 * 60_000);
+  for (const run of timedOut) {
+    emitLog(`run ${run.id} timed out (agent "${run.agentId}" did not report back)`);
+  }
+}, 60_000);
 
 // Startup
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);

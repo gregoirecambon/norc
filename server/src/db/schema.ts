@@ -62,6 +62,7 @@ export const notionIntegration = sqliteTable('notion_integration', {
   apiKey:             text('api_key').notNull(),
   workspaceName:      text('workspace_name'),
   botName:            text('bot_name'),
+  botUserId:          text('bot_user_id'),         // integration bot user id — used for write-back loop prevention
   webhookVerifyToken: text('webhook_verify_token'),
   status:             text('status').notNull().default('pending_key'),
   parentPageId:       text('parent_page_id'),
@@ -72,9 +73,50 @@ export const notionIntegration = sqliteTable('notion_integration', {
 
 export const notionDatabases = sqliteTable('notion_databases', {
   id:               text('id').primaryKey(),
-  kind:             text('kind').notNull(),       // 'org' | 'tasks' | 'projects' | 'pipeline'
+  kind:             text('kind').notNull(),       // 'org' | 'tasks' | 'projects' | 'pipeline' | 'company'
   notionDatabaseId: text('notion_database_id').notNull(),
   title:            text('title').notNull(),
   url:              text('url'),
   createdAt:        integer('created_at').notNull(),
+});
+
+// Comment ids authored by NORC's own write-back, so incoming comment.created
+// webhooks for them are ignored (loop prevention).
+export const orchestratorComments = sqliteTable('orchestrator_comments', {
+  commentId: text('comment_id').primaryKey(),
+  createdAt: integer('created_at').notNull(),
+});
+
+// Idempotency keys for triggers we've already acted on, so repeated page edits
+// (or webhook redeliveries) don't re-fire the same dispatch. Comment triggers
+// key on the comment id; page/property triggers key on page id + agent id.
+export const processedTriggers = sqliteTable('processed_triggers', {
+  triggerKey: text('trigger_key').primaryKey(),
+  createdAt: integer('created_at').notNull(),
+});
+
+// Durable log lines for the Logs feed — persisted so they survive page
+// refreshes and server restarts; pruned by age (24h retention), never on load.
+export const logs = sqliteTable('logs', {
+  id:   integer('id').primaryKey({ autoIncrement: true }),
+  ts:   integer('ts').notNull(),
+  line: text('line').notNull(),
+});
+
+// One row per agent dispatch. The opaque `token` is what the agent echoes back
+// through the Agent API; NORC resolves token → page so writes land on the right
+// Notion page (correlation). agentActed flips true when the agent uses the API,
+// so NORC knows not to also post the agent's sync text return.
+export const taskRuns = sqliteTable('task_runs', {
+  id:               text('id').primaryKey(),
+  token:            text('token').notNull().unique(),
+  agentId:          text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+  pageId:           text('page_id').notNull(),        // the anchor page (conversation lives here)
+  taskPageId:       text('task_page_id'),             // set when the anchor is a Task
+  anchorKind:       text('anchor_kind').notNull(),    // 'task' | 'project' | 'page'
+  manageTaskStatus: integer('manage_task_status', { mode: 'boolean' }).notNull().default(false),
+  status:           text('status').notNull().default('in_flight'), // in_flight|done|failed|timed_out
+  agentActed:       integer('agent_acted', { mode: 'boolean' }).notNull().default(false),
+  createdAt:        integer('created_at').notNull(),
+  completedAt:      integer('completed_at'),
 });

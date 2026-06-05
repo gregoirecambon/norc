@@ -286,9 +286,35 @@ export async function sendOpenclawChallenge(
   const message = `Norc handshake test. Make a POST request to ${callbackUrl} with JSON body {"nonce":"${nonce}"}. Use bash or any available tool.${tokenReminder}`;
 
   if (keypair) {
-    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, handshakeId, message);
+    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, handshakeId, message, 'handshake');
   } else {
-    await sendChallengeViaHttp(wsUrl, authToken, ocAgentId, handshakeId, message);
+    await sendChallengeViaHttp(wsUrl, authToken, ocAgentId, handshakeId, message, 'handshake');
+  }
+}
+
+/**
+ * Push an arbitrary instruction to an OpenClaw agent (e.g. "update your skill").
+ * Same transport as the handshake: connect as operator and invoke `method:'agent'`
+ * (or the HTTP fallback). Best-effort, fresh connect→send→disconnect.
+ */
+export async function sendOpenclawMessage(
+  config: Record<string, unknown>,
+  agentName: string,
+  message: string,
+  sessionKind: string,
+): Promise<void> {
+  const wsUrl = typeof config['url'] === 'string' ? config['url'].trim() : '';
+  if (!wsUrl) throw new Error('adapterConfig.url is required');
+  const authToken = typeof config['authToken'] === 'string' ? config['authToken'] : null;
+  const keypair = readKeypairFromConfig(config);
+  const ocAgentId = typeof config['agentId'] === 'string' && config['agentId'].trim()
+    ? config['agentId'].trim()
+    : agentName;
+  const idKey = `${sessionKind}-${Date.now()}`;
+  if (keypair) {
+    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, sessionKind);
+  } else {
+    await sendChallengeViaHttp(wsUrl, authToken, ocAgentId, idKey, message, sessionKind);
   }
 }
 
@@ -298,8 +324,9 @@ async function sendChallengeViaWebSocket(
   wsUrl: string,
   keypair: WsKeypair,
   ocAgentId: string,
-  handshakeId: string,
+  idKey: string,
   message: string,
+  sessionKind: string,
 ): Promise<void> {
   const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
 
@@ -329,8 +356,8 @@ async function sendChallengeViaWebSocket(
       params: {
         message,
         agentId: ocAgentId,
-        sessionKey: `agent:${ocAgentId}:norc:handshake:${handshakeId}`,
-        idempotencyKey: handshakeId,
+        sessionKey: `agent:${ocAgentId}:norc:${sessionKind}:${idKey}`,
+        idempotencyKey: idKey,
         timeout: 60000,
       },
     }));
@@ -341,8 +368,9 @@ async function sendChallengeViaHttp(
   wsUrl: string,
   authToken: string | null,
   ocAgentId: string,
-  handshakeId: string,
+  idKey: string,
   message: string,
+  sessionKind: string,
 ): Promise<void> {
   if (!authToken) throw new Error('adapterConfig.authToken is required when WebSocket pairing is not set up — use the "Setup WebSocket" button or set authToken in Adapter Config');
 
@@ -353,7 +381,7 @@ async function sendChallengeViaHttp(
     headers: {
       'Authorization': `Bearer ${authToken}`,
       'Content-Type': 'application/json',
-      'x-openclaw-session-key': `agent:${ocAgentId}:norc:handshake:${handshakeId}`,
+      'x-openclaw-session-key': `agent:${ocAgentId}:norc:${sessionKind}:${idKey}`,
     },
     body: JSON.stringify({
       model: `openclaw/${ocAgentId}`,
