@@ -23,6 +23,7 @@ import { notionRouter } from './routes/notion.js';
 import { notionWebhookRouter } from './routes/notionWebhook.js';
 import { makeRunsRouter } from './routes/runs.js';
 import { skillRouter } from './routes/skill.js';
+import { settingsRouter } from './routes/settings.js';
 import { sweepStaleRuns } from './lib/runs.js';
 
 const app = express();
@@ -56,6 +57,7 @@ app.use('/api/platforms', platformsRouter);
 app.use('/api/me', meRouter);
 app.use('/api/notion', notionRouter);
 app.use('/api/skill', skillRouter);
+app.use('/api/settings', settingsRouter);
 app.use('/api/runs', makeRunsRouter());
 app.use('/webhooks/notion', notionWebhookRouter);
 

@@ -30,6 +30,8 @@ import { getAnyTitle } from './notion-props.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, hasPriorRunOnPage } from './runs.js';
+import { getNorcSettings } from './norc-settings.js';
+import { triage } from './orchestrator-agent.js';
 import {
   postComment, postCommentReply, appendBlocks,
   setTaskStatus, setTaskFields, setAgentStatus, touchLastActive,
@@ -237,7 +239,13 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
   const triggering = thread.find(c => c.id === commentId);
   const matched = matchAgents(extractMentionedPageIds(triggering?.richText ?? []));
   if (matched.length === 0) {
-    emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`);
+    const anchor = await resolveAnchor(apiKey, pageId);
+    const commentedText = parent?.type === 'block' ? await readBlockText(apiKey, threadBlockId) : '';
+    const handled = await triageUnhandled(integration, anchor, {
+      text: (triggering?.plainText ?? '').trim(),
+      thread, discussionId: triggering?.discussionId ?? null, commentedText, dedupId: commentId,
+    });
+    if (!handled) emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`);
     return;
   }
 
@@ -280,7 +288,9 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
 
   const matched = matchAgents(candidateIds);
   if (matched.length === 0) {
-    emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`);
+    const thread = await listThreadComments(apiKey, pageId);
+    const handled = await triageUnhandled(integration, anchor, { text: '', thread, dedupId: pageId });
+    if (!handled) emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`);
     return;
   }
 
@@ -302,6 +312,97 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
       thread, request, manageTaskStatus: anchor.kind === 'task', how: anchor.kind === 'task' ? 'assignment' : 'page mention',
     });
   }
+}
+
+/** Resolve an agent name (as the orchestrator returned it) to a dispatchable ref. */
+function matchAgentByName(name: string): AgentRef | null {
+  const norm = name.replace(/^@/, '').trim().toLowerCase();
+  const row = db.select().from(agents).all().find(a => a.name.toLowerCase() === norm);
+  if (!row || !row.orgDbPageId) return null;
+  return { agentId: row.id, orgDbPageId: row.orgDbPageId, name: row.name, adapterType: row.adapterType };
+}
+
+interface TriageOpts {
+  text: string;
+  thread: ThreadComment[];
+  discussionId?: string | null;
+  commentedText?: string;
+  dedupId: string;
+}
+
+/**
+ * The NORC Orchestrator (co-CEO): when no agent was matched, decide whether to
+ * auto-route to the best agent (high confidence) or suggest one to the human.
+ * Returns true when it took ownership of the event (so the caller skips the
+ * generic "discarded" log). No-op (returns false) when disabled / no agents.
+ */
+async function triageUnhandled(integration: Integration, anchor: Anchor, opts: TriageOpts): Promise<boolean> {
+  const settings = getNorcSettings();
+  if (!settings?.orchestratorEnabled || !settings.orchestratorApiKey) return false;
+
+  const dedupKey = `triage:${opts.dedupId}`;
+  if (alreadyProcessed(dedupKey)) return true; // already triaged — don't re-fire or re-log
+  markProcessed(dedupKey);
+
+  const apiKey = integration.apiKey;
+  const agentRows = db.select().from(agents).all();
+  if (agentRows.length === 0) { emitLog('triage skipped: no agents registered'); return false; }
+
+  const candidates = agentRows.map(a => {
+    let meta: Record<string, unknown> = {};
+    try { meta = JSON.parse(a.metadata); } catch { /* */ }
+    return {
+      name: a.name,
+      specialty: typeof meta['specialty'] === 'string' ? meta['specialty'] : (typeof meta['role'] === 'string' ? meta['role'] : ''),
+      capabilities: typeof meta['capabilities'] === 'string' ? meta['capabilities'] : '',
+    };
+  });
+  const title = getAnyTitle((anchor.page as Record<string, unknown>)['properties']);
+  const conversation = opts.thread
+    .filter(c => c.authorId !== integration.botUserId)
+    .map(c => c.plainText)
+    .filter(t => t.trim().length > 0);
+
+  emitLog(`triage: NORC Orchestrator analyzing unassigned ${anchor.kind} ${anchor.pageId}`);
+  let decision;
+  try {
+    decision = await triage({
+      apiKey: settings.orchestratorApiKey,
+      model: settings.orchestratorModel,
+      systemPrompt: settings.orchestratorSystemPrompt ?? undefined,
+      kind: anchor.kind, title, text: opts.text,
+      commentedText: opts.commentedText, conversation, candidates,
+    });
+  } catch (err) {
+    emitLog(`triage error: ${err instanceof Error ? err.message : 'unknown'}`);
+    return false;
+  }
+
+  if (decision.decision === 'ignore') {
+    emitLog(`triage: no routing (${decision.message || 'ignored'})`);
+    return true;
+  }
+
+  const routed = decision.agent ? matchAgentByName(decision.agent) : null;
+  if (decision.decision === 'route' && routed && decision.confidence >= settings.autoRouteThreshold) {
+    emitLog(`triage: auto-routing to "${routed.name}" (confidence ${decision.confidence.toFixed(2)})`);
+    await runAgentTurn(integration, anchor, routed, {
+      thread: opts.thread,
+      request: opts.text || 'The NORC Orchestrator routed this to you. Handle it using the context above.',
+      discussionId: opts.discussionId, commentedText: opts.commentedText,
+      manageTaskStatus: anchor.kind === 'task', how: 'orchestrator auto-route',
+    });
+    return true;
+  }
+
+  // Suggest (or route below threshold): tell the human who could take it.
+  const body = decision.message?.trim()
+    || (decision.agent ? `I think **@${decision.agent}** could handle this.` : 'No registered agent seems suited to this yet.');
+  const text = `🧭 **NORC Orchestrator**\n${body}`;
+  if (opts.discussionId) await safeWrite('triage reply', () => postAgentReply(apiKey, opts.discussionId!, text));
+  else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, text));
+  emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
+  return true;
 }
 
 interface TurnOpts {

@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
 
 export const agents = sqliteTable('agents', {
   id: text('id').primaryKey(),
@@ -101,6 +101,21 @@ export const logs = sqliteTable('logs', {
   id:   integer('id').primaryKey({ autoIncrement: true }),
   ts:   integer('ts').notNull(),
   line: text('line').notNull(),
+});
+
+// Singleton NORC settings (one row): the co-CEO Orchestrator triage agent and the
+// heartbeat. Accessed like notionIntegration — db.select()...all()[0].
+export const norcSettings = sqliteTable('norc_settings', {
+  id:                       text('id').primaryKey(),
+  orchestratorEnabled:      integer('orchestrator_enabled', { mode: 'boolean' }).notNull().default(false),
+  orchestratorApiKey:       text('orchestrator_api_key'),
+  orchestratorModel:        text('orchestrator_model').notNull().default('claude-sonnet-4-6'),
+  orchestratorSystemPrompt: text('orchestrator_system_prompt'),
+  autoRouteThreshold:       real('auto_route_threshold').notNull().default(0.7),
+  heartbeatEnabled:         integer('heartbeat_enabled', { mode: 'boolean' }).notNull().default(true),
+  heartbeatIntervalSec:     integer('heartbeat_interval_sec').notNull().default(60),
+  createdAt:                integer('created_at').notNull(),
+  updatedAt:                integer('updated_at').notNull(),
 });
 
 // One row per agent dispatch. The opaque `token` is what the agent echoes back

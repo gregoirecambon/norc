@@ -1,7 +1,8 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { InvitePanel } from '../components/InvitePanel.js';
 import { PlatformsPanel } from '../components/PlatformsPanel.js';
 import { provisionCompanyDb } from '../api/notion.js';
+import { getSettings, saveSettings, type NorcSettings } from '../api/settings.js';
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
@@ -61,6 +62,81 @@ function CompanyDbPanel() {
   );
 }
 
+const inputStyle: React.CSSProperties = {
+  fontSize: 13, padding: '8px 10px', borderRadius: 'var(--radius-md)',
+  border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)', width: '100%',
+};
+const labelStyle: React.CSSProperties = { fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 4, display: 'block' };
+
+function OrchestratorPanel() {
+  const [s, setS] = useState<NorcSettings | null>(null);
+  const [apiKey, setApiKey] = useState('');
+  const [state, setState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => { getSettings().then(setS).catch(() => setMsg('Could not load settings')); }, []);
+
+  const save = async () => {
+    if (!s) return;
+    setState('busy'); setMsg('');
+    try {
+      const patch = {
+        orchestratorEnabled: s.orchestratorEnabled,
+        orchestratorModel: s.orchestratorModel,
+        orchestratorSystemPrompt: s.orchestratorSystemPrompt,
+        autoRouteThreshold: s.autoRouteThreshold,
+        ...(apiKey.trim() ? { orchestratorApiKey: apiKey.trim() } : {}),
+      };
+      const next = await saveSettings(patch);
+      setS(next); setApiKey(''); setState('saved'); setMsg('Saved.');
+    } catch (err) {
+      setState('error'); setMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  if (!s) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{msg || 'Loading…'}</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 560 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
+        <input type="checkbox" checked={s.orchestratorEnabled} onChange={e => setS({ ...s, orchestratorEnabled: e.target.checked })} />
+        Enable the NORC Orchestrator (triage unassigned tasks &amp; comments)
+      </label>
+
+      <div>
+        <label style={labelStyle}>Anthropic API key {s.orchestratorApiKeySet && <span style={{ color: 'var(--text-tertiary, #999)' }}>(set — leave blank to keep)</span>}</label>
+        <input style={inputStyle} type="password" placeholder={s.orchestratorApiKeySet ? '••••••••' : 'sk-ant-…'} value={apiKey} onChange={e => setApiKey(e.target.value)} />
+      </div>
+
+      <div>
+        <label style={labelStyle}>Model</label>
+        <input style={inputStyle} value={s.orchestratorModel} onChange={e => setS({ ...s, orchestratorModel: e.target.value })} />
+      </div>
+
+      <div>
+        <label style={labelStyle}>Auto-route threshold: <strong>{s.autoRouteThreshold.toFixed(2)}</strong> — at or above this confidence the Orchestrator dispatches directly; below it only suggests.</label>
+        <input type="range" min={0} max={1} step={0.05} value={s.autoRouteThreshold} onChange={e => setS({ ...s, autoRouteThreshold: parseFloat(e.target.value) })} style={{ width: '100%' }} />
+      </div>
+
+      <div>
+        <label style={labelStyle}>Co-CEO system prompt (optional — overrides the default persona)</label>
+        <textarea style={{ ...inputStyle, minHeight: 80, fontFamily: 'inherit', resize: 'vertical' }}
+          value={s.orchestratorSystemPrompt ?? ''} onChange={e => setS({ ...s, orchestratorSystemPrompt: e.target.value })}
+          placeholder="You are the NORC Orchestrator, a co-CEO who…" />
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button onClick={save} disabled={state === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--accent, var(--surface1))', color: 'var(--text-primary)',
+          cursor: state === 'busy' ? 'default' : 'pointer',
+        }}>{state === 'busy' ? 'Saving…' : 'Save'}</button>
+        {msg && <span style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 32 }}>
@@ -80,6 +156,13 @@ export default function SettingsPage() {
         description="External services agents can be granted access to. Once approved, agents retrieve the API key via GET /api/me/platforms."
       >
         <PlatformsPanel agents={[]} embedded />
+      </Section>
+
+      <Section
+        title="NORC Orchestrator (co-CEO)"
+        description="When a task or comment arrives with no agent assigned, the Orchestrator triages it: auto-routes to the best agent above the confidence threshold, otherwise suggests one to the creator. Needs an Anthropic API key."
+      >
+        <OrchestratorPanel />
       </Section>
 
       <Section
