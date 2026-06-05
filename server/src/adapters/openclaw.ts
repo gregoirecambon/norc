@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { randomUUID, generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
 import type { PingResult } from '../types.js';
+import type { DispatchResult } from './index.js';
 
 // OpenClaw wire-protocol negotiation range advertised on connect.
 // The gateway accepts a client when maxProtocol >= its version && minProtocol <= its version.
@@ -25,6 +26,35 @@ function rawDataToString(data: unknown): string {
 function asRecord(v: unknown): Record<string, unknown> | null {
   if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
   return v as Record<string, unknown>;
+}
+
+/** Pull an agent's final text out of a `res` frame, across the shapes a gateway
+ * might use. Returns '' when the frame is a bare ACK (no result carried). */
+function extractResultText(frame: Record<string, unknown>): string {
+  const candidates: unknown[] = [
+    frame['result'],
+    frame['text'],
+    asRecord(frame['result'])?.['text'],
+    asRecord(frame['result'])?.['message'],
+    asRecord(frame['result'])?.['content'],
+    asRecord(frame['payload'])?.['text'],
+    asRecord(frame['payload'])?.['message'],
+    asRecord(frame['payload'])?.['content'],
+    asRecord(frame['payload'])?.['result'],
+  ];
+  for (const c of candidates) {
+    if (typeof c === 'string' && c.trim()) return c;
+  }
+  return '';
+}
+
+/** Pull text from an OpenAI-compatible chat-completions response body. */
+function extractChatCompletionText(body: unknown): string {
+  const choices = asRecord(body)?.['choices'];
+  if (!Array.isArray(choices) || choices.length === 0) return '';
+  const msg = asRecord(asRecord(choices[0])?.['message']);
+  const content = msg?.['content'];
+  return typeof content === 'string' ? content : '';
 }
 
 // ─── WebSocket operator connection (for ping only) ───────────────────────────
@@ -395,6 +425,122 @@ async function sendChallengeViaHttp(
     const text = await response.text().catch(() => '');
     throw new Error(`OpenClaw HTTP ${response.status}: ${text.slice(0, 200)}`);
   }
+}
+
+// ─── Dispatch (agent turn) ────────────────────────────────────────────────────
+
+/**
+ * Dispatch an agent turn to OpenClaw. The wire transport is ACK-only, so this is
+ * normally ASYNC: NORC pushes the prompt, the (tool-capable) agent does the work
+ * and reports back through the NORC Agent API (the run token is in the prompt).
+ *   - WebSocket path: returns the agent text if the gateway carries it in the
+ *     `res` frame, otherwise `{ async: true }` (await the Agent-API callback).
+ *   - HTTP path: the chat-completions endpoint returns the text synchronously.
+ * `sessionId` (the page id) gives OpenClaw a stable per-page session key so it
+ * keeps its own conversational memory across turns on the same page.
+ */
+export async function dispatchOpenclaw(
+  config: Record<string, unknown>,
+  agentName: string,
+  system: string,
+  prompt: string,
+  sessionId?: string,
+): Promise<DispatchResult> {
+  const wsUrl = typeof config['url'] === 'string' ? config['url'].trim() : '';
+  if (!wsUrl) return { ok: false, supported: true, error: 'adapterConfig.url is required' };
+
+  const authToken = typeof config['authToken'] === 'string' ? config['authToken'] : null;
+  const keypair = readKeypairFromConfig(config);
+  const ocAgentId = typeof config['agentId'] === 'string' && config['agentId'].trim()
+    ? config['agentId'].trim()
+    : agentName;
+  const message = system ? `${system}\n\n${prompt}` : prompt;
+  const idKey = sessionId && sessionId.trim() ? sessionId.trim() : `task-${Date.now()}`;
+
+  try {
+    const text = keypair
+      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message)
+      : await dispatchViaHttp(wsUrl, authToken, ocAgentId, idKey, message);
+    if (text && text.trim()) return { ok: true, supported: true, text: text.trim() };
+    // Bare ACK — the agent will report back via the Agent API.
+    return { ok: true, supported: true, async: true };
+  } catch (err) {
+    return { ok: false, supported: true, error: err instanceof Error ? err.message : 'OpenClaw dispatch failed' };
+  }
+}
+
+async function dispatchViaWebSocket(
+  wsUrl: string,
+  keypair: WsKeypair,
+  ocAgentId: string,
+  idKey: string,
+  message: string,
+): Promise<string> {
+  const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
+  const reqId = randomUUID();
+  return await new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      try { ws.close(); } catch { /* */ }
+      reject(new Error('Timed out waiting for OpenClaw agent response'));
+    }, 90_000);
+
+    ws.on('message', raw => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+      const frame = asRecord(parsed);
+      if (frame?.id === reqId && frame['type'] === 'res') {
+        clearTimeout(timeout);
+        try { ws.close(); } catch { /* */ }
+        if (frame['ok'] === true) resolve(extractResultText(frame));
+        else reject(new Error(`agent method rejected: ${JSON.stringify(frame['error'])}`));
+      }
+    });
+
+    ws.send(JSON.stringify({
+      type: 'req',
+      id: reqId,
+      method: 'agent',
+      params: {
+        message,
+        agentId: ocAgentId,
+        sessionKey: `agent:${ocAgentId}:norc:task:${idKey}`,
+        idempotencyKey: idKey,
+        timeout: 60000,
+      },
+    }));
+  });
+}
+
+async function dispatchViaHttp(
+  wsUrl: string,
+  authToken: string | null,
+  ocAgentId: string,
+  idKey: string,
+  message: string,
+): Promise<string> {
+  if (!authToken) throw new Error('adapterConfig.authToken is required when WebSocket pairing is not set up — use the "Setup WebSocket" button or set authToken in Adapter Config');
+
+  const httpBase = wsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+  const response = await fetch(`${httpBase}/v1/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${authToken}`,
+      'Content-Type': 'application/json',
+      'x-openclaw-session-key': `agent:${ocAgentId}:norc:task:${idKey}`,
+    },
+    body: JSON.stringify({
+      model: `openclaw/${ocAgentId}`,
+      messages: [{ role: 'user', content: message }],
+      stream: false,
+    }),
+    signal: AbortSignal.timeout(120_000),
+  });
+
+  if (!response.ok) {
+    const text = await response.text().catch(() => '');
+    throw new Error(`OpenClaw HTTP ${response.status}: ${text.slice(0, 200)}`);
+  }
+  return extractChatCompletionText(await response.json().catch(() => null));
 }
 
 // ─── Ping ─────────────────────────────────────────────────────────────────────

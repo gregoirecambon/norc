@@ -411,7 +411,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   if (opts.manageTaskStatus) await safeWrite('task in-progress', () => setTaskStatus(apiKey, anchor.pageId, 'In Progress'));
 
   emitLog(`dispatching to "${agentRef.name}" (${adapterType}, level=${ctx.contextLevel}, via ${opts.how}, run ${runId}) on ${anchor.kind} page ${anchor.pageId}`);
-  const result = await dispatch({ adapterType, config, system, prompt });
+  const result = await dispatch({ adapterType, config, system, prompt, agentName: agentRef.name, sessionId: anchor.pageId });
 
   if (!result.ok) {
     const failMsg = `**@${agentRef.name}** failed ✗ — ${result.error}`;
@@ -421,6 +421,14 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
     finalizeRun(runId, 'failed');
     emitLog(`dispatch failed for "${agentRef.name}": ${result.error}`);
+    return;
+  }
+
+  // Async adapter (openclaw WS): dispatched, but the reply arrives later via the
+  // Agent API. Leave the run in-flight (Status already In Progress, agent Busy);
+  // the agent's /complete — or the timeout sweep — finalizes it.
+  if (result.async) {
+    emitLog(`dispatched to "${agentRef.name}" (async) — awaiting Agent API callback on ${anchor.kind} page ${anchor.pageId} (run ${runId})`);
     return;
   }
 

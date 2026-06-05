@@ -1,5 +1,5 @@
 import type { Agent, PingResult, AdapterType } from '../types.js';
-import { pingOpenclaw, sendOpenclawMessage } from './openclaw.js';
+import { pingOpenclaw, sendOpenclawMessage, dispatchOpenclaw } from './openclaw.js';
 import { pingClaudeApi, dispatchClaudeApi } from './claude-api.js';
 import { pingHttp, dispatchHttp } from './http.js';
 import { pingLocalCli, dispatchLocalCli } from './local.js';
@@ -21,10 +21,12 @@ export async function pingAgent(agent: Agent): Promise<PingResult> {
 // --- Dispatch (agent turn) -------------------------------------------------
 
 export interface DispatchResult {
-  /** Whether the agent turn succeeded (text present) or errored (error present). */
+  /** Whether the agent turn succeeded (text present / dispatched) or errored. */
   ok: boolean;
-  /** False when this adapter has no dispatch implementation yet (e.g. openclaw, Phase 3). */
+  /** False when this adapter has no dispatch implementation yet. */
   supported: boolean;
+  /** True when dispatched but the reply arrives later via the Agent API (openclaw WS). */
+  async?: boolean;
   text?: string;
   error?: string;
 }
@@ -34,25 +36,28 @@ export interface DispatchArgs {
   config: Record<string, unknown>;
   system: string;
   prompt: string;
+  /** Agent display name — openclaw uses it as the agentId fallback. */
+  agentName?: string;
+  /** Stable session key (the page id) so openclaw keeps per-page memory. */
+  sessionId?: string;
 }
 
-const DISPATCH_SUPPORTED = new Set<AdapterType>(['claude-api', 'http', 'claude-local', 'codex-local']);
+const DISPATCH_SUPPORTED = new Set<AdapterType>(['claude-api', 'http', 'claude-local', 'codex-local', 'openclaw']);
 
-/** Whether dispatch is wired for this adapter (openclaw lands in a later phase). */
+/** Whether dispatch is wired for this adapter. */
 export function dispatchSupported(adapterType: AdapterType): boolean {
   return DISPATCH_SUPPORTED.has(adapterType);
 }
 
-/** Run one agent turn synchronously and return its reply text. */
+/** Run one agent turn. Returns reply text (sync) or async:true (reply via Agent API). */
 export async function dispatch(args: DispatchArgs): Promise<DispatchResult> {
-  const { adapterType, config, system, prompt } = args;
+  const { adapterType, config, system, prompt, agentName, sessionId } = args;
   switch (adapterType) {
     case 'claude-api': return dispatchClaudeApi(config, system, prompt);
     case 'http': return dispatchHttp(config, system, prompt);
     case 'claude-local': return dispatchLocalCli(config, system, prompt, 'claude');
     case 'codex-local': return dispatchLocalCli(config, system, prompt, 'codex');
-    case 'openclaw':
-      return { ok: false, supported: false, error: 'OpenClaw dispatch is not wired yet (coming in a later phase)' };
+    case 'openclaw': return dispatchOpenclaw(config, agentName ?? '', system, prompt, sessionId);
     default:
       return { ok: false, supported: false, error: `Unknown adapter type: ${String(adapterType)}` };
   }
