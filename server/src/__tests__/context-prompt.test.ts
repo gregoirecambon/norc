@@ -60,6 +60,7 @@ describe('buildPrompt', () => {
     systemPrompt: 'You are the Developer Agent.',
     taskBlock: { name: 'Build login', status: 'In Progress', kpis: 'tests pass', priorOutput: '', lastCheckpoint: '' },
     projectBlock: { name: 'Auth', objective: 'Ship SSO', kpis: 'p95 < 200ms', docs: '' },
+    companyBlocks: [],
     fingerprint: 'fp',
   };
 
@@ -98,7 +99,7 @@ describe('buildPrompt', () => {
   it('includes the page reference and commented-on text on a free page', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], fingerprint: 'x' },
       anchor: pageAnchor,
       priorComments: [], request: 'what do you think?', availableAgents: [],
       commentedText: 'The pricing should be $9/mo',
@@ -115,13 +116,33 @@ describe('buildPrompt', () => {
   it('omits first-visit note for a returning agent and omits page section otherwise', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], fingerprint: 'x' },
       anchor: pageAnchor, priorComments: [], request: 'hi', availableAgents: [],
       pageRef: { title: 'Pricing notes', url: null, firstVisit: false },
     });
     expect(prompt).toContain('[PAGE]');
     expect(prompt).not.toContain("haven't worked on this page before");
     expect(prompt).not.toContain('Link:');
+  });
+
+  it('renders [STRATEGIC CONTEXT] when company blocks are present', () => {
+    const { prompt } = buildPrompt({
+      ctx: {
+        contextLevel: 'strategic', systemPrompt: 'sp', taskBlock: null, projectBlock: null,
+        companyBlocks: [{ name: 'North Star', type: 'Vision', content: 'Be the open Notion agent layer' }],
+        fingerprint: 'x',
+      },
+      anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
+    });
+    expect(prompt).toContain('[STRATEGIC CONTEXT]');
+    expect(prompt).toContain('(Vision) North Star: Be the open Notion agent layer');
+  });
+
+  it('omits [STRATEGIC CONTEXT] when there are no company blocks', () => {
+    const { prompt } = buildPrompt({
+      ctx, anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
+    });
+    expect(prompt).not.toContain('[STRATEGIC CONTEXT]');
   });
 
   it('omits the run block when not provided', () => {
@@ -133,7 +154,7 @@ describe('buildPrompt', () => {
 
   it('omits task/conversation/agents sections when empty', () => {
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, fingerprint: 'x' },
+      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], fingerprint: 'x' },
       anchor: { kind: 'page', pageId: 'p', page: {}, parentDatabaseId: null } as Anchor,
       priorComments: [],
       request: 'hello',

@@ -1,5 +1,7 @@
+import { useState } from 'react';
 import { InvitePanel } from '../components/InvitePanel.js';
 import { PlatformsPanel } from '../components/PlatformsPanel.js';
+import { provisionCompanyDb } from '../api/notion.js';
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
@@ -23,6 +25,42 @@ function Section({ title, description, children }: { title: string; description?
   );
 }
 
+function CompanyDbPanel() {
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+
+  const add = async () => {
+    setState('busy'); setMsg('');
+    try {
+      const res = await provisionCompanyDb();
+      setState('done');
+      setMsg(res.created ? 'Company DB created — strategic agents now get company context.' : 'Company DB already exists.');
+    } catch (err) {
+      setState('error');
+      setMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
+      <button
+        onClick={add}
+        disabled={state === 'busy'}
+        style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 14px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)',
+          cursor: state === 'busy' ? 'default' : 'pointer',
+        }}
+      >
+        {state === 'busy' ? 'Adding…' : 'Add Company DB'}
+      </button>
+      {msg && (
+        <div style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</div>
+      )}
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 32 }}>
@@ -42,6 +80,13 @@ export default function SettingsPage() {
         description="External services agents can be granted access to. Once approved, agents retrieve the API key via GET /api/me/platforms."
       >
         <PlatformsPanel agents={[]} embedded />
+      </Section>
+
+      <Section
+        title="Strategic Context"
+        description="Adds a Company database (Vision / Values / Strategy) for workspaces provisioned before strategic context existed. Only agents with Context Level = strategic see it. Safe to click — it's a no-op if the DB already exists."
+      >
+        <CompanyDbPanel />
       </Section>
 
       <Section title="About">

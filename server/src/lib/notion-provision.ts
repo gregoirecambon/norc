@@ -5,7 +5,7 @@
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 
-export type DbKind = 'org' | 'tasks' | 'projects' | 'pipeline';
+export type DbKind = 'org' | 'tasks' | 'projects' | 'pipeline' | 'company';
 
 export interface ProvisionedDb {
   kind: DbKind;
@@ -138,6 +138,15 @@ const pipelineProps: Record<string, unknown> = {
   'Trigger Type': sel('mention', 'status-change', 'scheduled'),
 };
 
+// Company context — vision / values / strategy. Read-only background that only
+// `strategic`-clearance agents see. Active rows are injected; archived ones aren't.
+const companyProps: Record<string, unknown> = {
+  'Name': { title: {} },
+  'Type': sel('Vision', 'Value', 'Strategy', 'Policy'),
+  'Status': sel('Active', 'Archived'),
+  'Content': text(),
+};
+
 /**
  * Create the 4 NORC databases under `parentPageId` and wire their relations.
  * Two-phase: create all databases first (relations need target IDs), then PATCH
@@ -149,6 +158,7 @@ export async function provisionWorkspace(apiKey: string, parentPageId: string): 
   const tasks = await createDatabase(apiKey, parentPageId, 'Tasks', tasksProps);
   const projects = await createDatabase(apiKey, parentPageId, 'Projects', projectsProps);
   const pipeline = await createDatabase(apiKey, parentPageId, 'Pipeline Config', pipelineProps);
+  const company = await createDatabase(apiKey, parentPageId, 'Company', companyProps);
 
   // Phase 2 — add cross-database relations now that all IDs exist.
   await updateDatabase(apiKey, org.id, { 'Active Tasks': relation(tasks.id) });
@@ -156,12 +166,33 @@ export async function provisionWorkspace(apiKey: string, parentPageId: string): 
     'Project': relation(projects.id),
     'Assigned To': relation(org.id),
   });
-  await updateDatabase(apiKey, projects.id, { 'Agents': relation(org.id) });
+  await updateDatabase(apiKey, projects.id, {
+    'Agents': relation(org.id),
+    'Company': relation(company.id),
+  });
 
   return [
     { kind: 'org', notionDatabaseId: org.id, title: 'Org DB', url: org.url },
     { kind: 'tasks', notionDatabaseId: tasks.id, title: 'Tasks', url: tasks.url },
     { kind: 'projects', notionDatabaseId: projects.id, title: 'Projects', url: projects.url },
     { kind: 'pipeline', notionDatabaseId: pipeline.id, title: 'Pipeline Config', url: pipeline.url },
+    { kind: 'company', notionDatabaseId: company.id, title: 'Company', url: company.url },
   ];
+}
+
+/**
+ * Additively create the Company DB for a workspace that was provisioned before it
+ * existed. Creates the DB + a Projects→Company relation; idempotent at the caller
+ * (only invoked when no `company` row exists). Returns the new ProvisionedDb.
+ */
+export async function provisionCompanyDb(
+  apiKey: string,
+  parentPageId: string,
+  projectsDatabaseId: string | null,
+): Promise<ProvisionedDb> {
+  const company = await createDatabase(apiKey, parentPageId, 'Company', companyProps);
+  if (projectsDatabaseId) {
+    await updateDatabase(apiKey, projectsDatabaseId, { 'Company': relation(company.id) });
+  }
+  return { kind: 'company', notionDatabaseId: company.id, title: 'Company', url: company.url };
 }

@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const NORC_SKILL_VERSION = 3;
+export const NORC_SKILL_VERSION = 4;
 
 const SKILL_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),

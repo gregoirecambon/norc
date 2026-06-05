@@ -8,7 +8,7 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
-import { parsePageId, checkPageAccess, provisionWorkspace } from '../lib/notion-provision.js';
+import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb } from '../lib/notion-provision.js';
 
 const router: ExpressRouter = Router();
 
@@ -168,6 +168,50 @@ router.post('/provision', zodMiddleware(ProvisionSchema), async (req, res) => {
   });
 
   res.status(201).json({ databases: created });
+});
+
+// POST /api/notion/provision/company — additively add the Company DB to a
+// workspace provisioned before strategic context existed. Idempotent.
+router.post('/provision/company', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the workspace first.' });
+    return;
+  }
+  const existing = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'company')).all()[0];
+  if (existing) {
+    res.status(200).json({ created: false, database: { kind: 'company', notionDatabaseId: existing.notionDatabaseId, title: existing.title, url: existing.url } });
+    return;
+  }
+  if (!integration.parentPageId) {
+    res.status(400).json({ error: 'no_parent', message: 'No parent page recorded; re-provision the workspace.' });
+    return;
+  }
+  const projects = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'projects')).all()[0];
+
+  let created;
+  try {
+    created = await provisionCompanyDb(integration.apiKey, integration.parentPageId, projects?.notionDatabaseId ?? null);
+  } catch (err) {
+    res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
+    return;
+  }
+
+  db.insert(notionDatabases).values({
+    id: randomUUID(),
+    kind: created.kind,
+    notionDatabaseId: created.notionDatabaseId,
+    title: created.title,
+    url: created.url,
+    createdAt: Date.now(),
+  }).run();
+
+  emitLog('Company DB provisioned (strategic context enabled)');
+  emitEvent({
+    type: 'notion.workspace.updated',
+    data: { workspaceStatus: 'provisioned', parentPageId: integration.parentPageId, databases: getDatabases() },
+  });
+  res.status(201).json({ created: true, database: created });
 });
 
 // DELETE /api/notion

@@ -20,6 +20,8 @@ NORC sends a prompt with these sections (some may be absent):
 - **SYSTEM** — your persona + this orchestration behaviour.
 - **[PAGE]** — for a free page: its title + link, and whether you've been here
   before. Fetch the full body with `GET <api_base>/page` if you need more.
+- **[STRATEGIC CONTEXT]** — company vision / values / strategy (only for
+  `strategic`-clearance agents). Background to align your work; rarely the task.
 - **[CONTEXT — level: …]** — the project Objective / KPIs / Docs (when relevant).
 - **[TASK]** — the task name, status, success criteria, prior output.
 - **[COMMENTED-ON TEXT]** — the exact text a comment is attached to (inline

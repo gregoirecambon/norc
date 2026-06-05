@@ -10,7 +10,10 @@
 // agent. Property names match the provisioned schemas (notion-provision.ts).
 
 import { createHash } from 'node:crypto';
-import { notionGet } from './notion-client.js';
+import { eq } from 'drizzle-orm';
+import { db } from '../db/client.js';
+import { notionDatabases } from '../db/schema.js';
+import { notionGet, notionQuery } from './notion-client.js';
 import { getTitle, getRichText, getSelect, getRelationIds } from './notion-props.js';
 import type { Anchor } from './notion-anchor.js';
 import type { AgentRef } from './notion-mentions.js';
@@ -32,11 +35,18 @@ export interface ProjectBlock {
   docs: string;
 }
 
+export interface CompanyBlock {
+  name: string;
+  type: string;
+  content: string;
+}
+
 export interface AssembledContext {
   contextLevel: ContextLevel;
   systemPrompt: string;
   taskBlock: TaskBlock | null;
   projectBlock: ProjectBlock | null;
+  companyBlocks: CompanyBlock[];
   fingerprint: string;
 }
 
@@ -72,6 +82,7 @@ export async function assembleContext(args: {
 
   let taskBlock: TaskBlock | null = null;
   let projectBlock: ProjectBlock | null = null;
+  let projectProps: unknown = null;
   let projectPageId: string | null = null;
 
   if (anchor.kind === 'task') {
@@ -95,6 +106,7 @@ export async function assembleContext(args: {
         ? (anchor.page as Record<string, unknown>)
         : await notionGet<Record<string, unknown>>(apiKey, `/pages/${projectPageId}`);
       const pp = projectPage['properties'];
+      projectProps = pp;
       projectBlock = {
         name: getTitle(pp, 'Name'),
         objective: getRichText(pp, 'Objective'),
@@ -106,10 +118,55 @@ export async function assembleContext(args: {
     }
   }
 
-  // strategic (company) context arrives in Phase 4.
+  // Strategic (company) layer — only for `strategic` clearance.
+  const companyBlocks = contextLevel === 'strategic'
+    ? await resolveCompanyBlocks(apiKey, projectProps)
+    : [];
 
-  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlock: null });
-  return { contextLevel, systemPrompt, taskBlock, projectBlock, fingerprint };
+  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks });
+  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, fingerprint };
+}
+
+/**
+ * Resolve company context, two-layer gated:
+ *   (a) prefer Active Company rows linked to the current Project (Projects→Company);
+ *   (b) fall back to Active `Type=Vision` rows from the Company DB.
+ * Best-effort: any read failure yields fewer rows, never throws.
+ */
+async function resolveCompanyBlocks(apiKey: string, projectProps: unknown): Promise<CompanyBlock[]> {
+  const out: CompanyBlock[] = [];
+
+  // (a) Company rows explicitly linked to this project.
+  const linkedIds = projectProps ? getRelationIds(projectProps, 'Company') : [];
+  for (const id of linkedIds.slice(0, 5)) {
+    try {
+      const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${id}`);
+      const cp = page['properties'];
+      if (getSelect(cp, 'Status') === 'Active') {
+        out.push({ name: getTitle(cp, 'Name'), type: getSelect(cp, 'Type') ?? '', content: getRichText(cp, 'Content') });
+      }
+    } catch { /* skip unreadable row */ }
+  }
+  if (out.length > 0) return out;
+
+  // (b) Fallback: the company-wide vision.
+  const companyDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'company')).all()[0];
+  if (!companyDb) return out;
+  try {
+    const res = await notionQuery<Record<string, unknown>>(apiKey, companyDb.notionDatabaseId, {
+      filter: { and: [
+        { property: 'Type', select: { equals: 'Vision' } },
+        { property: 'Status', select: { equals: 'Active' } },
+      ] },
+      page_size: 5,
+    });
+    const results = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
+    for (const page of results) {
+      const cp = page['properties'];
+      out.push({ name: getTitle(cp, 'Name'), type: getSelect(cp, 'Type') ?? '', content: getRichText(cp, 'Content') });
+    }
+  } catch { /* no fallback if query fails */ }
+  return out;
 }
 
 export interface PriorComment {
@@ -154,6 +211,14 @@ export function buildPrompt(args: {
       );
     }
     sections.push(lines.join('\n'));
+  }
+
+  // Company-wide context (strategic agents only) — broadest first.
+  if (ctx.companyBlocks && ctx.companyBlocks.length > 0) {
+    const rows = ctx.companyBlocks
+      .map(c => `- ${c.type ? `(${c.type}) ` : ''}${c.name || '(untitled)'}${c.content ? `: ${c.content}` : ''}`)
+      .join('\n');
+    sections.push(`[STRATEGIC CONTEXT]\n${rows}`);
   }
 
   if (anchor.kind === 'project' && ctx.projectBlock) {
