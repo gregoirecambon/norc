@@ -63,6 +63,14 @@ export function hasPriorRunOnPage(agentId: string, pageId: string): boolean {
     .all()[0];
 }
 
+/** Is this agent mid-task (a run still in flight)? Heartbeat uses this to avoid
+ * flipping a working agent's Notion Status. */
+export function hasInFlightRun(agentId: string): boolean {
+  return !!db.select().from(taskRuns)
+    .where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.status, 'in_flight')))
+    .all()[0];
+}
+
 /** Finalize a run (terminal). No-op if already finalized. */
 export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>): void {
   db.update(taskRuns)

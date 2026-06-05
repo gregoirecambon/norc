@@ -50,12 +50,18 @@ export default function AgentsPage() {
     });
 
     es.addEventListener('agent.updated', (e: MessageEvent) => {
-      const data = JSON.parse(e.data as string) as { id: string; adapterConfig?: Record<string, unknown>; orgDbPageId?: string | null };
+      const data = JSON.parse(e.data as string) as {
+        id: string; adapterConfig?: Record<string, unknown>; orgDbPageId?: string | null;
+        status?: AgentRow['status']; lastPingedAt?: number | null; lastLatencyMs?: number | null;
+      };
       setAgents(prev => prev.map(a => {
         if (a.id !== data.id) return a;
         const next = { ...a };
         if (data.adapterConfig !== undefined) next.adapterConfig = data.adapterConfig;
         if (data.orgDbPageId !== undefined) next.orgDbPageId = data.orgDbPageId;
+        if (data.status !== undefined) next.status = data.status;
+        if (data.lastPingedAt !== undefined) next.lastPingedAt = data.lastPingedAt;
+        if (data.lastLatencyMs !== undefined) next.lastLatencyMs = data.lastLatencyMs;
         return next;
       }));
     });

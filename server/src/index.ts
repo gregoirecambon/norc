@@ -25,6 +25,8 @@ import { makeRunsRouter } from './routes/runs.js';
 import { skillRouter } from './routes/skill.js';
 import { settingsRouter } from './routes/settings.js';
 import { sweepStaleRuns } from './lib/runs.js';
+import { runHeartbeat } from './lib/heartbeat.js';
+import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
 
 const app = express();
 app.use(cors());
@@ -83,6 +85,19 @@ setInterval(() => {
   }
 }, 60_000);
 
+// Heartbeat — self-rescheduling so live settings changes (interval / enable)
+// take effect without a restart.
+async function heartbeatLoop(): Promise<void> {
+  const settings = getNorcSettingsOrDefault();
+  if (settings.heartbeatEnabled) {
+    try { await runHeartbeat(); } catch (err) {
+      emitLog(`heartbeat error: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
+  }
+  const intervalMs = Math.max(10, settings.heartbeatIntervalSec) * 1000;
+  setTimeout(() => { void heartbeatLoop(); }, intervalMs);
+}
+
 // Startup
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 
@@ -91,4 +106,6 @@ await ensureActiveToken();
 
 app.listen(PORT, '0.0.0.0', () => {
   emitLog(`norc listening on port ${PORT}`);
+  // Kick off the heartbeat shortly after boot so startup settles first.
+  setTimeout(() => { void heartbeatLoop(); }, 5_000);
 });

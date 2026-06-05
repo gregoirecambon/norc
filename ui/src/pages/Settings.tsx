@@ -137,6 +137,49 @@ function OrchestratorPanel() {
   );
 }
 
+function HeartbeatPanel() {
+  const [s, setS] = useState<NorcSettings | null>(null);
+  const [state, setState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+
+  useEffect(() => { getSettings().then(setS).catch(() => setMsg('Could not load settings')); }, []);
+
+  const save = async () => {
+    if (!s) return;
+    setState('busy'); setMsg('');
+    try {
+      const next = await saveSettings({ heartbeatEnabled: s.heartbeatEnabled, heartbeatIntervalSec: s.heartbeatIntervalSec });
+      setS(next); setState('saved'); setMsg('Saved.');
+    } catch (err) {
+      setState('error'); setMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  if (!s) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{msg || 'Loading…'}</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 560 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
+        <input type="checkbox" checked={s.heartbeatEnabled} onChange={e => setS({ ...s, heartbeatEnabled: e.target.checked })} />
+        Periodically ping agents and reconcile their status
+      </label>
+      <div>
+        <label style={labelStyle}>Interval (seconds, min 10)</label>
+        <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={10} value={s.heartbeatIntervalSec}
+          onChange={e => setS({ ...s, heartbeatIntervalSec: parseInt(e.target.value || '60', 10) })} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button onClick={save} disabled={state === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)',
+          cursor: state === 'busy' ? 'default' : 'pointer',
+        }}>{state === 'busy' ? 'Saving…' : 'Save'}</button>
+        {msg && <span style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 32 }}>
@@ -170,6 +213,13 @@ export default function SettingsPage() {
         description="Adds a Company database (Vision / Values / Strategy) for workspaces provisioned before strategic context existed. Only agents with Context Level = strategic see it. Safe to click — it's a no-op if the DB already exists."
       >
         <CompanyDbPanel />
+      </Section>
+
+      <Section
+        title="Heartbeat"
+        description="Keeps agent Status accurate: NORC pings each agent on a schedule and reflects reachable → Available, unreachable → Offline on the Org DB. Agents mid-task (or marked Busy) are never disturbed."
+      >
+        <HeartbeatPanel />
       </Section>
 
       <Section title="About">

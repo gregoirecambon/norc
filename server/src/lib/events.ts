@@ -23,7 +23,14 @@ export interface AgentDeletedEvent {
 
 export interface AgentUpdatedEvent {
   type: 'agent.updated';
-  data: { id: string; adapterConfig?: Record<string, unknown>; orgDbPageId?: string | null };
+  data: {
+    id: string;
+    adapterConfig?: Record<string, unknown>;
+    orgDbPageId?: string | null;
+    status?: string;
+    lastPingedAt?: number | null;
+    lastLatencyMs?: number | null;
+  };
 }
 
 export interface HandshakeUpdatedEvent {
