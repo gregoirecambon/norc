@@ -77,6 +77,41 @@ export function extractPropertyMentionPageIds(properties: unknown): string[] {
   return ids;
 }
 
+/** Map of normalized Org DB page id → agent name, for rendering mentions. */
+export function agentNamesByOrgPage(): Map<string, string> {
+  const m = new Map<string, string>();
+  for (const row of db.select().from(agents).all()) {
+    if (row.orgDbPageId) m.set(normalizeId(row.orgDbPageId), row.name);
+  }
+  return m;
+}
+
+/**
+ * Flatten rich_text to plain text, but render an agent page-mention as `@name`
+ * instead of the linked page's title. Notion sets a page mention's `plain_text`
+ * to the target page's title — for an agent that's its (often "Untitled") Org DB
+ * page, which is meaningless to the agent. Pass the map from agentNamesByOrgPage().
+ */
+export function richTextToPlainNamed(richText: unknown, agentNames: Map<string, string>): string {
+  if (!Array.isArray(richText)) return '';
+  return richText
+    .map(item => {
+      if (!item || typeof item !== 'object') return '';
+      const node = item as Record<string, unknown>;
+      if (node['type'] === 'mention') {
+        const mention = node['mention'] as Record<string, unknown> | undefined;
+        if (mention?.['type'] === 'page') {
+          const page = mention['page'] as Record<string, unknown> | undefined;
+          const id = typeof page?.['id'] === 'string' ? page['id'] as string : null;
+          const name = id ? agentNames.get(normalizeId(id)) : undefined;
+          if (name) return `@${name}`;
+        }
+      }
+      return typeof node['plain_text'] === 'string' ? node['plain_text'] as string : '';
+    })
+    .join('');
+}
+
 /** Resolve mentioned page ids to registered agents via agents.orgDbPageId. */
 export function matchAgents(mentionedPageIds: string[]): AgentRef[] {
   if (mentionedPageIds.length === 0) return [];

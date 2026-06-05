@@ -3,6 +3,7 @@ import {
   extractMentionedPageIds,
   extractRelationPageIds,
   extractPropertyMentionPageIds,
+  richTextToPlainNamed,
 } from '../lib/notion-mentions.js';
 
 // Sample rich_text shapes mirroring Notion's comment/block payloads.
@@ -39,6 +40,27 @@ describe('extractMentionedPageIds', () => {
     expect(extractMentionedPageIds(null)).toEqual([]);
     expect(extractMentionedPageIds([])).toEqual([]);
     expect(extractMentionedPageIds([{ type: 'mention', mention: { type: 'page' } }])).toEqual([]);
+  });
+});
+
+describe('richTextToPlainNamed', () => {
+  // dashed id in the payload, dashless in the map → must still match.
+  const names = new Map([['abc123', 'emilien']]);
+
+  it('renders an agent page-mention as @name instead of the page title', () => {
+    const rt = [plain('what do you think '), pageMention('abc-123'), plain('?')];
+    // pageMention sets plain_text:'Agent' (a stand-in for the "Untitled" title).
+    expect(richTextToPlainNamed(rt, names)).toBe('what do you think @emilien?');
+  });
+
+  it('falls back to plain_text for unknown / non-agent page mentions', () => {
+    const rt = [plain('see '), pageMention('other-page')];
+    expect(richTextToPlainNamed(rt, names)).toBe('see Agent');
+  });
+
+  it('leaves plain text untouched and tolerates bad input', () => {
+    expect(richTextToPlainNamed([plain('hello')], names)).toBe('hello');
+    expect(richTextToPlainNamed(undefined, names)).toBe('');
   });
 });
 

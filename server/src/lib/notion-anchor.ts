@@ -9,7 +9,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { notionDatabases } from '../db/schema.js';
 import { notionGet } from './notion-client.js';
-import { extractMentionedPageIds } from './notion-mentions.js';
+import { extractMentionedPageIds, agentNamesByOrgPage, richTextToPlainNamed } from './notion-mentions.js';
 
 export type AnchorKind = 'task' | 'project' | 'page';
 
@@ -60,6 +60,7 @@ export async function resolveAnchor(apiKey: string, pageId: string): Promise<Anc
 /** List the comment thread on a page (oldest→newest), following pagination. */
 export async function listThreadComments(apiKey: string, pageId: string): Promise<ThreadComment[]> {
   const out: ThreadComment[] = [];
+  const agentNames = agentNamesByOrgPage();
   let cursor: string | undefined;
 
   do {
@@ -75,7 +76,7 @@ export async function listThreadComments(apiKey: string, pageId: string): Promis
         id: String(c['id'] ?? ''),
         discussionId: typeof c['discussion_id'] === 'string' ? c['discussion_id'] : null,
         richText,
-        plainText: richTextToPlain(richText),
+        plainText: richTextToPlainNamed(richText, agentNames),
         authorId: typeof createdBy?.['id'] === 'string' ? createdBy['id'] : null,
         createdTime: typeof c['created_time'] === 'string' ? c['created_time'] : null,
       });
