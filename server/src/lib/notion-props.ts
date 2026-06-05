@@ -15,6 +15,18 @@ export function getTitle(properties: unknown, name: string): string {
   return p?.['type'] === 'title' ? richTextToPlain(p['title']) : '';
 }
 
+/** The page's title, whatever the title property is called (free pages use
+ * "title"; DB rows use the DB's title column). Returns '' if none. */
+export function getAnyTitle(properties: unknown): string {
+  if (!properties || typeof properties !== 'object') return '';
+  for (const p of Object.values(properties as Record<string, unknown>)) {
+    if (p && typeof p === 'object' && (p as Record<string, unknown>)['type'] === 'title') {
+      return richTextToPlain((p as Record<string, unknown>)['title']);
+    }
+  }
+  return '';
+}
+
 export function getRichText(properties: unknown, name: string): string {
   const p = prop(properties, name);
   return p?.['type'] === 'rich_text' ? richTextToPlain(p['rich_text']) : '';

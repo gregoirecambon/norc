@@ -95,6 +95,35 @@ describe('buildPrompt', () => {
     expect(prompt).not.toContain('[INSTRUCTIONS]');
   });
 
+  it('includes the page reference and commented-on text on a free page', () => {
+    const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
+    const { prompt } = buildPrompt({
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, fingerprint: 'x' },
+      anchor: pageAnchor,
+      priorComments: [], request: 'what do you think?', availableAgents: [],
+      commentedText: 'The pricing should be $9/mo',
+      pageRef: { title: 'Pricing notes', url: 'https://notion.so/p1', firstVisit: true },
+    });
+    expect(prompt).toContain('[PAGE]');
+    expect(prompt).toContain('Title: Pricing notes');
+    expect(prompt).toContain('Link: https://notion.so/p1');
+    expect(prompt).toContain("haven't worked on this page before");
+    expect(prompt).toContain('[COMMENTED-ON TEXT]');
+    expect(prompt).toContain('The pricing should be $9/mo');
+  });
+
+  it('omits first-visit note for a returning agent and omits page section otherwise', () => {
+    const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
+    const { prompt } = buildPrompt({
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, fingerprint: 'x' },
+      anchor: pageAnchor, priorComments: [], request: 'hi', availableAgents: [],
+      pageRef: { title: 'Pricing notes', url: null, firstVisit: false },
+    });
+    expect(prompt).toContain('[PAGE]');
+    expect(prompt).not.toContain("haven't worked on this page before");
+    expect(prompt).not.toContain('Link:');
+  });
+
   it('omits the run block when not provided', () => {
     const { prompt } = buildPrompt({
       ctx, anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],

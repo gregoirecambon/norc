@@ -56,6 +56,13 @@ export function getRun(id: string): TaskRun | null {
   return db.select().from(taskRuns).where(eq(taskRuns.id, id)).all()[0] ?? null;
 }
 
+/** Has this agent had any prior run on this page? (first-visit detection) */
+export function hasPriorRunOnPage(agentId: string, pageId: string): boolean {
+  return !!db.select().from(taskRuns)
+    .where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.pageId, pageId)))
+    .all()[0];
+}
+
 /** Finalize a run (terminal). No-op if already finalized. */
 export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>): void {
   db.update(taskRuns)

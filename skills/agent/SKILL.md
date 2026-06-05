@@ -18,8 +18,12 @@ writes your result onto the right Notion page.
 NORC sends a prompt with these sections (some may be absent):
 
 - **SYSTEM** — your persona + this orchestration behaviour.
+- **[PAGE]** — for a free page: its title + link, and whether you've been here
+  before. Fetch the full body with `GET <api_base>/page` if you need more.
 - **[CONTEXT — level: …]** — the project Objective / KPIs / Docs (when relevant).
 - **[TASK]** — the task name, status, success criteria, prior output.
+- **[COMMENTED-ON TEXT]** — the exact text a comment is attached to (inline
+  comments) — i.e. what the human is reacting to.
 - **[CONVERSATION SO FAR]** — earlier messages in the Notion thread.
 - **[REQUEST]** — what you are being asked to do right now.
 - **[NORC RUN]** — the run metadata you need to report back:
@@ -52,6 +56,9 @@ curl -s -X POST <api_base>/comment  -H 'Content-Type: application/json' \
 # Reply ON the precise text (when reply_discussion_id was provided)
 curl -s -X POST <api_base>/comment  -H 'Content-Type: application/json' \
   -d '{"text":"Here is my answer…","discussionId":"<reply_discussion_id>"}'
+
+# Fetch the full page (title, link, body as markdown) when you need more context
+curl -s <api_base>/page          # or <api_base>/page?pageId=<id> for another page
 
 # Append content into the page body (Markdown → Notion blocks)
 curl -s -X POST <api_base>/blocks   -H 'Content-Type: application/json' \

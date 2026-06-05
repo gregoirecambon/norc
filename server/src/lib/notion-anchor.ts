@@ -118,6 +118,63 @@ export async function collectBlockMentionPageIds(apiKey: string, pageId: string)
   return ids;
 }
 
+/** Read the plain text of a single block (the text a comment is anchored to). */
+export async function readBlockText(apiKey: string, blockId: string): Promise<string> {
+  try {
+    const block = await notionGet<Record<string, unknown>>(apiKey, `/blocks/${blockId}`);
+    return blockToText(block).trim();
+  } catch {
+    return '';
+  }
+}
+
+/** Render one block to a markdown-ish line (text content only). */
+function blockToText(block: Record<string, unknown>): string {
+  const type = block['type'];
+  if (typeof type !== 'string') return '';
+  const body = block[type] as Record<string, unknown> | undefined;
+  const text = richTextToPlain(body?.['rich_text']);
+  switch (type) {
+    case 'heading_1': return text ? `# ${text}` : '';
+    case 'heading_2': return text ? `## ${text}` : '';
+    case 'heading_3': return text ? `### ${text}` : '';
+    case 'bulleted_list_item':
+    case 'to_do': return text ? `- ${text}` : '';
+    case 'numbered_list_item': return text ? `1. ${text}` : '';
+    case 'quote': return text ? `> ${text}` : '';
+    case 'code': return text ? '```\n' + text + '\n```' : '';
+    default: return text;
+  }
+}
+
+/**
+ * Read a page's body as markdown-ish text (direct children, 1 level deep) — the
+ * fuller detail an agent can request when it needs more than the snippet/link.
+ * Capped to keep replies bounded.
+ */
+export async function readPageMarkdown(apiKey: string, pageId: string, maxChars = 6000): Promise<string> {
+  const lines: string[] = [];
+  let cursor: string | undefined;
+  let total = 0;
+
+  do {
+    const qs = new URLSearchParams({ page_size: '100' });
+    if (cursor) qs.set('start_cursor', cursor);
+    const res = await notionGet<Record<string, unknown>>(apiKey, `/blocks/${pageId}/children?${qs.toString()}`);
+    const results = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
+    for (const block of results) {
+      const line = blockToText(block);
+      if (!line) continue;
+      lines.push(line);
+      total += line.length + 1;
+      if (total >= maxChars) { lines.push('…(truncated)'); return lines.join('\n'); }
+    }
+    cursor = res['has_more'] === true && typeof res['next_cursor'] === 'string' ? res['next_cursor'] : undefined;
+  } while (cursor);
+
+  return lines.join('\n');
+}
+
 /** Flatten a rich_text array to its plain text. */
 export function richTextToPlain(richText: unknown): string {
   if (!Array.isArray(richText)) return '';

@@ -12,7 +12,7 @@
 // drives the Status lifecycle (write-FIRST In Progress, then Done/Failed). Every
 // decision point logs its disposition for the Logs feed.
 
-import { eq } from 'drizzle-orm';
+import { eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { agents, notionIntegration, orchestratorComments, processedTriggers } from '../db/schema.js';
 import type { AdapterType } from '../types.js';
@@ -25,10 +25,11 @@ import {
   matchAgents,
   type AgentRef,
 } from './notion-mentions.js';
-import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, type Anchor, type ThreadComment } from './notion-anchor.js';
-import { assembleContext, buildPrompt } from './context-assembler.js';
+import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, type Anchor, type ThreadComment } from './notion-anchor.js';
+import { getAnyTitle } from './notion-props.js';
+import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
-import { createRun, getRun, finalizeRun } from './runs.js';
+import { createRun, getRun, finalizeRun, hasPriorRunOnPage } from './runs.js';
 import {
   postComment, postCommentReply, appendBlocks,
   setTaskStatus, setTaskFields, setAgentStatus, touchLastActive,
@@ -245,12 +246,16 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
   const onText = parent?.type === 'block' ? ' (on text)' : '';
   emitLog(`mention detected in comment on ${anchor.kind} page ${pageId}${onText}: ${matched.map(a => a.name).join(', ')}`);
 
+  // For an inline comment, fetch the text it's anchored to so the agent knows
+  // exactly what the human is reacting to.
+  const commentedText = parent?.type === 'block' ? await readBlockText(apiKey, threadBlockId) : '';
+
   const request = (triggering?.plainText ?? '').trim() || 'Please respond.';
   for (const agent of matched) {
     // A comment is a chat turn — reply, but don't drive task Status.
     await runAgentTurn(integration, anchor, agent, {
       thread, request, triggeringCommentId: commentId,
-      discussionId: triggering?.discussionId ?? null,
+      discussionId: triggering?.discussionId ?? null, commentedText,
       manageTaskStatus: false, how: 'comment mention',
     });
   }
@@ -305,6 +310,8 @@ interface TurnOpts {
   triggeringCommentId?: string;
   /** Discussion to reply into (so the comment lands on the precise text). */
   discussionId?: string | null;
+  /** Text the triggering comment is anchored to (inline comments). */
+  commentedText?: string;
   manageTaskStatus: boolean;
   how: string;
 }
@@ -327,19 +334,43 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   });
 
   const ctx = await assembleContext({ apiKey, anchor, agentRef });
+
+  // Exclude NORC's own comments from the conversation. The botUserId check is the
+  // primary guard, but it can be unset; orchestrator_comments is the source of
+  // truth for what we authored (so preview/reply comments don't pollute context).
+  const threadIds = opts.thread.map(c => c.id).filter(Boolean);
+  const ourIds = new Set(
+    threadIds.length
+      ? db.select().from(orchestratorComments)
+          .where(inArray(orchestratorComments.commentId, threadIds)).all().map(r => r.commentId)
+      : [],
+  );
   const priorComments = opts.thread
-    .filter(c => c.authorId !== integration.botUserId && c.id !== opts.triggeringCommentId)
+    .filter(c => c.authorId !== integration.botUserId && c.id !== opts.triggeringCommentId && !ourIds.has(c.id))
     .map(c => ({ authorId: c.authorId, plainText: c.plainText }))
     .filter(c => c.plainText.trim().length > 0);
   const availableAgents = db.select().from(agents).all()
     .filter(a => a.id !== agentRef.agentId)
     .map(a => a.name);
 
+  // Where the conversation lives (free pages) — title, link, and whether this
+  // agent has been here before (so we can offer the full page on first contact).
+  const pageRef: PageRef | undefined = anchor.kind === 'page'
+    ? {
+        title: getAnyTitle((anchor.page as Record<string, unknown>)['properties']),
+        url: typeof (anchor.page as Record<string, unknown>)['url'] === 'string'
+          ? (anchor.page as Record<string, unknown>)['url'] as string
+          : null,
+        firstVisit: !hasPriorRunOnPage(agentRef.agentId, anchor.pageId),
+      }
+    : undefined;
+
   // Adapter without a dispatch impl yet (e.g. openclaw): show the exact prompt +
   // contract that WOULD be sent, using a placeholder token (no live run minted).
   if (!dispatchSupported(adapterType)) {
     const { system, prompt } = buildPrompt({
       ctx, anchor, priorComments, request: opts.request, availableAgents,
+      commentedText: opts.commentedText, pageRef,
       runBlock: runBlock('(preview)', 'EXAMPLE_RUN_TOKEN', anchor.pageId, opts.discussionId),
     });
     emitLog(`prompt preview for "${agentRef.name}" (${adapterType}, ${system.length + prompt.length} chars) — dispatch not wired`);
@@ -370,6 +401,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   });
   const { system, prompt } = buildPrompt({
     ctx, anchor, priorComments, request: opts.request, availableAgents,
+    commentedText: opts.commentedText, pageRef,
     runBlock: runBlock(runId, token, anchor.pageId, opts.discussionId),
   });
 

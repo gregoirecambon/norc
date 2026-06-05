@@ -14,6 +14,9 @@ import {
   type TaskStatus,
 } from '../lib/notion-writeback.js';
 import { markdownToBlocks } from '../lib/notion-blocks-md.js';
+import { readPageMarkdown } from '../lib/notion-anchor.js';
+import { getAnyTitle } from '../lib/notion-props.js';
+import { notionGet } from '../lib/notion-client.js';
 
 function activeApiKey(): string | null {
   const row = db.select().from(notionIntegration).all()[0] ?? null;
@@ -63,6 +66,27 @@ export function makeRunsRouter(): ExpressRouter {
         emitLog(`agent API: comment posted on page ${target} (run ${run.id})`);
       }
       res.json({ ok: true });
+    } catch (err) {
+      res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // GET /api/runs/:token/page?pageId=  → { title, url, markdown }
+  // The fuller page detail an agent can pull when the prompt only gave it a link.
+  r.get('/:token/page', async (req, res) => {
+    const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
+    const pageId = typeof req.query['pageId'] === 'string' && req.query['pageId']
+      ? req.query['pageId'] as string
+      : run.pageId;
+    try {
+      const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${pageId}`);
+      const markdown = await readPageMarkdown(apiKey, pageId);
+      emitLog(`agent API: page ${pageId} read (run ${run.id})`);
+      res.json({
+        title: getAnyTitle(page['properties']),
+        url: typeof page['url'] === 'string' ? page['url'] : null,
+        markdown,
+      });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
     }

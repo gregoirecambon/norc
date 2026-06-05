@@ -117,6 +117,13 @@ export interface PriorComment {
   plainText: string;
 }
 
+export interface PageRef {
+  title: string;
+  url: string | null;
+  /** True when this agent has never acted on this page before. */
+  firstVisit: boolean;
+}
+
 /** Assemble the final { system, prompt } message for an agent turn. */
 export function buildPrompt(args: {
   ctx: AssembledContext;
@@ -125,9 +132,29 @@ export function buildPrompt(args: {
   request: string;
   availableAgents: string[];
   runBlock?: string;
+  /** Text of the block a comment is anchored to (inline comments). */
+  commentedText?: string;
+  /** Where this conversation lives (free pages) so the agent has its bearings. */
+  pageRef?: PageRef;
 }): { system: string; prompt: string } {
-  const { ctx, anchor, priorComments, request, availableAgents, runBlock } = args;
+  const { ctx, anchor, priorComments, request, availableAgents, runBlock, commentedText, pageRef } = args;
   const sections: string[] = [];
+
+  // Where are we? Give free-page conversations their bearings up front.
+  if (pageRef) {
+    const lines = [
+      `[PAGE]`,
+      `Title: ${pageRef.title || '(untitled)'}`,
+      pageRef.url ? `Link: ${pageRef.url}` : '',
+    ].filter(Boolean);
+    if (pageRef.firstVisit) {
+      lines.push(
+        `You haven't worked on this page before. You have only the snippet/thread below; ` +
+        `fetch the full page content via your NORC skill (GET <api_base>/page) if you need more.`,
+      );
+    }
+    sections.push(lines.join('\n'));
+  }
 
   if (anchor.kind === 'project' && ctx.projectBlock) {
     sections.push(projectSection(ctx.projectBlock));
@@ -146,6 +173,11 @@ export function buildPrompt(args: {
       t.lastCheckpoint ? `Last checkpoint: ${t.lastCheckpoint}` : '',
     ].filter(Boolean);
     sections.push(lines.join('\n'));
+  }
+
+  // The exact text the comment is attached to — what the human is reacting to.
+  if (commentedText && commentedText.trim()) {
+    sections.push(`[COMMENTED-ON TEXT]\nThe comment thread below is attached to this text:\n"""\n${commentedText.trim()}\n"""`);
   }
 
   if (priorComments.length > 0) {
