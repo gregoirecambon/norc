@@ -58,6 +58,39 @@ function toRichTextMentioning(userId: string, text: string): unknown[] {
   ];
 }
 
+// A rich-text segment: plain text, a page @mention (e.g. an agent's Org DB page or
+// a task), or a user @mention. buildRichText interleaves them so NORC can write
+// "Created <@task> — assigned <@agent>" with real, clickable mentions.
+export type RichSeg = string | { pageId: string } | { userId: string };
+
+export function buildRichText(segs: RichSeg[]): unknown[] {
+  const out: unknown[] = [];
+  for (const s of segs) {
+    if (typeof s === 'string') { if (s) out.push(...toRichText(s)); }
+    else if ('pageId' in s) out.push({ type: 'mention', mention: { type: 'page', page: { id: s.pageId } } });
+    else out.push({ type: 'mention', mention: { type: 'user', user: { id: s.userId } } });
+  }
+  return out.length ? out : toRichText(' ');
+}
+
+/** Post a page comment built from rich segments (real @mentions). */
+export async function postCommentRich(apiKey: string, pageId: string, segs: RichSeg[]): Promise<{ commentId: string }> {
+  const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
+    parent: { page_id: pageId },
+    rich_text: buildRichText(segs),
+  });
+  return { commentId: String(res['id'] ?? '') };
+}
+
+/** Reply into a discussion built from rich segments (real @mentions). */
+export async function postCommentReplyRich(apiKey: string, discussionId: string, segs: RichSeg[]): Promise<{ commentId: string }> {
+  const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
+    discussion_id: discussionId,
+    rich_text: buildRichText(segs),
+  });
+  return { commentId: String(res['id'] ?? '') };
+}
+
 /** Post a comment on a page; returns the created comment id (for loop guard). */
 export async function postComment(
   apiKey: string,
@@ -130,6 +163,13 @@ export type TaskStatus = 'Backlog' | 'In Progress' | 'Done' | 'Failed';
 export async function setTaskStatus(apiKey: string, taskPageId: string, status: TaskStatus): Promise<void> {
   await notionPatch(apiKey, `/pages/${taskPageId}`, {
     properties: { 'Status': { select: { name: status } } },
+  });
+}
+
+/** Set a Task page's "Assigned To" relation to one or more agent Org DB pages. */
+export async function setTaskAssignee(apiKey: string, taskPageId: string, orgDbPageIds: string[]): Promise<void> {
+  await notionPatch(apiKey, `/pages/${taskPageId}`, {
+    properties: { 'Assigned To': { relation: orgDbPageIds.filter(Boolean).map(id => ({ id })) } },
   });
 }
 

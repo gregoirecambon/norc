@@ -33,8 +33,9 @@ import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForP
 import { getNorcSettings } from './norc-settings.js';
 import { triage } from './orchestrator-agent.js';
 import {
-  postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning, appendBlocks,
-  setTaskStatus, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
+  postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning,
+  postCommentRich, postCommentReplyRich, type RichSeg, appendBlocks,
+  setTaskStatus, setTaskAssignee, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
 } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
 
@@ -136,6 +137,14 @@ async function postAgentReply(apiKey: string, discussionId: string, text: string
   const res = mentionUserId
     ? await postCommentReplyMentioning(apiKey, discussionId, mentionUserId, text)
     : await postCommentReply(apiKey, discussionId, text);
+  recordOurComment(res.commentId);
+}
+
+/** Post NORC rich content (real @mentions of agents/tasks) to a thread or page. */
+async function postAgentRich(apiKey: string, anchorPageId: string, discussionId: string | null | undefined, segs: RichSeg[]): Promise<void> {
+  const res = discussionId
+    ? await postCommentReplyRich(apiKey, discussionId, segs)
+    : await postCommentRich(apiKey, anchorPageId, segs);
   recordOurComment(res.commentId);
 }
 
@@ -465,8 +474,13 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   const routed = decision.agent ? matchAgentByName(decision.agent) : null;
   if (decision.decision === 'route' && routed && decision.confidence >= settings!.autoRouteThreshold) {
     emitLog(`triage: auto-routing to "${routed.name}" (confidence ${decision.confidence.toFixed(2)})`);
-    const why = decision.message?.trim() || `No one was assigned, so I'm routing this to **@${routed.name}**.`;
-    await announce(`${why}\n\n_Routing to **@${routed.name}** now — reply here to redirect._`);
+    const why = decision.message?.trim() || `No one was assigned, so I'm routing this.`;
+    // Real @mention of the agent's Org DB page (clickable, not plain text).
+    await postAgentRich(apiKey, anchor.pageId, ctx.discussionId, [
+      `🧭 **NORC Triage Agent**\n${prefix}${why}\n\nRouting to `,
+      { pageId: routed.orgDbPageId },
+      ` now — reply here to redirect.`,
+    ]);
     await runAgentTurn(integration, anchor, routed, {
       thread: ctx.thread,
       request: ctx.text || 'The NORC Triage Agent routed this to you. Handle it using the context above.',
@@ -477,13 +491,18 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     return 'routed';
   }
 
-  // Suggest (or "route" below threshold): ask the human to confirm.
-  const suggestMsg = decision.message?.trim()
-    || (decision.agent
-      ? `No one is assigned. I think **@${decision.agent}** could handle this — reply "@${decision.agent} go" to assign.`
-      : 'No one is assigned and no registered agent clearly fits. Who should take this?');
-  await announce(suggestMsg, true);
+  // Suggest (or "route" below threshold): ask the human to confirm — tag the human
+  // and, when we resolved a candidate, @mention the agent's page too.
   emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
+  if (routed) {
+    const why = decision.message?.trim() || 'No one is assigned.';
+    const segs: RichSeg[] = [];
+    if (ctx.triggeringUserId) segs.push({ userId: ctx.triggeringUserId }, ' ');
+    segs.push(`🧭 **NORC Triage Agent**\n${prefix}${why} I think `, { pageId: routed.orgDbPageId }, ` could handle this — reply "@${routed.name} go" to assign.`);
+    await postAgentRich(apiKey, anchor.pageId, ctx.discussionId, segs);
+    return 'suggested';
+  }
+  await announce(decision.message?.trim() || 'No one is assigned and no registered agent clearly fits. Who should take this?', true);
   return 'suggested';
 }
 
@@ -738,7 +757,11 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   // Write-FIRST: mark the agent Busy (and the task In Progress) before dispatch.
   await safeWrite('agent busy', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Busy'));
   await safeWrite('last active', () => touchLastActive(apiKey, agentRef.orgDbPageId));
-  if (opts.manageTaskStatus) await safeWrite('task in-progress', () => setTaskStatus(apiKey, anchor.pageId, 'In Progress'));
+  if (opts.manageTaskStatus) {
+    await safeWrite('task in-progress', () => setTaskStatus(apiKey, anchor.pageId, 'In Progress'));
+    // Reflect the assignment natively so the task shows who's on it.
+    await safeWrite('task assignee', () => setTaskAssignee(apiKey, anchor.pageId, [agentRef.orgDbPageId]));
+  }
 
   emitLog(`dispatching to "${agentRef.name}" (${adapterType}, level=${ctx.contextLevel}, via ${opts.how}, run ${runId}) on ${anchor.kind} page ${anchor.pageId}`);
   const result = await dispatch({ adapterType, config, system, prompt, agentName: agentRef.name, sessionId: anchor.pageId });
