@@ -37,7 +37,6 @@ import {
   setTaskStatus, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
 } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
-import { sendNotification } from './notifier.js';
 
 function norcBaseUrl(): string {
   return process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
@@ -392,14 +391,6 @@ function pageCreatedById(page: Record<string, unknown>): string | null {
   return cb && typeof cb['id'] === 'string' ? cb['id'] : null;
 }
 
-/** Email a human (best-effort) with a deep link, when triage needs their input. */
-async function notifyHuman(_integration: Integration, anchor: Anchor, subject: string, body: string): Promise<void> {
-  const page = anchor.page as Record<string, unknown>;
-  const url = typeof page['url'] === 'string' ? page['url'] : `https://www.notion.so/${anchor.pageId.replace(/-/g, '')}`;
-  const title = getAnyTitle(page['properties']);
-  await sendNotification({ subject: title ? `${subject}: ${title}` : subject, body, url }).catch(() => { /* best-effort */ });
-}
-
 /**
  * Run the Triage Agent and apply its decision. Always communicates in Notion
  * (route → tag + explain then dispatch; suggest/ignore → ask). `excludeNames`
@@ -427,7 +418,6 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   if (agentRows.length === 0) {
     await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.', true);
     emitLog('triage: no remaining agents after exclusions');
-    await notifyHuman(integration, anchor, 'No agent available for triage', 'No remaining agents to try — please assign someone manually.');
     return 'no-agents';
   }
 
@@ -469,7 +459,6 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     const msg = decision.message?.trim() || 'No one is assigned and no registered agent clearly fits this. Who should take it?';
     await announce(msg, true);
     emitLog(`triage: no clear owner (${decision.message || 'asked'})`);
-    await notifyHuman(integration, anchor, 'NORC triage needs your input', msg);
     return 'asked';
   }
 
@@ -495,7 +484,6 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       : 'No one is assigned and no registered agent clearly fits. Who should take this?');
   await announce(suggestMsg, true);
   emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
-  await notifyHuman(integration, anchor, 'NORC triage suggestion needs confirmation', suggestMsg);
   return 'suggested';
 }
 

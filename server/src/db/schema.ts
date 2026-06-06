@@ -118,14 +118,6 @@ export const norcSettings = sqliteTable('norc_settings', {
   heartbeatEnabled:         integer('heartbeat_enabled', { mode: 'boolean' }).notNull().default(true),
   heartbeatIntervalSec:     integer('heartbeat_interval_sec').notNull().default(60),
   runTimeoutSec:            integer('run_timeout_sec').notNull().default(300),  // dispatch → escalate if no callback
-  // Email-in-the-loop: notify a human when triage is unsure / needs a decision.
-  notifyEnabled:            integer('notify_enabled', { mode: 'boolean' }).notNull().default(false),
-  notifyEmail:              text('notify_email'),    // recipient (defaults to the workspace owner)
-  smtpHost:                 text('smtp_host'),
-  smtpPort:                 integer('smtp_port'),
-  smtpUser:                 text('smtp_user'),
-  smtpPass:                 text('smtp_pass'),
-  smtpFrom:                 text('smtp_from'),
   createdAt:                integer('created_at').notNull(),
   updatedAt:                integer('updated_at').notNull(),
 });

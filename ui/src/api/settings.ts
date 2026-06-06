@@ -11,13 +11,6 @@ export interface NorcSettings {
   runTimeoutSec: number;
   heartbeatEnabled: boolean;
   heartbeatIntervalSec: number;
-  notifyEnabled: boolean;
-  notifyEmail: string | null;
-  smtpHost: string | null;
-  smtpPort: number | null;
-  smtpUser: string | null;
-  smtpPassSet: boolean;
-  smtpFrom: string | null;
   updatedAt: number;
 }
 
@@ -32,13 +25,6 @@ export interface NorcSettingsPatch {
   runTimeoutSec?: number;
   heartbeatEnabled?: boolean;
   heartbeatIntervalSec?: number;
-  notifyEnabled?: boolean;
-  notifyEmail?: string | null;
-  smtpHost?: string | null;
-  smtpPort?: number | null;
-  smtpUser?: string | null;
-  smtpPass?: string | null;
-  smtpFrom?: string | null;
 }
 
 export async function getSettings(): Promise<NorcSettings> {
@@ -78,15 +64,4 @@ export async function testTriageConnection(req: TriageTestRequest): Promise<Tria
     body: JSON.stringify(req),
   });
   return res.json() as Promise<TriageTestResult>;
-}
-
-export interface NotificationTestResult {
-  ok: boolean;
-  error?: string;
-}
-
-/** Verify the saved SMTP config (save first, then test). */
-export async function testNotification(): Promise<NotificationTestResult> {
-  const res = await fetch('/api/settings/test-notification', { method: 'POST' });
-  return res.json() as Promise<NotificationTestResult>;
 }

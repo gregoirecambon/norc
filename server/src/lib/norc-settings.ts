@@ -20,13 +20,6 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   heartbeatEnabled: true,
   heartbeatIntervalSec: 60,
   runTimeoutSec: 300,
-  notifyEnabled: false,
-  notifyEmail: null,
-  smtpHost: null,
-  smtpPort: null,
-  smtpUser: null,
-  smtpPass: null,
-  smtpFrom: null,
 };
 
 export function getNorcSettings(): NorcSettings | null {
