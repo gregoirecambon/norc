@@ -25,6 +25,7 @@ export default function AgentsPage() {
   const [showAddModal, setShowAddModal] = useState(false);
   const [provisioned, setProvisioned] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
+  const [syncMsg, setSyncMsg] = useState('');
 
   useEffect(() => {
     listAgents()
@@ -105,15 +106,24 @@ export default function AgentsPage() {
 
   const handleSyncAll = async () => {
     setSyncingAll(true);
+    setSyncMsg('');
+    let ok = 0;
+    const failures: string[] = [];
     try {
       for (const a of agents) {
         try {
           const { orgDbPageId } = await syncAgentToNotion(a.id);
           handleSynced(a.id, orgDbPageId);
-        } catch {
-          // continue syncing the rest
+          ok++;
+        } catch (e) {
+          failures.push(`${a.name}: ${e instanceof Error ? e.message : 'failed'}`);
         }
       }
+      setSyncMsg(
+        failures.length === 0
+          ? `Synced ${ok} agent${ok === 1 ? '' : 's'} to Notion.`
+          : `Synced ${ok}; ${failures.length} failed — ${failures.join('; ')}`,
+      );
     } finally {
       setSyncingAll(false);
     }
@@ -192,6 +202,11 @@ export default function AgentsPage() {
           >
             {syncingAll ? 'Syncing…' : 'Sync all to Notion'}
           </button>
+          {syncMsg && (
+            <span style={{ fontSize: 12, color: syncMsg.includes('failed') ? 'var(--accent-red, #d33)' : 'var(--text-secondary)', maxWidth: 360 }}>
+              {syncMsg}
+            </span>
+          )}
           <button
             onClick={() => setShowAddModal(true)}
             style={{

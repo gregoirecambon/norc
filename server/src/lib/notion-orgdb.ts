@@ -76,18 +76,30 @@ export async function upsertAgentPage(
   agent: AgentLike,
   existingPageId?: string,
 ): Promise<{ pageId: string; url: string | null }> {
-  const isCreate = !existingPageId;
-  const url = isCreate ? `${NOTION_API}/pages` : `${NOTION_API}/pages/${existingPageId}`;
-  const body = isCreate
-    ? { parent: { database_id: orgDbId }, properties: buildProps(agent, { isCreate: true }) }
-    : { properties: buildProps(agent, { isCreate: false }) };
+  // Try to update the existing page first.
+  if (existingPageId) {
+    const res = await fetch(`${NOTION_API}/pages/${existingPageId}`, {
+      method: 'PATCH',
+      headers: headers(apiKey),
+      body: JSON.stringify({ properties: buildProps(agent, { isCreate: false }) }),
+    });
+    const json = await res.json() as Record<string, unknown>;
+    if (res.ok) return { pageId: json['id'] as string, url: (json['url'] as string) ?? null };
 
-  const res = await fetch(url, {
-    method: isCreate ? 'POST' : 'PATCH',
+    // If the page was archived/trashed or deleted in Notion, recreate a fresh one
+    // instead of failing (self-heal — the caller persists the new id). Re-throw
+    // any other error (permissions, validation, …).
+    const msg = typeof json['message'] === 'string' ? json['message'] as string : '';
+    const recreatable = res.status === 404 || /archiv|trash|could not find/i.test(msg);
+    if (!recreatable) throw new Error(msg || `Failed to sync agent "${agent.name}"`);
+  }
+
+  // Create a new Org DB page.
+  const res = await fetch(`${NOTION_API}/pages`, {
+    method: 'POST',
     headers: headers(apiKey),
-    body: JSON.stringify(body),
+    body: JSON.stringify({ parent: { database_id: orgDbId }, properties: buildProps(agent, { isCreate: true }) }),
   });
-
   const json = await res.json() as Record<string, unknown>;
   if (!res.ok) {
     const msg = typeof json['message'] === 'string' ? json['message'] : `Failed to sync agent "${agent.name}"`;
