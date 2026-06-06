@@ -25,7 +25,7 @@ import {
   matchAgents,
   type AgentRef,
 } from './notion-mentions.js';
-import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, type Anchor, type ThreadComment } from './notion-anchor.js';
+import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, userDisplayName, type Anchor, type ThreadComment } from './notion-anchor.js';
 import { getAnyTitle } from './notion-props.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
@@ -540,10 +540,16 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
           .where(inArray(orchestratorComments.commentId, threadIds)).all().map(r => r.commentId)
       : [],
   );
-  const priorComments = opts.thread
+  const priorCommentRows = opts.thread
     .filter(c => c.authorId !== integration.botUserId && c.id !== opts.triggeringCommentId && !ourIds.has(c.id))
     .map(c => ({ authorId: c.authorId, plainText: c.plainText }))
     .filter(c => c.plainText.trim().length > 0);
+  // Resolve author display names (cached) so the thread reads as a real conversation.
+  const priorComments = await Promise.all(priorCommentRows.map(async c => ({
+    authorId: c.authorId,
+    authorName: await userDisplayName(apiKey, c.authorId),
+    plainText: c.plainText,
+  })));
   const availableAgents = db.select().from(agents).all()
     .filter(a => a.id !== agentRef.agentId)
     .map(a => a.name);

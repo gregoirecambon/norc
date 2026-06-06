@@ -142,38 +142,86 @@ function blockToText(block: Record<string, unknown>): string {
     case 'bulleted_list_item':
     case 'to_do': return text ? `- ${text}` : '';
     case 'numbered_list_item': return text ? `1. ${text}` : '';
+    case 'toggle': return text ? `▸ ${text}` : '';
     case 'quote': return text ? `> ${text}` : '';
     case 'code': return text ? '```\n' + text + '\n```' : '';
+    case 'child_page': {
+      const t = body?.['title'];
+      return typeof t === 'string' && t ? `- 📄 ${t}` : '';
+    }
+    case 'child_database': {
+      const t = body?.['title'];
+      return typeof t === 'string' && t ? `- 🗄 ${t}` : '';
+    }
     default: return text;
   }
 }
 
 /**
- * Read a page's body as markdown-ish text (direct children, 1 level deep) — the
- * fuller detail an agent can request when it needs more than the snippet/link.
- * Capped to keep replies bounded.
+ * Read a page's body as markdown-ish text, descending into nested children
+ * (toggles, columns, bullet trees) to `maxDepth` — the fuller detail an agent
+ * needs to actually understand a page, not just its top-level lines. Capped by
+ * `maxChars` to keep prompts/replies bounded. Sub-pages/sub-databases are listed
+ * by title but not recursed into (they're separate pages an agent can pull).
  */
-export async function readPageMarkdown(apiKey: string, pageId: string, maxChars = 6000): Promise<string> {
+export async function readPageMarkdown(apiKey: string, pageId: string, maxChars = 6000, maxDepth = 3): Promise<string> {
   const lines: string[] = [];
-  let cursor: string | undefined;
-  let total = 0;
+  const budget = { total: 0, hit: false };
+  await walkBlockChildren(apiKey, pageId, 0, maxDepth, maxChars, lines, budget);
+  return lines.join('\n');
+}
 
+async function walkBlockChildren(
+  apiKey: string,
+  blockId: string,
+  depth: number,
+  maxDepth: number,
+  maxChars: number,
+  lines: string[],
+  budget: { total: number; hit: boolean },
+): Promise<void> {
+  let cursor: string | undefined;
   do {
     const qs = new URLSearchParams({ page_size: '100' });
     if (cursor) qs.set('start_cursor', cursor);
-    const res = await notionGet<Record<string, unknown>>(apiKey, `/blocks/${pageId}/children?${qs.toString()}`);
+    const res = await notionGet<Record<string, unknown>>(apiKey, `/blocks/${blockId}/children?${qs.toString()}`);
     const results = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
     for (const block of results) {
       const line = blockToText(block);
-      if (!line) continue;
-      lines.push(line);
-      total += line.length + 1;
-      if (total >= maxChars) { lines.push('…(truncated)'); return lines.join('\n'); }
+      if (line) {
+        const indented = depth > 0 ? `${'  '.repeat(depth)}${line}` : line;
+        lines.push(indented);
+        budget.total += indented.length + 1;
+        if (budget.total >= maxChars) { lines.push('…(truncated)'); budget.hit = true; return; }
+      }
+      // Descend into nested content, but never into separate sub-pages/databases.
+      const type = block['type'];
+      if (depth < maxDepth && block['has_children'] === true && type !== 'child_page' && type !== 'child_database') {
+        const id = String(block['id'] ?? '');
+        if (id) {
+          await walkBlockChildren(apiKey, id, depth + 1, maxDepth, maxChars, lines, budget);
+          if (budget.hit) return;
+        }
+      }
     }
     cursor = res['has_more'] === true && typeof res['next_cursor'] === 'string' ? res['next_cursor'] : undefined;
   } while (cursor);
+}
 
-  return lines.join('\n');
+// Notion user display names, resolved on demand and cached for the process — so
+// a comment thread reads as "Alice: …" instead of an opaque user id.
+const userNameCache = new Map<string, string>();
+export async function userDisplayName(apiKey: string, userId: string | null): Promise<string> {
+  if (!userId) return '';
+  const cached = userNameCache.get(userId);
+  if (cached !== undefined) return cached;
+  let name = '';
+  try {
+    const u = await notionGet<Record<string, unknown>>(apiKey, `/users/${userId}`);
+    if (typeof u['name'] === 'string') name = u['name'];
+  } catch { /* unknown user → empty */ }
+  userNameCache.set(userId, name);
+  return name;
 }
 
 /** Flatten a rich_text array to its plain text. */

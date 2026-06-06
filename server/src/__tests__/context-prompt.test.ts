@@ -61,6 +61,8 @@ describe('buildPrompt', () => {
     taskBlock: { name: 'Build login', status: 'In Progress', kpis: 'tests pass', priorOutput: '', lastCheckpoint: '' },
     projectBlock: { name: 'Auth', objective: 'Ship SSO', kpis: 'p95 < 200ms', docs: '' },
     companyBlocks: [],
+    relatedBlocks: [],
+    bodyMarkdown: '',
     fingerprint: 'fp',
   };
 
@@ -99,7 +101,7 @@ describe('buildPrompt', () => {
   it('includes the page reference and commented-on text on a free page', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', fingerprint: 'x' },
       anchor: pageAnchor,
       priorComments: [], request: 'what do you think?', availableAgents: [],
       commentedText: 'The pricing should be $9/mo',
@@ -116,7 +118,7 @@ describe('buildPrompt', () => {
   it('omits first-visit note for a returning agent and omits page section otherwise', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', fingerprint: 'x' },
       anchor: pageAnchor, priorComments: [], request: 'hi', availableAgents: [],
       pageRef: { title: 'Pricing notes', url: null, firstVisit: false },
     });
@@ -130,6 +132,7 @@ describe('buildPrompt', () => {
       ctx: {
         contextLevel: 'strategic', systemPrompt: 'sp', taskBlock: null, projectBlock: null,
         companyBlocks: [{ name: 'North Star', type: 'Vision', content: 'Be the open Notion agent layer' }],
+        relatedBlocks: [], bodyMarkdown: '',
         fingerprint: 'x',
       },
       anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
@@ -145,6 +148,43 @@ describe('buildPrompt', () => {
     expect(prompt).not.toContain('[STRATEGIC CONTEXT]');
   });
 
+  it('includes [PAGE CONTENT] when a page body is present, and renders author names', () => {
+    const { prompt } = buildPrompt({
+      ctx: { ...ctx, bodyMarkdown: '# Heading\n- a nested point' },
+      anchor: taskAnchor,
+      priorComments: [{ authorId: 'u1', authorName: 'Alice', plainText: 'first take please' }],
+      request: 'go', availableAgents: [],
+    });
+    expect(prompt).toContain('[PAGE CONTENT]');
+    expect(prompt).toContain('# Heading');
+    expect(prompt).toContain('- Alice: first take please');
+  });
+
+  it('renders [RELATED] rows for strategic agents', () => {
+    const { prompt } = buildPrompt({
+      ctx: { ...ctx, contextLevel: 'strategic', relatedBlocks: [{ relation: 'Meetings', name: 'Q3 Planning', summary: 'decided to ship SSO' }] },
+      anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
+    });
+    expect(prompt).toContain('[RELATED]');
+    expect(prompt).toContain('(Meetings) Q3 Planning');
+    expect(prompt).toContain('decided to ship SSO');
+  });
+
+  it('keeps [REQUEST] and [NORC RUN] even when low-priority context overflows the budget', () => {
+    const huge = 'x'.repeat(60_000);
+    const { prompt } = buildPrompt({
+      ctx: { ...ctx, bodyMarkdown: huge },
+      anchor: taskAnchor, priorComments: [], request: 'THE-REQUEST', availableAgents: [],
+      runBlock: 'run_id: r1\napi_base: https://norc/api/runs/tok',
+    });
+    expect(prompt).toContain('[REQUEST]\nTHE-REQUEST');
+    expect(prompt).toContain('[NORC RUN]');
+    expect(prompt).toContain('api_base: https://norc/api/runs/tok');
+    // The oversized body is truncated so the whole prompt stays bounded.
+    expect(prompt).toContain('…(truncated for length)');
+    expect(prompt.length).toBeLessThan(30_000);
+  });
+
   it('omits the run block when not provided', () => {
     const { prompt } = buildPrompt({
       ctx, anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
@@ -154,7 +194,7 @@ describe('buildPrompt', () => {
 
   it('omits task/conversation/agents sections when empty', () => {
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], fingerprint: 'x' },
+      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', fingerprint: 'x' },
       anchor: { kind: 'page', pageId: 'p', page: {}, parentDatabaseId: null } as Anchor,
       priorComments: [],
       request: 'hello',

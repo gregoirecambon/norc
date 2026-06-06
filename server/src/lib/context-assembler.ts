@@ -14,9 +14,17 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { notionDatabases } from '../db/schema.js';
 import { notionGet, notionQuery } from './notion-client.js';
-import { getTitle, getRichText, getSelect, getRelationIds } from './notion-props.js';
-import type { Anchor } from './notion-anchor.js';
+import { getTitle, getRichText, getSelect, getRelationIds, getAnyTitle } from './notion-props.js';
+import { readPageMarkdown, type Anchor } from './notion-anchor.js';
 import type { AgentRef } from './notion-mentions.js';
+
+// How much written content to inject. The anchor page's own body is the richest
+// signal; related rows are summaries. A final budget pass (assembleWithBudget)
+// guarantees the whole prompt stays bounded regardless of how deep these go.
+const PAGE_BODY_MAX_CHARS = 4000;
+const RELATED_SUMMARY_MAX_CHARS = 600;
+const MAX_RELATED_ROWS = 8;
+const MAX_CONTEXT_CHARS = Number(process.env['NORC_MAX_CONTEXT_CHARS']) || 24000;
 
 export type ContextLevel = 'task' | 'project' | 'strategic';
 
@@ -41,12 +49,21 @@ export interface CompanyBlock {
   content: string;
 }
 
+export interface RelatedBlock {
+  relation: string;
+  name: string;
+  summary: string;
+}
+
 export interface AssembledContext {
   contextLevel: ContextLevel;
   systemPrompt: string;
   taskBlock: TaskBlock | null;
   projectBlock: ProjectBlock | null;
   companyBlocks: CompanyBlock[];
+  relatedBlocks: RelatedBlock[];
+  /** The anchor page's actual written body (markdown-ish), not just properties. */
+  bodyMarkdown: string;
   fingerprint: string;
 }
 
@@ -123,8 +140,53 @@ export async function assembleContext(args: {
     ? await resolveCompanyBlocks(apiKey, projectProps)
     : [];
 
-  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks });
-  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, fingerprint };
+  // Deeper strategic relations — follow the project's other relations (Docs,
+  // Knowledge, Meetings, …) so a strategic agent sees the linked material, not
+  // just Company/Vision rows. Gated to `strategic` to keep narrower agents lean.
+  const relatedBlocks = contextLevel === 'strategic'
+    ? await resolveRelatedBlocks(apiKey, projectProps)
+    : [];
+
+  // The anchor page's actual written content — the single biggest context gain.
+  // Best-effort: an unreadable body just yields properties-only context.
+  let bodyMarkdown = '';
+  try {
+    bodyMarkdown = (await readPageMarkdown(apiKey, anchor.pageId, PAGE_BODY_MAX_CHARS)).trim();
+  } catch { /* body is best-effort */ }
+
+  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown });
+  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown, fingerprint };
+}
+
+// Project relations handled elsewhere (Company → strategic layer) or irrelevant
+// as context (Agents → the roster, not material).
+const SKIP_RELATIONS = new Set(['Company', 'Agents']);
+
+/**
+ * Walk the project's relation properties (other than Company/Agents) and pull a
+ * short body snippet of each linked row — meeting notes, docs, knowledge, etc.
+ * Best-effort and capped (per relation and overall) so deep graphs stay bounded.
+ */
+async function resolveRelatedBlocks(apiKey: string, projectProps: unknown): Promise<RelatedBlock[]> {
+  if (!projectProps || typeof projectProps !== 'object') return [];
+  const props = projectProps as Record<string, unknown>;
+  const out: RelatedBlock[] = [];
+
+  for (const [propName, val] of Object.entries(props)) {
+    if (SKIP_RELATIONS.has(propName)) continue;
+    if (!val || typeof val !== 'object' || (val as Record<string, unknown>)['type'] !== 'relation') continue;
+    const ids = getRelationIds(props, propName);
+    for (const id of ids.slice(0, 3)) {
+      try {
+        const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${id}`);
+        const name = getAnyTitle(page['properties']);
+        const summary = (await readPageMarkdown(apiKey, id, RELATED_SUMMARY_MAX_CHARS, 1)).trim();
+        out.push({ relation: propName, name, summary });
+        if (out.length >= MAX_RELATED_ROWS) return out;
+      } catch { /* skip unreadable row */ }
+    }
+  }
+  return out;
 }
 
 /**
@@ -171,6 +233,8 @@ async function resolveCompanyBlocks(apiKey: string, projectProps: unknown): Prom
 
 export interface PriorComment {
   authorId: string | null;
+  /** Resolved Notion display name, when known (so the thread reads naturally). */
+  authorName?: string;
   plainText: string;
 }
 
@@ -195,7 +259,12 @@ export function buildPrompt(args: {
   pageRef?: PageRef;
 }): { system: string; prompt: string } {
   const { ctx, anchor, priorComments, request, availableAgents, runBlock, commentedText, pageRef } = args;
-  const sections: string[] = [];
+
+  // Sections carry a priority (lower = kept first under the budget) and their
+  // emission order (for final assembly). priority 0 is never dropped.
+  const sections: Section[] = [];
+  let order = 0;
+  const push = (text: string, priority: number) => { sections.push({ text, priority, order: order++ }); };
 
   // Where are we? Give free-page conversations their bearings up front.
   if (pageRef) {
@@ -210,7 +279,7 @@ export function buildPrompt(args: {
         `fetch the full page content via your NORC skill (GET <api_base>/page) if you need more.`,
       );
     }
-    sections.push(lines.join('\n'));
+    push(lines.join('\n'), 3);
   }
 
   // Company-wide context (strategic agents only) — broadest first.
@@ -218,13 +287,13 @@ export function buildPrompt(args: {
     const rows = ctx.companyBlocks
       .map(c => `- ${c.type ? `(${c.type}) ` : ''}${c.name || '(untitled)'}${c.content ? `: ${c.content}` : ''}`)
       .join('\n');
-    sections.push(`[STRATEGIC CONTEXT]\n${rows}`);
+    push(`[STRATEGIC CONTEXT]\n${rows}`, 4);
   }
 
   if (anchor.kind === 'project' && ctx.projectBlock) {
-    sections.push(projectSection(ctx.projectBlock));
+    push(projectSection(ctx.projectBlock), 3);
   } else if (ctx.projectBlock) {
-    sections.push(`[CONTEXT — level: ${ctx.contextLevel}]\n${projectSection(ctx.projectBlock)}`);
+    push(`[CONTEXT — level: ${ctx.contextLevel}]\n${projectSection(ctx.projectBlock)}`, 3);
   }
 
   if (ctx.taskBlock) {
@@ -237,35 +306,78 @@ export function buildPrompt(args: {
       t.priorOutput ? `Prior agent output: ${t.priorOutput}` : '',
       t.lastCheckpoint ? `Last checkpoint: ${t.lastCheckpoint}` : '',
     ].filter(Boolean);
-    sections.push(lines.join('\n'));
+    push(lines.join('\n'), 1);
+  }
+
+  // The page's actual written body — rich but bulky, so a lower priority.
+  if (ctx.bodyMarkdown && ctx.bodyMarkdown.trim()) {
+    push(`[PAGE CONTENT]\n${ctx.bodyMarkdown.trim()}`, 5);
+  }
+
+  // Linked rows (docs, meetings, knowledge) for strategic agents — lowest priority.
+  if (ctx.relatedBlocks && ctx.relatedBlocks.length > 0) {
+    const rows = ctx.relatedBlocks
+      .map(r => `- (${r.relation}) ${r.name || '(untitled)'}${r.summary ? `\n  ${r.summary.replace(/\n/g, '\n  ')}` : ''}`)
+      .join('\n');
+    push(`[RELATED]\n${rows}`, 6);
   }
 
   // The exact text the comment is attached to — what the human is reacting to.
   if (commentedText && commentedText.trim()) {
-    sections.push(`[COMMENTED-ON TEXT]\nThe comment thread below is attached to this text:\n"""\n${commentedText.trim()}\n"""`);
+    push(`[COMMENTED-ON TEXT]\nThe comment thread below is attached to this text:\n"""\n${commentedText.trim()}\n"""`, 1);
   }
 
   if (priorComments.length > 0) {
     const convo = priorComments
-      .map(c => `- ${c.plainText}`)
+      .map(c => `- ${c.authorName ? `${c.authorName}: ` : ''}${c.plainText}`)
       .join('\n');
-    sections.push(`[CONVERSATION SO FAR]\n${convo}`);
+    push(`[CONVERSATION SO FAR]\n${convo}`, 3);
   }
 
-  sections.push(`[REQUEST]\n${request}`);
+  push(`[REQUEST]\n${request}`, 0);
 
   if (availableAgents.length > 0) {
-    sections.push(
+    push(
       `[AVAILABLE AGENTS]\nIf you need another agent, mention them in your reply and NORC will route:\n` +
       availableAgents.map(n => `- ${n}`).join('\n'),
+      2,
     );
   }
 
   // The static protocol lives in the agent's downloaded NORC skill; per task we
-  // send only the dynamic run metadata.
-  if (runBlock) sections.push(`[NORC RUN]\n${runBlock}`);
+  // send only the dynamic run metadata. Essential for the callback → never dropped.
+  if (runBlock) push(`[NORC RUN]\n${runBlock}`, 0);
 
-  return { system: ctx.systemPrompt, prompt: sections.join('\n\n') };
+  return { system: ctx.systemPrompt, prompt: assembleWithBudget(sections, MAX_CONTEXT_CHARS) };
+}
+
+interface Section { text: string; priority: number; order: number; }
+
+/**
+ * Join sections within a character budget. Priority-0 sections are always kept
+ * (the request + run contract); the rest are added in priority order until the
+ * budget is reached, truncating the overflowing section rather than dropping it
+ * silently. Output preserves the original emission order.
+ */
+function assembleWithBudget(sections: Section[], budget: number): string {
+  const byPriority = [...sections].sort((a, b) => a.priority - b.priority || a.order - b.order);
+  const kept: Section[] = [];
+  let total = 0;
+  for (const s of byPriority) {
+    const cost = s.text.length + 2;
+    if (s.priority === 0 || total + cost <= budget) {
+      kept.push(s);
+      total += cost;
+    } else {
+      const room = budget - total - 2;
+      if (room > 300) {
+        kept.push({ text: `${s.text.slice(0, room)}\n…(truncated for length)`, priority: s.priority, order: s.order });
+        total = budget;
+      }
+      // otherwise drop this section entirely
+    }
+  }
+  return kept.sort((a, b) => a.order - b.order).map(s => s.text).join('\n\n');
 }
 
 function projectSection(p: ProjectBlock): string {
