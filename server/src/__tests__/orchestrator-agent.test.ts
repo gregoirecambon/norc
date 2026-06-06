@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { parseDecision, type TriageCandidate } from '../lib/orchestrator-agent.js';
+import { parseDecision, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
+
+describe('openaiEndpoint', () => {
+  it('appends /v1/chat/completions to a bare host', () => {
+    expect(openaiEndpoint('http://localhost:4000')).toBe('http://localhost:4000/v1/chat/completions');
+    expect(openaiEndpoint('http://localhost:4000/')).toBe('http://localhost:4000/v1/chat/completions');
+  });
+  it('appends /chat/completions to a /v1 base', () => {
+    expect(openaiEndpoint('https://api.openai.com/v1')).toBe('https://api.openai.com/v1/chat/completions');
+  });
+  it('leaves a full endpoint untouched', () => {
+    expect(openaiEndpoint('http://proxy/v1/chat/completions')).toBe('http://proxy/v1/chat/completions');
+  });
+});
 
 const candidates: TriageCandidate[] = [
   { name: 'emilien', specialty: 'copywriter', capabilities: 'copywriting' },

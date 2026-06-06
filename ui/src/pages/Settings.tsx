@@ -82,6 +82,8 @@ function OrchestratorPanel() {
     try {
       const patch = {
         orchestratorEnabled: s.orchestratorEnabled,
+        orchestratorProvider: s.orchestratorProvider,
+        orchestratorBaseUrl: s.orchestratorBaseUrl,
         orchestratorModel: s.orchestratorModel,
         orchestratorSystemPrompt: s.orchestratorSystemPrompt,
         autoRouteThreshold: s.autoRouteThreshold,
@@ -96,20 +98,39 @@ function OrchestratorPanel() {
 
   if (!s) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{msg || 'Loading…'}</div>;
 
+  const isOpenAI = s.orchestratorProvider === 'openai';
+
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 560 }}>
       <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
         <input type="checkbox" checked={s.orchestratorEnabled} onChange={e => setS({ ...s, orchestratorEnabled: e.target.checked })} />
-        Enable the NORC Orchestrator (triage unassigned tasks &amp; comments)
+        Enable the NORC Triage Agent (triage unassigned tasks &amp; comments)
       </label>
 
       <div>
-        <label style={labelStyle}>Anthropic API key {s.orchestratorApiKeySet && <span style={{ color: 'var(--text-tertiary, #999)' }}>(set — leave blank to keep)</span>}</label>
-        <input style={inputStyle} type="password" placeholder={s.orchestratorApiKeySet ? '••••••••' : 'sk-ant-…'} value={apiKey} onChange={e => setApiKey(e.target.value)} />
+        <label style={labelStyle}>Provider</label>
+        <select style={inputStyle} value={s.orchestratorProvider} onChange={e => setS({ ...s, orchestratorProvider: e.target.value as NorcSettings['orchestratorProvider'] })}>
+          <option value="anthropic">Anthropic (direct)</option>
+          <option value="openai">OpenAI-compatible (LiteLLM / proxy)</option>
+        </select>
+      </div>
+
+      {isOpenAI && (
+        <div>
+          <label style={labelStyle}>Base URL (LiteLLM / OpenAI-compatible endpoint)</label>
+          <input style={inputStyle} placeholder="http://localhost:4000" value={s.orchestratorBaseUrl ?? ''} onChange={e => setS({ ...s, orchestratorBaseUrl: e.target.value })} />
+        </div>
+      )}
+
+      <div>
+        <label style={labelStyle}>
+          {isOpenAI ? 'API key (LiteLLM key — optional)' : 'Anthropic API key'} {s.orchestratorApiKeySet && <span style={{ color: 'var(--text-tertiary, #999)' }}>(set — leave blank to keep)</span>}
+        </label>
+        <input style={inputStyle} type="password" placeholder={s.orchestratorApiKeySet ? '••••••••' : (isOpenAI ? 'sk-… (optional)' : 'sk-ant-…')} value={apiKey} onChange={e => setApiKey(e.target.value)} />
       </div>
 
       <div>
-        <label style={labelStyle}>Model</label>
+        <label style={labelStyle}>Model {isOpenAI && <span style={{ color: 'var(--text-tertiary, #999)' }}>(as your proxy names it, e.g. gpt-4o or claude-sonnet-4-6)</span>}</label>
         <input style={inputStyle} value={s.orchestratorModel} onChange={e => setS({ ...s, orchestratorModel: e.target.value })} />
       </div>
 
@@ -202,8 +223,8 @@ export default function SettingsPage() {
       </Section>
 
       <Section
-        title="NORC Orchestrator (co-CEO)"
-        description="When a task or comment arrives with no agent assigned, the Orchestrator triages it: auto-routes to the best agent above the confidence threshold, otherwise suggests one to the creator. Needs an Anthropic API key."
+        title="NORC Triage Agent (co-CEO)"
+        description="When a task or comment arrives with no agent assigned, the Triage Agent triages it: auto-routes to the best agent above the confidence threshold, otherwise suggests one to the creator. Use Anthropic directly or any OpenAI-compatible endpoint (e.g. a LiteLLM proxy)."
       >
         <OrchestratorPanel />
       </Section>

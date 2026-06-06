@@ -11,7 +11,9 @@ export type NorcSettings = typeof norcSettings.$inferSelect;
 
 const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   orchestratorEnabled: false,
+  orchestratorProvider: 'anthropic',
   orchestratorApiKey: null,
+  orchestratorBaseUrl: null,
   orchestratorModel: 'claude-sonnet-4-6',
   orchestratorSystemPrompt: null,
   autoRouteThreshold: 0.7,

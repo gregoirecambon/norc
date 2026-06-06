@@ -1,6 +1,10 @@
+export type TriageProvider = 'anthropic' | 'openai';
+
 export interface NorcSettings {
   orchestratorEnabled: boolean;
+  orchestratorProvider: TriageProvider;
   orchestratorApiKeySet: boolean;
+  orchestratorBaseUrl: string | null;
   orchestratorModel: string;
   orchestratorSystemPrompt: string | null;
   autoRouteThreshold: number;
@@ -11,7 +15,9 @@ export interface NorcSettings {
 
 export interface NorcSettingsPatch {
   orchestratorEnabled?: boolean;
+  orchestratorProvider?: TriageProvider;
   orchestratorApiKey?: string | null;
+  orchestratorBaseUrl?: string | null;
   orchestratorModel?: string;
   orchestratorSystemPrompt?: string | null;
   autoRouteThreshold?: number;

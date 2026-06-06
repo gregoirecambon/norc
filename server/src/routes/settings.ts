@@ -8,7 +8,9 @@ const router: ExpressRouter = Router();
 function safe(s: NorcSettings) {
   return {
     orchestratorEnabled: s.orchestratorEnabled,
+    orchestratorProvider: s.orchestratorProvider,
     orchestratorApiKeySet: !!s.orchestratorApiKey,
+    orchestratorBaseUrl: s.orchestratorBaseUrl,
     orchestratorModel: s.orchestratorModel,
     orchestratorSystemPrompt: s.orchestratorSystemPrompt,
     autoRouteThreshold: s.autoRouteThreshold,
@@ -30,6 +32,8 @@ router.post('/', (req, res) => {
   const patch: Record<string, unknown> = {};
 
   if (typeof b['orchestratorEnabled'] === 'boolean') patch['orchestratorEnabled'] = b['orchestratorEnabled'];
+  if (b['orchestratorProvider'] === 'anthropic' || b['orchestratorProvider'] === 'openai') patch['orchestratorProvider'] = b['orchestratorProvider'];
+  if ('orchestratorBaseUrl' in b) patch['orchestratorBaseUrl'] = typeof b['orchestratorBaseUrl'] === 'string' && b['orchestratorBaseUrl'].trim() ? b['orchestratorBaseUrl'].trim() : null;
   if (typeof b['orchestratorModel'] === 'string' && b['orchestratorModel'].trim()) patch['orchestratorModel'] = b['orchestratorModel'].trim();
   if ('orchestratorSystemPrompt' in b) patch['orchestratorSystemPrompt'] = typeof b['orchestratorSystemPrompt'] === 'string' ? b['orchestratorSystemPrompt'] : null;
   if (typeof b['autoRouteThreshold'] === 'number') patch['autoRouteThreshold'] = Math.max(0, Math.min(1, b['autoRouteThreshold']));
@@ -39,7 +43,7 @@ router.post('/', (req, res) => {
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
 
   const saved = upsertNorcSettings(patch);
-  emitLog(`NORC settings updated (orchestrator ${saved.orchestratorEnabled ? 'on' : 'off'}, heartbeat ${saved.heartbeatEnabled ? 'on' : 'off'})`);
+  emitLog(`NORC settings updated (triage ${saved.orchestratorEnabled ? 'on' : 'off'} via ${saved.orchestratorProvider}, heartbeat ${saved.heartbeatEnabled ? 'on' : 'off'})`);
   res.json(safe(saved));
 });
 

@@ -108,7 +108,9 @@ export const logs = sqliteTable('logs', {
 export const norcSettings = sqliteTable('norc_settings', {
   id:                       text('id').primaryKey(),
   orchestratorEnabled:      integer('orchestrator_enabled', { mode: 'boolean' }).notNull().default(false),
+  orchestratorProvider:     text('orchestrator_provider').notNull().default('anthropic'), // 'anthropic' | 'openai'
   orchestratorApiKey:       text('orchestrator_api_key'),
+  orchestratorBaseUrl:      text('orchestrator_base_url'),   // OpenAI-compatible base (e.g. LiteLLM); optional for anthropic
   orchestratorModel:        text('orchestrator_model').notNull().default('claude-sonnet-4-6'),
   orchestratorSystemPrompt: text('orchestrator_system_prompt'),
   autoRouteThreshold:       real('auto_route_threshold').notNull().default(0.7),

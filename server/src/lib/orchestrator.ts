@@ -331,14 +331,19 @@ interface TriageOpts {
 }
 
 /**
- * The NORC Orchestrator (co-CEO): when no agent was matched, decide whether to
+ * The NORC Triage Agent (co-CEO): when no agent was matched, decide whether to
  * auto-route to the best agent (high confidence) or suggest one to the human.
  * Returns true when it took ownership of the event (so the caller skips the
  * generic "discarded" log). No-op (returns false) when disabled / no agents.
  */
 async function triageUnhandled(integration: Integration, anchor: Anchor, opts: TriageOpts): Promise<boolean> {
   const settings = getNorcSettings();
-  if (!settings?.orchestratorEnabled || !settings.orchestratorApiKey) return false;
+  if (!settings?.orchestratorEnabled) return false;
+  // anthropic needs a key; openai (LiteLLM) needs a base URL (key optional).
+  const configured = settings.orchestratorProvider === 'openai'
+    ? !!settings.orchestratorBaseUrl
+    : !!settings.orchestratorApiKey;
+  if (!configured) return false;
 
   const dedupKey = `triage:${opts.dedupId}`;
   if (alreadyProcessed(dedupKey)) return true; // already triaged — don't re-fire or re-log
@@ -363,11 +368,13 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
     .map(c => c.plainText)
     .filter(t => t.trim().length > 0);
 
-  emitLog(`triage: NORC Orchestrator analyzing unassigned ${anchor.kind} ${anchor.pageId}`);
+  emitLog(`triage: NORC Triage Agent analyzing unassigned ${anchor.kind} ${anchor.pageId}`);
   let decision;
   try {
     decision = await triage({
-      apiKey: settings.orchestratorApiKey,
+      provider: settings.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+      apiKey: settings.orchestratorApiKey ?? '',
+      baseUrl: settings.orchestratorBaseUrl,
       model: settings.orchestratorModel,
       systemPrompt: settings.orchestratorSystemPrompt ?? undefined,
       kind: anchor.kind, title, text: opts.text,
@@ -388,7 +395,7 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
     emitLog(`triage: auto-routing to "${routed.name}" (confidence ${decision.confidence.toFixed(2)})`);
     await runAgentTurn(integration, anchor, routed, {
       thread: opts.thread,
-      request: opts.text || 'The NORC Orchestrator routed this to you. Handle it using the context above.',
+      request: opts.text || 'The NORC Triage Agent routed this to you. Handle it using the context above.',
       discussionId: opts.discussionId, commentedText: opts.commentedText,
       manageTaskStatus: anchor.kind === 'task', how: 'orchestrator auto-route',
     });
@@ -398,7 +405,7 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
   // Suggest (or route below threshold): tell the human who could take it.
   const body = decision.message?.trim()
     || (decision.agent ? `I think **@${decision.agent}** could handle this.` : 'No registered agent seems suited to this yet.');
-  const text = `🧭 **NORC Orchestrator**\n${body}`;
+  const text = `🧭 **NORC Triage Agent**\n${body}`;
   if (opts.discussionId) await safeWrite('triage reply', () => postAgentReply(apiKey, opts.discussionId!, text));
   else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, text));
   emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);

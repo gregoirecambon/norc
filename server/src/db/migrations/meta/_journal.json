@@ -71,6 +71,13 @@
       "when": 1781300000000,
       "tag": "0009_norc_settings",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1781400000000,
+      "tag": "0010_orchestrator_provider",
+      "breakpoints": true
     }
   ]
 }
