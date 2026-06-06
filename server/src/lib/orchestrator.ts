@@ -277,6 +277,7 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
     await runAgentTurn(integration, anchor, agent, {
       thread, request, triggeringCommentId: commentId,
       discussionId: triggering?.discussionId ?? null, commentedText,
+      triggeringUserId: triggering?.authorId ?? triggeringUserId,
       manageTaskStatus: false, how: 'comment mention',
     });
   }
@@ -322,7 +323,8 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
       ? 'You have been assigned to this task. Complete it using the context above and report your result.'
       : `You were referenced on this ${anchor.kind}. Respond using the context above.`;
     await runAgentTurn(integration, anchor, agent, {
-      thread, request, manageTaskStatus: anchor.kind === 'task', how: anchor.kind === 'task' ? 'assignment' : 'page mention',
+      thread, request, triggeringUserId,
+      manageTaskStatus: anchor.kind === 'task', how: anchor.kind === 'task' ? 'assignment' : 'page mention',
     });
   }
 }
@@ -383,6 +385,12 @@ interface TriageCtx {
 }
 
 export type TriageOutcome = 'routed' | 'suggested' | 'asked' | 'no-agents' | 'error' | 'disabled';
+
+/** The Notion user who created a page (fallback @mention target on escalation). */
+function pageCreatedById(page: Record<string, unknown>): string | null {
+  const cb = page['created_by'] as Record<string, unknown> | undefined;
+  return cb && typeof cb['id'] === 'string' ? cb['id'] : null;
+}
 
 /** Email a human (best-effort) with a deep link, when triage needs their input. */
 async function notifyHuman(_integration: Integration, anchor: Anchor, subject: string, body: string): Promise<void> {
@@ -474,6 +482,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       thread: ctx.thread,
       request: ctx.text || 'The NORC Triage Agent routed this to you. Handle it using the context above.',
       discussionId: ctx.discussionId, commentedText: ctx.commentedText,
+      triggeringUserId: ctx.triggeringUserId,
       manageTaskStatus: anchor.kind === 'task', how: 'orchestrator auto-route',
     });
     return 'routed';
@@ -521,21 +530,24 @@ export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
     anchor = await resolveAnchor(apiKey, run.pageId);
   } catch {
     await safeWrite('timeout note', () => postAgentComment(apiKey, run.pageId,
-      `🧭 **NORC Triage Agent**\n⏱ **@${agentName}** didn't respond in time and I can't re-read this page. Please reassign.`));
+      `🧭 **NORC Triage Agent**\n⏱ **@${agentName}** didn't respond in time and I can't re-read this page. Please reassign.`,
+      run.triggeringUserId));
     return;
   }
 
+  // Who to pull in: the original trigger, else the page's creator.
+  const mentionUser = run.triggeringUserId ?? pageCreatedById(anchor.page as Record<string, unknown>);
   const prefix = `⏱ **@${agentName}** didn't respond within the timeout. Want me to hand this to someone else, or should I dig into what's wrong?`;
 
   if (!triageConfigured(getNorcSettings())) {
-    await safeWrite('timeout note', () => postAgentComment(apiKey, run.pageId, `🧭 **NORC Triage Agent**\n${prefix}`));
+    await safeWrite('timeout note', () => postAgentComment(apiKey, run.pageId, `🧭 **NORC Triage Agent**\n${prefix}`, mentionUser));
     return;
   }
 
   const thread = await listThreadComments(apiKey, run.pageId).catch(() => [] as ThreadComment[]);
   const excludeIds = new Set(timedOutAgentIdsForPage(run.pageId));
   const excludeNames = db.select().from(agents).all().filter(a => excludeIds.has(a.id)).map(a => a.name);
-  await runTriage(integration, anchor, { text: '', thread }, excludeNames, prefix);
+  await runTriage(integration, anchor, { text: '', thread, triggeringUserId: mentionUser }, excludeNames, prefix);
 }
 
 export interface ProposedTask {
@@ -633,6 +645,8 @@ interface TurnOpts {
   discussionId?: string | null;
   /** Text the triggering comment is anchored to (inline comments). */
   commentedText?: string;
+  /** The human who triggered this turn — persisted on the run for timeout escalation. */
+  triggeringUserId?: string | null;
   manageTaskStatus: boolean;
   how: string;
 }
@@ -724,6 +738,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     pageId: anchor.pageId,
     taskPageId: anchor.kind === 'task' ? anchor.pageId : null,
     anchorKind: anchor.kind,
+    triggeringUserId: opts.triggeringUserId,
     manageTaskStatus: opts.manageTaskStatus,
   });
   const { system, prompt } = buildPrompt({

@@ -141,6 +141,7 @@ export const taskRuns = sqliteTable('task_runs', {
   pageId:           text('page_id').notNull(),        // the anchor page (conversation lives here)
   taskPageId:       text('task_page_id'),             // set when the anchor is a Task
   anchorKind:       text('anchor_kind').notNull(),    // 'task' | 'project' | 'page'
+  triggeringUserId: text('triggering_user_id'),       // who kicked it off — @mentioned on timeout escalation
   manageTaskStatus: integer('manage_task_status', { mode: 'boolean' }).notNull().default(false),
   status:           text('status').notNull().default('in_flight'), // in_flight|done|failed|timed_out
   agentActed:       integer('agent_acted', { mode: 'boolean' }).notNull().default(false),

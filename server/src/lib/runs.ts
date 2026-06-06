@@ -19,6 +19,8 @@ export interface NewRun {
   taskPageId: string | null;
   anchorKind: string;
   manageTaskStatus: boolean;
+  /** The human who triggered this run — re-@mentioned if it later times out. */
+  triggeringUserId?: string | null;
 }
 
 /** Create an in-flight run and return its id + opaque token. */
@@ -32,6 +34,7 @@ export function createRun(input: NewRun): { id: string; token: string } {
     pageId: input.pageId,
     taskPageId: input.taskPageId,
     anchorKind: input.anchorKind,
+    triggeringUserId: input.triggeringUserId ?? null,
     manageTaskStatus: input.manageTaskStatus,
     status: 'in_flight',
     agentActed: false,
