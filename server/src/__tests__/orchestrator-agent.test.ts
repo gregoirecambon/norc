@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDecision, parseAssessment, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
+import { parseDecision, parseAssessment, parseTaskWorthy, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
 
 describe('openaiEndpoint', () => {
   it('appends /v1/chat/completions to a bare host', () => {
@@ -59,5 +59,19 @@ describe('parseAssessment', () => {
     expect(parseAssessment('{"outcome":"completed"}').outcome).toBe('completed');
     expect(parseAssessment('prose, no json').outcome).toBe('completed');
     expect(parseAssessment('{"outcome":"weird"}').outcome).toBe('completed');
+  });
+});
+
+describe('parseTaskWorthy', () => {
+  it('parses a task-worthy request with a title', () => {
+    const t = parseTaskWorthy('{"task":true,"title":"Draft the launch plan","kpis":"ship by Fri"}');
+    expect(t.task).toBe(true);
+    expect(t.title).toBe('Draft the launch plan');
+    expect(t.kpis).toBe('ship by Fri');
+  });
+
+  it('defaults to not-a-task on false or garbage', () => {
+    expect(parseTaskWorthy('{"task":false}').task).toBe(false);
+    expect(parseTaskWorthy('no json here').task).toBe(false);
   });
 });

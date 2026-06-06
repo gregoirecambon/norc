@@ -111,6 +111,49 @@ export async function testTriageConnection(cfg: LLMConfig): Promise<{ ok: boolea
   return callTriageLLM(cfg, 'You are a connectivity check for NORC.', 'Reply with the single word: OK');
 }
 
+// ─── Task-worthiness: is an off-task request real work or just a question? ────
+
+export interface ClassifyInput extends LLMConfig {
+  kind: string;
+  title: string;
+  text: string;
+  conversation?: string[];
+}
+
+export type TaskWorthy = { task: boolean; title?: string; kpis?: string };
+
+const CLASSIFY_SYSTEM =
+  'You decide whether a Notion comment/request is a trackable piece of WORK (something to DO that deserves ' +
+  'a task) versus just a question, discussion, or feedback. Be conservative: task=true only for clear, ' +
+  'actionable work.';
+
+/** Classify an off-task request as task-worthy (with a suggested title). Safe
+ * default: task=false (don't create spurious tasks if the LLM is unavailable). */
+export async function classifyTaskWorthy(input: ClassifyInput): Promise<TaskWorthy> {
+  const convo = input.conversation?.length ? `\nConversation:\n${input.conversation.map(l => `- ${l}`).join('\n')}` : '';
+  const prompt = [
+    `Surface: ${input.kind} page "${input.title || '(untitled)'}"`,
+    `Request/comment: ${input.text || '(none)'}${convo}`,
+    ``,
+    `Is this a trackable task (actionable work to do), or just a question/feedback?`,
+    `Respond with ONLY JSON, no prose:`,
+    `{"task":true|false,"title":"<short imperative task title>","kpis":"<success criteria or empty>"}`,
+  ].join('\n');
+  const res = await callTriageLLM(input, CLASSIFY_SYSTEM, prompt);
+  if (!res.ok || !res.text) return { task: false };
+  return parseTaskWorthy(res.text);
+}
+
+/** Parse the task-worthiness JSON; anything unparseable → not a task. */
+export function parseTaskWorthy(text: string): TaskWorthy {
+  const obj = extractJson(text);
+  if (!obj) return { task: false };
+  const task = obj['task'] === true;
+  const title = typeof obj['title'] === 'string' ? obj['title'] : undefined;
+  const kpis = typeof obj['kpis'] === 'string' ? obj['kpis'] : undefined;
+  return { task, ...(title ? { title } : {}), ...(kpis ? { kpis } : {}) };
+}
+
 // ─── Outcome assessment: did the agent do the task, or is it blocked? ─────────
 
 export interface AssessInput extends LLMConfig {

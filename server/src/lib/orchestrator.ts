@@ -31,7 +31,7 @@ import { assembleContext, buildPrompt, type PageRef } from './context-assembler.
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, type TaskRun } from './runs.js';
 import { getNorcSettings } from './norc-settings.js';
-import { triage, assessOutcome, type TriageCandidate } from './orchestrator-agent.js';
+import { triage, assessOutcome, classifyTaskWorthy, type TriageCandidate } from './orchestrator-agent.js';
 import {
   postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning,
   postCommentRich, postCommentReplyRich, type RichSeg, appendBlocks,
@@ -289,6 +289,70 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
       manageTaskStatus: false, how: 'comment mention',
     });
   }
+
+  // The agent answered the comment; if this was actual WORK (not just a question)
+  // on a non-task surface, also spin up a tracked task and route it.
+  if (anchor.kind !== 'task') {
+    await maybeCreateTaskFromWork(integration, anchor, request,
+      triggering?.discussionId ?? null, triggering?.authorId ?? triggeringUserId);
+  }
+}
+
+/**
+ * When an agent is asked to DO something on a non-task page (a real work request,
+ * not just a question), create a tracked Backlog task, note it on the thread with
+ * a real @link, and triage it (assign + @mention) — so off-task work still becomes
+ * a managed task. Task-worthiness is judged by the Triage LLM (fallback: the
+ * wantsContent heuristic). No-op for questions/feedback.
+ */
+async function maybeCreateTaskFromWork(
+  integration: Integration, anchor: Anchor, request: string,
+  discussionId: string | null, triggeringUserId: string | null,
+): Promise<void> {
+  if (anchor.kind === 'task' || !request.trim()) return;
+  const settings = getNorcSettings();
+  const apiKey = integration.apiKey;
+
+  let title = '';
+  let kpis: string | undefined;
+  if (triageConfigured(settings)) {
+    try {
+      const cls = await classifyTaskWorthy({
+        provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+        apiKey: settings!.orchestratorApiKey ?? '', baseUrl: settings!.orchestratorBaseUrl, model: settings!.orchestratorModel,
+        kind: anchor.kind, title: getAnyTitle((anchor.page as Record<string, unknown>)['properties']), text: request,
+      });
+      if (!cls.task) return;
+      title = cls.title?.trim() || request.slice(0, 80);
+      kpis = cls.kpis?.trim() || undefined;
+    } catch (err) { emitLog(`task-from-work: classify failed: ${err instanceof Error ? err.message : 'unknown'}`); return; }
+  } else {
+    if (!wantsContent(request)) return;
+    title = request.slice(0, 80);
+  }
+
+  const tasksDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
+  if (!tasksDb) { emitLog('task-from-work skipped: no tasks DB provisioned'); return; }
+  const projectId = anchor.kind === 'project' ? anchor.pageId : null;
+
+  let pageId = '';
+  try {
+    ({ pageId } = await createTaskPage(apiKey, tasksDb.notionDatabaseId, { title, kpis: kpis ?? '', projectId }));
+  } catch (err) { emitLog(`task-from-work: create failed: ${err instanceof Error ? err.message : 'unknown'}`); return; }
+  await safeWrite('task body', () => appendBlocks(apiKey, pageId, markdownToBlocks(request)));
+  markProcessed(`triage:${pageId}`); // a creation webhook must not re-triage it
+  emitLog(`task-from-work: created "${title}" (${pageId}) from ${anchor.kind} ${anchor.pageId}`);
+
+  // Tell the thread, with a real @link to the new task.
+  await postAgentRich(apiKey, anchor.pageId, discussionId, [
+    `🧭 **NORC Triage Agent**\nI turned this into a task: `, { pageId }, ` — routing it now.`,
+  ]);
+
+  // Assign/route the new task (sets Assigned To + real @mention via M1/M2).
+  try {
+    const taskAnchor = await resolveAnchor(apiKey, pageId);
+    await runTriage(integration, taskAnchor, { text: request, thread: [], triggeringUserId }, [], '');
+  } catch (err) { emitLog(`task-from-work: triage failed: ${err instanceof Error ? err.message : 'unknown'}`); }
 }
 
 /** page.* — mentions in property values / block content. On a Task = work. */
