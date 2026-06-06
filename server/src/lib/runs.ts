@@ -71,6 +71,15 @@ export function hasInFlightRun(agentId: string): boolean {
     .all()[0];
 }
 
+/** Distinct agent ids that have a timed-out run on this page — the Triage Agent
+ * excludes these when re-routing so it doesn't pick an agent that already failed. */
+export function timedOutAgentIdsForPage(pageId: string): string[] {
+  const rows = db.select().from(taskRuns)
+    .where(and(eq(taskRuns.pageId, pageId), eq(taskRuns.status, 'timed_out')))
+    .all();
+  return [...new Set(rows.map(r => r.agentId))];
+}
+
 /** Finalize a run (terminal). No-op if already finalized. */
 export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>): void {
   db.update(taskRuns)

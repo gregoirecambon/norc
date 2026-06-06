@@ -2,6 +2,7 @@ import { WebSocket } from 'ws';
 import { randomUUID, generateKeyPairSync, sign as cryptoSign, createHash } from 'node:crypto';
 import type { PingResult } from '../types.js';
 import type { DispatchResult } from './index.js';
+import { emitLog } from '../lib/logger.js';
 
 // OpenClaw wire-protocol negotiation range advertised on connect.
 // The gateway accepts a client when maxProtocol >= its version && minProtocol <= its version.
@@ -489,6 +490,10 @@ async function dispatchViaWebSocket(
       try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
       const frame = asRecord(parsed);
       if (frame?.id === reqId && frame['type'] === 'res') {
+        // Log the raw response so we can see whether the gateway returns the
+        // agent's output here (sync) or just an ACK (agent must call the API).
+        const dump = rawDataToString(raw);
+        emitLog(`openclaw res frame: ${dump.length > 600 ? dump.slice(0, 600) + '…' : dump}`);
         clearTimeout(timeout);
         try { ws.close(); } catch { /* */ }
         if (frame['ok'] === true) resolve(extractResultText(frame));

@@ -19,6 +19,7 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   autoRouteThreshold: 0.7,
   heartbeatEnabled: true,
   heartbeatIntervalSec: 60,
+  runTimeoutSec: 300,
 };
 
 export function getNorcSettings(): NorcSettings | null {

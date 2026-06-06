@@ -7,6 +7,7 @@ export interface NotionIntegration {
   workspaceName: string | null;
   botName: string | null;
   webhookVerifyToken: string | null;
+  webhookVerifiedAt: number | null;
   webhookUrl: string;
   parentPageId: string | null;
   workspaceStatus: WorkspaceStatus;

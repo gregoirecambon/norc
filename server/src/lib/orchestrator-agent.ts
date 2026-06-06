@@ -37,9 +37,11 @@ export type TriageDecision =
 
 const DEFAULT_SYSTEM =
   'You are the NORC Triage Agent, a co-CEO for a Notion workspace staffed by AI and human agents. ' +
-  'When work arrives with nobody assigned, you decide who should handle it. Be decisive but honest: ' +
-  'route only when an agent clearly fits, suggest when a human should confirm, and ignore when no ' +
-  'agent is suitable or no action is needed. Prefer the most specialized fit.';
+  'When work arrives with nobody assigned, you decide who should handle it. ALWAYS write a clear, friendly ' +
+  '`message` addressed to the team: when routing, name the agent and explain WHY you picked them; when ' +
+  'unsure, ASK who should take it and name your best guess. Prefer "suggest" (ask a human to confirm) whenever ' +
+  'there is any doubt; use "route" only when one agent is an obvious, confident fit; use "ignore" only for ' +
+  'noise or items needing no agent. Prefer the most specialized fit.';
 
 export async function triage(input: TriageInput): Promise<TriageDecision> {
   const system = input.systemPrompt?.trim() || DEFAULT_SYSTEM;

@@ -29,7 +29,7 @@ import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBloc
 import { getAnyTitle } from './notion-props.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
-import { createRun, getRun, finalizeRun, hasPriorRunOnPage } from './runs.js';
+import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, type TaskRun } from './runs.js';
 import { getNorcSettings } from './norc-settings.js';
 import { triage } from './orchestrator-agent.js';
 import {
@@ -336,22 +336,59 @@ interface TriageOpts {
  * Returns true when it took ownership of the event (so the caller skips the
  * generic "discarded" log). No-op (returns false) when disabled / no agents.
  */
-async function triageUnhandled(integration: Integration, anchor: Anchor, opts: TriageOpts): Promise<boolean> {
-  const settings = getNorcSettings();
+function triageConfigured(settings: ReturnType<typeof getNorcSettings>): boolean {
   if (!settings?.orchestratorEnabled) return false;
   // anthropic needs a key; openai (LiteLLM) needs a base URL (key optional).
-  const configured = settings.orchestratorProvider === 'openai'
-    ? !!settings.orchestratorBaseUrl
-    : !!settings.orchestratorApiKey;
-  if (!configured) return false;
+  return settings.orchestratorProvider === 'openai' ? !!settings.orchestratorBaseUrl : !!settings.orchestratorApiKey;
+}
+
+async function triageUnhandled(integration: Integration, anchor: Anchor, opts: TriageOpts): Promise<boolean> {
+  if (!triageConfigured(getNorcSettings())) return false;
 
   const dedupKey = `triage:${opts.dedupId}`;
   if (alreadyProcessed(dedupKey)) return true; // already triaged — don't re-fire or re-log
   markProcessed(dedupKey);
 
+  if (db.select().from(agents).all().length === 0) { emitLog('triage skipped: no agents registered'); return false; }
+
+  await runTriage(integration, anchor, {
+    text: opts.text, thread: opts.thread, discussionId: opts.discussionId, commentedText: opts.commentedText,
+  }, [], '');
+  return true;
+}
+
+interface TriageCtx {
+  text: string;
+  thread: ThreadComment[];
+  discussionId?: string | null;
+  commentedText?: string;
+}
+
+/**
+ * Run the Triage Agent and apply its decision. Always communicates in Notion
+ * (route → tag + explain then dispatch; suggest/ignore → ask). `excludeNames`
+ * drops agents from the roster (used on re-routing after a timeout, so a failed
+ * agent isn't picked again). `notePrefix` is prepended to every message.
+ */
+async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCtx, excludeNames: string[], notePrefix: string): Promise<void> {
+  const settings = getNorcSettings();
+  if (!triageConfigured(settings)) return;
   const apiKey = integration.apiKey;
-  const agentRows = db.select().from(agents).all();
-  if (agentRows.length === 0) { emitLog('triage skipped: no agents registered'); return false; }
+  const prefix = notePrefix ? `${notePrefix}\n\n` : '';
+
+  const announce = async (text: string) => {
+    const full = `🧭 **NORC Triage Agent**\n${prefix}${text}`;
+    if (ctx.discussionId) await safeWrite('triage reply', () => postAgentReply(apiKey, ctx.discussionId!, full));
+    else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, full));
+  };
+
+  const excl = new Set(excludeNames.map(n => n.toLowerCase()));
+  const agentRows = db.select().from(agents).all().filter(a => !excl.has(a.name.toLowerCase()));
+  if (agentRows.length === 0) {
+    await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.');
+    emitLog('triage: no remaining agents after exclusions');
+    return;
+  }
 
   const candidates = agentRows.map(a => {
     let meta: Record<string, unknown> = {};
@@ -363,53 +400,103 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
     };
   });
   const title = getAnyTitle((anchor.page as Record<string, unknown>)['properties']);
-  const conversation = opts.thread
+  const conversation = ctx.thread
     .filter(c => c.authorId !== integration.botUserId)
     .map(c => c.plainText)
     .filter(t => t.trim().length > 0);
 
-  emitLog(`triage: NORC Triage Agent analyzing unassigned ${anchor.kind} ${anchor.pageId}`);
+  emitLog(`triage: NORC Triage Agent analyzing unassigned ${anchor.kind} ${anchor.pageId}${excludeNames.length ? ` (excluding: ${excludeNames.join(', ')})` : ''}`);
   let decision;
   try {
     decision = await triage({
-      provider: settings.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
-      apiKey: settings.orchestratorApiKey ?? '',
-      baseUrl: settings.orchestratorBaseUrl,
-      model: settings.orchestratorModel,
-      systemPrompt: settings.orchestratorSystemPrompt ?? undefined,
-      kind: anchor.kind, title, text: opts.text,
-      commentedText: opts.commentedText, conversation, candidates,
+      provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+      apiKey: settings!.orchestratorApiKey ?? '',
+      baseUrl: settings!.orchestratorBaseUrl,
+      model: settings!.orchestratorModel,
+      systemPrompt: settings!.orchestratorSystemPrompt ?? undefined,
+      kind: anchor.kind, title, text: ctx.text,
+      commentedText: ctx.commentedText, conversation, candidates,
     });
   } catch (err) {
     emitLog(`triage error: ${err instanceof Error ? err.message : 'unknown'}`);
-    return false;
+    await announce('I hit an error deciding who should take this — please assign someone manually.');
+    return;
   }
 
   if (decision.decision === 'ignore') {
-    emitLog(`triage: no routing (${decision.message || 'ignored'})`);
-    return true;
+    await announce(decision.message?.trim() || 'No one is assigned and no registered agent clearly fits this. Who should take it?');
+    emitLog(`triage: no clear owner (${decision.message || 'asked'})`);
+    return;
   }
 
   const routed = decision.agent ? matchAgentByName(decision.agent) : null;
-  if (decision.decision === 'route' && routed && decision.confidence >= settings.autoRouteThreshold) {
+  if (decision.decision === 'route' && routed && decision.confidence >= settings!.autoRouteThreshold) {
     emitLog(`triage: auto-routing to "${routed.name}" (confidence ${decision.confidence.toFixed(2)})`);
+    const why = decision.message?.trim() || `No one was assigned, so I'm routing this to **@${routed.name}**.`;
+    await announce(`${why}\n\n_Routing to **@${routed.name}** now — reply here to redirect._`);
     await runAgentTurn(integration, anchor, routed, {
-      thread: opts.thread,
-      request: opts.text || 'The NORC Triage Agent routed this to you. Handle it using the context above.',
-      discussionId: opts.discussionId, commentedText: opts.commentedText,
+      thread: ctx.thread,
+      request: ctx.text || 'The NORC Triage Agent routed this to you. Handle it using the context above.',
+      discussionId: ctx.discussionId, commentedText: ctx.commentedText,
       manageTaskStatus: anchor.kind === 'task', how: 'orchestrator auto-route',
     });
-    return true;
+    return;
   }
 
-  // Suggest (or route below threshold): tell the human who could take it.
-  const body = decision.message?.trim()
-    || (decision.agent ? `I think **@${decision.agent}** could handle this.` : 'No registered agent seems suited to this yet.');
-  const text = `🧭 **NORC Triage Agent**\n${body}`;
-  if (opts.discussionId) await safeWrite('triage reply', () => postAgentReply(apiKey, opts.discussionId!, text));
-  else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, text));
+  // Suggest (or "route" below threshold): ask the human to confirm.
+  await announce(decision.message?.trim()
+    || (decision.agent
+      ? `No one is assigned. I think **@${decision.agent}** could handle this — reply "@${decision.agent} go" to assign.`
+      : 'No one is assigned and no registered agent clearly fits. Who should take this?'));
   emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
-  return true;
+}
+
+/**
+ * A dispatched run never reported back in time. Free the agent, tell the team in
+ * Notion, and (if triage is on) re-route to a DIFFERENT agent — excluding every
+ * agent that has already timed out on this page, so it won't keep picking a dead
+ * one. When all agents are exhausted it asks a human.
+ */
+export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
+  const integration = db.select().from(notionIntegration).all()[0] ?? null;
+  if (!integration || integration.status !== 'active') return;
+  const apiKey = integration.apiKey;
+
+  const dedupKey = `timeout:${run.id}`;
+  if (alreadyProcessed(dedupKey)) return;
+  markProcessed(dedupKey);
+
+  const agentRow = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
+  const agentName = agentRow?.name ?? run.agentId;
+
+  // Free the agent + revert task status so the work isn't stuck "In Progress".
+  if (agentRow?.orgDbPageId) await safeWrite('agent available', () => setAgentStatus(apiKey, agentRow.orgDbPageId!, 'Available'));
+  const taskPageId = run.taskPageId;
+  if (run.manageTaskStatus && taskPageId) await safeWrite('task backlog', () => setTaskStatus(apiKey, taskPageId, 'Backlog'));
+
+  emitLog(`run ${run.id} timed out — "${agentName}" didn't report back; escalating`);
+  emitEvent({ type: 'mention.detected', data: { agentId: run.agentId, agentName, pageId: run.pageId, anchorKind: run.anchorKind } });
+
+  let anchor: Anchor;
+  try {
+    anchor = await resolveAnchor(apiKey, run.pageId);
+  } catch {
+    await safeWrite('timeout note', () => postAgentComment(apiKey, run.pageId,
+      `🧭 **NORC Triage Agent**\n⏱ **@${agentName}** didn't respond in time and I can't re-read this page. Please reassign.`));
+    return;
+  }
+
+  const prefix = `⏱ **@${agentName}** didn't respond within the timeout. Want me to hand this to someone else, or should I dig into what's wrong?`;
+
+  if (!triageConfigured(getNorcSettings())) {
+    await safeWrite('timeout note', () => postAgentComment(apiKey, run.pageId, `🧭 **NORC Triage Agent**\n${prefix}`));
+    return;
+  }
+
+  const thread = await listThreadComments(apiKey, run.pageId).catch(() => [] as ThreadComment[]);
+  const excludeIds = new Set(timedOutAgentIdsForPage(run.pageId));
+  const excludeNames = db.select().from(agents).all().filter(a => excludeIds.has(a.id)).map(a => a.name);
+  await runTriage(integration, anchor, { text: '', thread }, excludeNames, prefix);
 }
 
 interface TurnOpts {

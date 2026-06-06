@@ -40,8 +40,9 @@ router.post('/', (req, res) => {
       return;
     }
 
+    const nowTs = Date.now();
     db.update(notionIntegration)
-      .set({ webhookVerifyToken: token, status: 'active', updatedAt: Date.now() })
+      .set({ webhookVerifyToken: token, status: 'active', webhookVerifiedAt: nowTs, updatedAt: nowTs })
       .where(eq(notionIntegration.id, row.id))
       .run();
 

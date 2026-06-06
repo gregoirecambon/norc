@@ -37,6 +37,7 @@ function safeRow(row: typeof notionIntegration.$inferSelect) {
     workspaceName: row.workspaceName,
     botName: row.botName,
     webhookVerifyToken: row.webhookVerifyToken,
+    webhookVerifiedAt: row.webhookVerifiedAt,
     webhookUrl: getWebhookUrl(),
     parentPageId: row.parentPageId,
     workspaceStatus: row.workspaceStatus,

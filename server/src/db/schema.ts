@@ -64,6 +64,7 @@ export const notionIntegration = sqliteTable('notion_integration', {
   botName:            text('bot_name'),
   botUserId:          text('bot_user_id'),         // integration bot user id — used for write-back loop prevention
   webhookVerifyToken: text('webhook_verify_token'),
+  webhookVerifiedAt:  integer('webhook_verified_at'),   // when the verification secret was received
   status:             text('status').notNull().default('pending_key'),
   parentPageId:       text('parent_page_id'),
   workspaceStatus:    text('workspace_status').notNull().default('not_provisioned'),
@@ -116,6 +117,7 @@ export const norcSettings = sqliteTable('norc_settings', {
   autoRouteThreshold:       real('auto_route_threshold').notNull().default(0.7),
   heartbeatEnabled:         integer('heartbeat_enabled', { mode: 'boolean' }).notNull().default(true),
   heartbeatIntervalSec:     integer('heartbeat_interval_sec').notNull().default(60),
+  runTimeoutSec:            integer('run_timeout_sec').notNull().default(300),  // dispatch → escalate if no callback
   createdAt:                integer('created_at').notNull(),
   updatedAt:                integer('updated_at').notNull(),
 });

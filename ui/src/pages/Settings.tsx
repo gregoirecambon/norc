@@ -106,6 +106,7 @@ function OrchestratorPanel() {
         orchestratorModel: s.orchestratorModel,
         orchestratorSystemPrompt: s.orchestratorSystemPrompt,
         autoRouteThreshold: s.autoRouteThreshold,
+        runTimeoutSec: s.runTimeoutSec,
         ...(apiKey.trim() ? { orchestratorApiKey: apiKey.trim() } : {}),
       };
       const next = await saveSettings(patch);
@@ -154,8 +155,14 @@ function OrchestratorPanel() {
       </div>
 
       <div>
-        <label style={labelStyle}>Auto-route threshold: <strong>{s.autoRouteThreshold.toFixed(2)}</strong> — at or above this confidence the Orchestrator dispatches directly; below it only suggests.</label>
+        <label style={labelStyle}>Auto-route threshold: <strong>{s.autoRouteThreshold.toFixed(2)}</strong> — at or above this confidence the Triage Agent dispatches directly; below it only suggests.</label>
         <input type="range" min={0} max={1} step={0.05} value={s.autoRouteThreshold} onChange={e => setS({ ...s, autoRouteThreshold: parseFloat(e.target.value) })} style={{ width: '100%' }} />
+      </div>
+
+      <div>
+        <label style={labelStyle}>Response timeout (seconds, min 60) — if a routed agent doesn't report back in this time, NORC frees it, tells the team in Notion, and re-routes to another agent.</label>
+        <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={60} value={s.runTimeoutSec}
+          onChange={e => setS({ ...s, runTimeoutSec: parseInt(e.target.value || '300', 10) })} />
       </div>
 
       <div>

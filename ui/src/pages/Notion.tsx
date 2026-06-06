@@ -4,6 +4,19 @@ import {
   type NotionConfig, type NotionIntegration, type NotionDatabase,
 } from '../api/notion.js';
 
+/** Compact relative time, e.g. "just now", "5 min ago", "2 h ago", "3 d ago". */
+function timeAgo(ts: number): string {
+  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
+  if (sec < 10) return 'just now';
+  if (sec < 60) return `${sec} s ago`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min} min ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr} h ago`;
+  const d = Math.floor(hr / 24);
+  return `${d} d ago`;
+}
+
 const REQUIRED_CAPABILITIES = [
   'Read content',
   'Update content',
@@ -106,6 +119,13 @@ export default function NotionPage() {
   const [pageInput, setPageInput] = useState('');
   const [provisionError, setProvisionError] = useState<string | null>(null);
   const [provisioning, setProvisioning] = useState(false);
+  const [, setNow] = useState(Date.now()); // ticker so "time ago" stays current
+
+  // Re-render every 30s to refresh relative timestamps.
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
 
   const integration = config?.integration ?? null;
   const webhookUrl = config?.webhookUrl ?? '';
@@ -158,7 +178,7 @@ export default function NotionPage() {
         if (!prev?.integration) return prev;
         return {
           ...prev,
-          integration: { ...prev.integration, status: 'active', webhookVerifyToken: data.verificationToken },
+          integration: { ...prev.integration, status: 'active', webhookVerifyToken: data.verificationToken, webhookVerifiedAt: Date.now(), updatedAt: Date.now() },
         };
       });
     });
@@ -381,8 +401,16 @@ export default function NotionPage() {
             background: 'var(--tint-sky)', border: '1px solid var(--border)',
             borderRadius: 'var(--radius-md)',
           }}>
-            <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--tint-sky-text)', marginBottom: 10, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
-              Verification secret received
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+              <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--tint-sky-text)', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+                Verification secret received
+              </span>
+              <span
+                title={new Date(integration.webhookVerifiedAt ?? integration.updatedAt).toLocaleString()}
+                style={{ fontSize: 11, fontWeight: 500, color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}
+              >
+                {timeAgo(integration.webhookVerifiedAt ?? integration.updatedAt)}
+              </span>
             </div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
               <div style={{

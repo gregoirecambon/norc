@@ -8,6 +8,7 @@ export interface NorcSettings {
   orchestratorModel: string;
   orchestratorSystemPrompt: string | null;
   autoRouteThreshold: number;
+  runTimeoutSec: number;
   heartbeatEnabled: boolean;
   heartbeatIntervalSec: number;
   updatedAt: number;
@@ -21,6 +22,7 @@ export interface NorcSettingsPatch {
   orchestratorModel?: string;
   orchestratorSystemPrompt?: string | null;
   autoRouteThreshold?: number;
+  runTimeoutSec?: number;
   heartbeatEnabled?: boolean;
   heartbeatIntervalSec?: number;
 }

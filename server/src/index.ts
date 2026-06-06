@@ -26,6 +26,7 @@ import { skillRouter } from './routes/skill.js';
 import { settingsRouter } from './routes/settings.js';
 import { sweepStaleRuns } from './lib/runs.js';
 import { runHeartbeat } from './lib/heartbeat.js';
+import { escalateTimedOutRun } from './lib/orchestrator.js';
 import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
 
 const app = express();
@@ -77,11 +78,15 @@ setInterval(() => {
   }
 }, 15_000);
 
-// Time out agent runs left in flight (e.g. an async agent that never reported back).
+// Time out agent runs left in flight (an async agent that never reported back),
+// then escalate each: free the agent, tell the team in Notion, and (if triage is
+// on) re-route to a different agent. Timeout is configurable (default 5 min).
 setInterval(() => {
-  const timedOut = sweepStaleRuns(30 * 60_000);
+  const timeoutMs = Math.max(60, getNorcSettingsOrDefault().runTimeoutSec) * 1000;
+  const timedOut = sweepStaleRuns(timeoutMs);
   for (const run of timedOut) {
-    emitLog(`run ${run.id} timed out (agent "${run.agentId}" did not report back)`);
+    void escalateTimedOutRun(run).catch(err =>
+      emitLog(`escalation error for run ${run.id}: ${err instanceof Error ? err.message : 'unknown'}`));
   }
 }, 60_000);
 

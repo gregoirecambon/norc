@@ -15,6 +15,7 @@ function safe(s: NorcSettings) {
     orchestratorModel: s.orchestratorModel,
     orchestratorSystemPrompt: s.orchestratorSystemPrompt,
     autoRouteThreshold: s.autoRouteThreshold,
+    runTimeoutSec: s.runTimeoutSec,
     heartbeatEnabled: s.heartbeatEnabled,
     heartbeatIntervalSec: s.heartbeatIntervalSec,
     updatedAt: s.updatedAt,
@@ -38,6 +39,7 @@ router.post('/', (req, res) => {
   if (typeof b['orchestratorModel'] === 'string' && b['orchestratorModel'].trim()) patch['orchestratorModel'] = b['orchestratorModel'].trim();
   if ('orchestratorSystemPrompt' in b) patch['orchestratorSystemPrompt'] = typeof b['orchestratorSystemPrompt'] === 'string' ? b['orchestratorSystemPrompt'] : null;
   if (typeof b['autoRouteThreshold'] === 'number') patch['autoRouteThreshold'] = Math.max(0, Math.min(1, b['autoRouteThreshold']));
+  if (typeof b['runTimeoutSec'] === 'number' && b['runTimeoutSec'] >= 60) patch['runTimeoutSec'] = Math.floor(b['runTimeoutSec']);
   if (typeof b['heartbeatEnabled'] === 'boolean') patch['heartbeatEnabled'] = b['heartbeatEnabled'];
   if (typeof b['heartbeatIntervalSec'] === 'number' && b['heartbeatIntervalSec'] >= 10) patch['heartbeatIntervalSec'] = Math.floor(b['heartbeatIntervalSec']);
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
