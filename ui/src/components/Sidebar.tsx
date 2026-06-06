@@ -15,6 +15,17 @@ function AgentsIcon() {
   );
 }
 
+function OperationsIcon() {
+  // Sliders / control board
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <path d="M2 4.5h11M2 10.5h11" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+      <circle cx="5" cy="4.5" r="1.6" fill="var(--surface1)" stroke="currentColor" strokeWidth="1.3"/>
+      <circle cx="10" cy="10.5" r="1.6" fill="var(--surface1)" stroke="currentColor" strokeWidth="1.3"/>
+    </svg>
+  );
+}
+
 function LogsIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
@@ -105,6 +116,7 @@ export default function Sidebar({ currentPage, onNavigate }: Props) {
       <div style={{ flex: 1, paddingTop: 10, paddingBottom: 10 }}>
         <div style={sectionLabel}>Workspace</div>
         <NavItem id="agents" Icon={AgentsIcon} label="AI Agents" />
+        <NavItem id="operations" Icon={OperationsIcon} label="Operations" />
 
         <div style={{ ...sectionLabel, marginTop: 16 }}>Monitor</div>
         <NavItem id="logs" Icon={LogsIcon} label="Logs" />

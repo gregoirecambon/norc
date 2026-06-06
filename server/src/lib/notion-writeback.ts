@@ -41,6 +41,11 @@ export async function createTaskPage(apiKey: string, tasksDbId: string, task: Ne
   return { pageId: String(res['id'] ?? '') };
 }
 
+/** Archive a page (move to Notion trash) — e.g. dismissing a proposed task. */
+export async function archivePage(apiKey: string, pageId: string): Promise<void> {
+  await notionPatch(apiKey, `/pages/${pageId}`, { archived: true });
+}
+
 /** Set (or clear, with null) a task's "Scheduled For" date. */
 export async function setTaskScheduledFor(apiKey: string, taskPageId: string, iso: string | null): Promise<void> {
   await notionPatch(apiKey, `/pages/${taskPageId}`, {

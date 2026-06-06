@@ -39,6 +39,12 @@ export function getSelect(properties: unknown, name: string): string | null {
   return typeof sel?.['name'] === 'string' ? sel['name'] : null;
 }
 
+/** A number property's value, or null. */
+export function getNumber(properties: unknown, name: string): number | null {
+  const p = prop(properties, name);
+  return typeof p?.['number'] === 'number' ? (p['number'] as number) : null;
+}
+
 /** A date property's start as an ISO string, or null. */
 export function getDate(properties: unknown, name: string): string | null {
   const p = prop(properties, name);
