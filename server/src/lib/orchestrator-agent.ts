@@ -14,6 +14,7 @@ export interface TriageCandidate {
   name: string;
   specialty: string;
   capabilities: string;
+  technology?: string;
 }
 
 export interface TriageInput {
@@ -37,17 +38,20 @@ export type TriageDecision =
 
 const DEFAULT_SYSTEM =
   'You are the NORC Triage Agent, a co-CEO for a Notion workspace staffed by AI and human agents. ' +
-  'When work arrives with nobody assigned, you decide who should handle it. ALWAYS write a clear, friendly ' +
-  '`message` addressed to the team: when routing, name the agent and explain WHY you picked them; when ' +
-  'unsure, ASK who should take it and name your best guess. Prefer "suggest" (ask a human to confirm) whenever ' +
-  'there is any doubt; use "route" only when one agent is an obvious, confident fit; use "ignore" only for ' +
-  'noise or items needing no agent. Prefer the most specialized fit.';
+  'When work arrives with nobody assigned, you decide who should handle it — but ONLY on evidence. ' +
+  'You may only choose "route" or "suggest" when a candidate\'s specialty/capabilities/technology in the ' +
+  'roster CONCRETELY match the task. If no candidate clearly has the capability for this work, you MUST NOT ' +
+  'guess or invent a fit: use "ignore" and ASK the human who should take it. Never name an agent that is not ' +
+  'in the roster. ALWAYS write a clear, friendly `message` to the team: when routing, name the agent and ' +
+  'explain WHY their listed capabilities fit; when unsure, say no listed agent clearly matches and ask who ' +
+  'should take it. Prefer "suggest" (human confirms) under any doubt; "route" only for an obvious, confident, ' +
+  'evidenced fit; "ignore" for noise, items needing no agent, or when no agent has the needed capability.';
 
 export async function triage(input: TriageInput): Promise<TriageDecision> {
   const system = input.systemPrompt?.trim() || DEFAULT_SYSTEM;
   const roster = input.candidates.length
     ? input.candidates
-        .map(c => `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}`)
+        .map(c => `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.technology ? ` (tech: ${c.technology})` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}`)
         .join('\n')
     : '(no agents registered)';
   const commented = input.commentedText?.trim()
@@ -69,10 +73,11 @@ export async function triage(input: TriageInput): Promise<TriageDecision> {
     ``,
     `Respond with ONLY a JSON object, no prose or code fences:`,
     `{"decision":"route"|"suggest"|"ignore","agent":"<exact agent name from the list, or null>","confidence":<number 0..1>,"message":"<one short sentence shown to the user in Notion>"}`,
-    `- route: confident a specific agent should do this now.`,
-    `- suggest: a likely agent, but a human should confirm.`,
-    `- ignore: no suitable agent, or no agent action is needed.`,
-    `In "message", address the user and write the agent as @name when routing or suggesting.`,
+    `- route: a listed agent's capabilities clearly and confidently match — dispatch now.`,
+    `- suggest: a listed agent likely fits, but a human should confirm.`,
+    `- ignore: NO listed agent has the needed capability (ask the human), or no agent action is needed.`,
+    `Only pick an agent whose listed specialty/capabilities/technology actually cover this task. Do NOT guess or invent a fit, and never name an agent not in the list above.`,
+    `In "message", address the user and write the agent as @name when routing or suggesting; when ignoring for lack of a fit, say so and ask who should take it.`,
   ].join('\n');
 
   const res = await callTriageLLM(input, system, prompt);

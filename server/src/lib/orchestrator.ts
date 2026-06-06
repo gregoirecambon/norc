@@ -409,6 +409,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       name: a.name,
       specialty: typeof meta['specialty'] === 'string' ? meta['specialty'] : (typeof meta['role'] === 'string' ? meta['role'] : ''),
       capabilities: typeof meta['capabilities'] === 'string' ? meta['capabilities'] : '',
+      technology: typeof meta['technology'] === 'string' ? meta['technology'] : '',
     };
   });
   const title = getAnyTitle((anchor.page as Record<string, unknown>)['properties']);
