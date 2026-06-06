@@ -26,7 +26,7 @@ import {
   type AgentRef,
 } from './notion-mentions.js';
 import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, userDisplayName, type Anchor, type ThreadComment } from './notion-anchor.js';
-import { getAnyTitle, getRelationIds } from './notion-props.js';
+import { getAnyTitle, getRelationIds, getDate } from './notion-props.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, type TaskRun } from './runs.js';
@@ -366,6 +366,37 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
 
   const anchor = await resolveAnchor(apiKey, pageId);
   const properties = (anchor.page as Record<string, unknown>)['properties'];
+
+  // A task with a "Scheduled For" date is owned by the SCHEDULER, not the
+  // create/assign webhook — otherwise it would run the moment it's assigned,
+  // ignoring the schedule. Defer here so the scheduler runs it at the due time.
+  if (anchor.kind === 'task') {
+    const sched = getDate(properties, 'Scheduled For');
+    const ms = sched ? Date.parse(sched) : NaN;
+    if (!Number.isNaN(ms)) {
+      const schedulerOn = !!getNorcSettings()?.schedulerEnabled;
+      const future = ms > Date.now();
+      if (schedulerOn) {
+        // Single owner: the scheduler runs it (past-due is picked up within a poll).
+        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} — deferring to the scheduler`);
+        return;
+      }
+      if (future) {
+        // Can't honor a future schedule without the scheduler — defer + tell the human once.
+        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} but the scheduler is OFF — deferring`);
+        const warnKey = `sched-off-warn:${pageId}`;
+        if (!alreadyProcessed(warnKey)) {
+          markProcessed(warnKey);
+          await safeWrite('scheduler-off note', () => postAgentComment(apiKey, pageId,
+            `🧭 **NORC**\n⏰ This task is scheduled for ${new Date(ms).toISOString()}, but the task scheduler is turned off, so I won't run it at that time. Enable it in **Settings → Scheduling & Automation** (or clear "Scheduled For" to run it now).`));
+        }
+        return;
+      }
+      // Past date + scheduler off → nothing will pick it up later; run now.
+      emitLog(`task ${pageId} has a past Scheduled For and the scheduler is off — running now`);
+    }
+  }
+
   const candidateIds = [
     ...extractRelationPageIds(properties),
     ...extractPropertyMentionPageIds(properties),

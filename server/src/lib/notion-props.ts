@@ -39,6 +39,14 @@ export function getSelect(properties: unknown, name: string): string | null {
   return typeof sel?.['name'] === 'string' ? sel['name'] : null;
 }
 
+/** A date property's start as an ISO string, or null. */
+export function getDate(properties: unknown, name: string): string | null {
+  const p = prop(properties, name);
+  if (p?.['type'] !== 'date') return null;
+  const d = p['date'] as Record<string, unknown> | null;
+  return typeof d?.['start'] === 'string' ? d['start'] : null;
+}
+
 export function getRelationIds(properties: unknown, name: string): string[] {
   const p = prop(properties, name);
   if (p?.['type'] !== 'relation' || !Array.isArray(p['relation'])) return [];
