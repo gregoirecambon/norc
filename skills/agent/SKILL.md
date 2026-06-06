@@ -61,6 +61,11 @@ curl -s -X POST <api_base>/comment  -H 'Content-Type: application/json' \
 
 # Fetch the full page (title, link, body as markdown) when you need more context
 curl -s <api_base>/page          # or <api_base>/page?pageId=<id> for another page
+                                 # ?depth=1..5 controls how deep nested blocks are read
+
+# Pull the structured context NORC assembled for this run (JSON: task, project,
+# company, related, body, contextLevel) — handy if you'd rather not parse the prompt
+curl -s <api_base>/context
 
 # Append content into the page body (Markdown → Notion blocks)
 curl -s -X POST <api_base>/blocks   -H 'Content-Type: application/json' \
@@ -74,6 +79,22 @@ curl -s -X POST <api_base>/status   -H 'Content-Type: application/json' \
 curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
   -d '{"status":"done","summary":"what I did"}'
 ```
+
+### Going deeper (strategic agents)
+
+If you are a `strategic`-clearance agent and your operator has enabled open
+search, you can explore the workspace beyond the injected context:
+
+```bash
+# Full-text search across the workspace
+curl -s '<api_base>/search?q=Q3%20revenue%20plan'
+
+# Structured query of a specific database (filter/sorts are Notion's API shapes)
+curl -s -X POST <api_base>/query -H 'Content-Type: application/json' \
+  -d '{"databaseId":"<db id>","pageSize":25}'
+```
+
+These return `403` if you are not a strategic agent or open search is disabled.
 
 Decide the action by intent — especially on a non-task page:
 
