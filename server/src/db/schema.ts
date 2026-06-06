@@ -118,6 +118,10 @@ export const norcSettings = sqliteTable('norc_settings', {
   heartbeatEnabled:         integer('heartbeat_enabled', { mode: 'boolean' }).notNull().default(true),
   heartbeatIntervalSec:     integer('heartbeat_interval_sec').notNull().default(60),
   runTimeoutSec:            integer('run_timeout_sec').notNull().default(300),  // dispatch → escalate if no callback
+  // Proactive automations.
+  schedulerEnabled:         integer('scheduler_enabled', { mode: 'boolean' }).notNull().default(false),       // scheduled/recurring task poller
+  autoProposeEnabled:       integer('auto_propose_enabled', { mode: 'boolean' }).notNull().default(false),    // recurring co-CEO task proposals
+  autoProposeIntervalHours: integer('auto_propose_interval_hours').notNull().default(12),                     // 1–24
   createdAt:                integer('created_at').notNull(),
   updatedAt:                integer('updated_at').notNull(),
 });

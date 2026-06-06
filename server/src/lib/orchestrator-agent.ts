@@ -111,6 +111,59 @@ export async function testTriageConnection(cfg: LLMConfig): Promise<{ ok: boolea
   return callTriageLLM(cfg, 'You are a connectivity check for NORC.', 'Reply with the single word: OK');
 }
 
+// ─── Business proposals: the recurring co-CEO analysis ───────────────────────
+
+export interface ProposeBizInput extends LLMConfig {
+  context: string;
+  existingTitles: string[];
+  max: number;
+}
+
+export type ProposedBizTask = { title: string; rationale?: string; kpis?: string };
+
+const PROPOSE_SYSTEM =
+  'You are the NORC Triage Agent, a co-CEO for this company. From the vision/strategy, active projects, ' +
+  'and current open work provided, propose a few NEW, concrete, high-leverage tasks that would move the ' +
+  'business forward now. Be specific and actionable; never duplicate an existing task. If nothing is worth ' +
+  'proposing, return an empty array.';
+
+/** Propose business tasks from company context. Safe default: [] (no proposals). */
+export async function proposeBusinessTasks(input: ProposeBizInput): Promise<ProposedBizTask[]> {
+  const existing = input.existingTitles.length ? input.existingTitles.map(t => `- ${t}`).join('\n') : '(none)';
+  const prompt = [
+    `Company & work context:`,
+    input.context || '(no context available)',
+    ``,
+    `Existing open tasks — do NOT duplicate these:`,
+    existing,
+    ``,
+    `Propose at most ${input.max} new tasks. Respond with ONLY a JSON array, no prose:`,
+    `[{"title":"<short imperative>","rationale":"<why it matters now>","kpis":"<success criteria or empty>"}]`,
+  ].join('\n');
+  const res = await callTriageLLM(input, PROPOSE_SYSTEM, prompt);
+  if (!res.ok || !res.text) return [];
+  return parseBusinessTasks(res.text).slice(0, Math.max(1, input.max));
+}
+
+/** Parse a JSON array of proposed tasks; anything unparseable → []. */
+export function parseBusinessTasks(text: string): ProposedBizTask[] {
+  const arr = extractJsonArray(text);
+  if (!arr) return [];
+  const out: ProposedBizTask[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const r = item as Record<string, unknown>;
+    const title = typeof r['title'] === 'string' ? r['title'].trim() : '';
+    if (!title) continue;
+    out.push({
+      title,
+      ...(typeof r['rationale'] === 'string' ? { rationale: r['rationale'] } : {}),
+      ...(typeof r['kpis'] === 'string' ? { kpis: r['kpis'] } : {}),
+    });
+  }
+  return out;
+}
+
 // ─── Task-worthiness: is an off-task request real work or just a question? ────
 
 export interface ClassifyInput extends LLMConfig {
@@ -285,4 +338,12 @@ function extractJson(text: string): Record<string, unknown> | null {
   const end = text.lastIndexOf('}');
   if (start === -1 || end === -1 || end <= start) return null;
   try { return JSON.parse(text.slice(start, end + 1)) as Record<string, unknown>; } catch { return null; }
+}
+
+/** Extract the first JSON array from arbitrary model output. */
+function extractJsonArray(text: string): unknown[] | null {
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start === -1 || end === -1 || end <= start) return null;
+  try { const v = JSON.parse(text.slice(start, end + 1)); return Array.isArray(v) ? v : null; } catch { return null; }
 }

@@ -57,6 +57,15 @@ export async function provisionCompanyDb(): Promise<{ created: boolean; database
   return res.json() as Promise<{ created: boolean; database: NotionDatabase }>;
 }
 
+export async function provisionSchedulingFields(): Promise<{ ok: boolean }> {
+  const res = await fetch('/api/notion/provision/scheduling', { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
+    throw new Error(body.message ?? body.error ?? `${res.status}`);
+  }
+  return res.json() as Promise<{ ok: boolean }>;
+}
+
 export async function saveNotionKey(apiKey: string): Promise<NotionIntegration> {
   const res = await fetch('/api/notion/key', {
     method: 'POST',

@@ -9,16 +9,21 @@ export interface NewTask {
   title: string;
   kpis?: string;
   projectId?: string | null;
+  /** Task Status to create with (default 'Backlog'; 'Proposed' for co-CEO proposals). */
+  status?: string;
+  /** Org DB page ids to set as "Assigned To" (e.g. copied from a recurring template). */
+  assigneeIds?: string[];
 }
 
 /**
- * Create a Backlog task row in the Tasks DB — used when an agent proposes follow-up
- * work that NORC then triages. Optionally links it to a Project. Returns the new id.
+ * Create a task row in the Tasks DB — used for agent-proposed work, co-CEO proposals,
+ * and recurring-task instances. Defaults to Backlog; optionally links a Project and
+ * sets assignees. Returns the new id.
  */
 export async function createTaskPage(apiKey: string, tasksDbId: string, task: NewTask): Promise<{ pageId: string }> {
   const properties: Record<string, unknown> = {
     'Name': { title: toRichText(task.title) },
-    'Status': { select: { name: 'Backlog' } },
+    'Status': { select: { name: task.status ?? 'Backlog' } },
   };
   if (task.kpis && task.kpis.trim()) {
     properties['KPIs'] = { rich_text: toRichText(task.kpis.slice(0, RICH_TEXT_LIMIT)) };
@@ -26,11 +31,21 @@ export async function createTaskPage(apiKey: string, tasksDbId: string, task: Ne
   if (task.projectId) {
     properties['Project'] = { relation: [{ id: task.projectId }] };
   }
+  if (task.assigneeIds && task.assigneeIds.length) {
+    properties['Assigned To'] = { relation: task.assigneeIds.filter(Boolean).map(id => ({ id })) };
+  }
   const res = await notionPost<Record<string, unknown>>(apiKey, '/pages', {
     parent: { database_id: tasksDbId },
     properties,
   });
   return { pageId: String(res['id'] ?? '') };
+}
+
+/** Set (or clear, with null) a task's "Scheduled For" date. */
+export async function setTaskScheduledFor(apiKey: string, taskPageId: string, iso: string | null): Promise<void> {
+  await notionPatch(apiKey, `/pages/${taskPageId}`, {
+    properties: { 'Scheduled For': { date: iso ? { start: iso } : null } },
+  });
 }
 
 // Notion accepts at most 100 child blocks per append request.

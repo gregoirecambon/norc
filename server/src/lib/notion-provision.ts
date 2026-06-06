@@ -96,9 +96,15 @@ async function updateDatabase(
 const sel = (...names: string[]) => ({ select: { options: names.map(name => ({ name })) } });
 const multiSel = (...names: string[]) => ({ multi_select: { options: names.map(name => ({ name })) } });
 const text = () => ({ rich_text: {} });
+const date = () => ({ date: {} });
+const num = () => ({ number: {} });
 const relation = (databaseId: string) => ({
   relation: { database_id: databaseId, type: 'single_property', single_property: {} },
 });
+
+// Task Status options (incl. 'Proposed' for NORC co-CEO proposals awaiting human
+// validation). Kept as a constant so provisioning + the additive patch agree.
+export const TASK_STATUS_OPTIONS = ['Backlog', 'In Progress', 'Done', 'Failed', 'Proposed'] as const;
 
 // --- Phase 1: base (non-relation) property schemas ------------------------
 
@@ -117,12 +123,16 @@ const orgProps: Record<string, unknown> = {
 
 const tasksProps: Record<string, unknown> = {
   'Name': { title: {} },
-  'Status': sel('Backlog', 'In Progress', 'Done', 'Failed'),
+  'Status': sel(...TASK_STATUS_OPTIONS),
   'KPIs': text(),
   'Agent Output': text(),
   'Pipeline Run ID': text(),
   'Retry Count': { number: {} },
   'Last Checkpoint': text(),
+  // Proactive scheduling.
+  'Scheduled For': date(),
+  'Recurrence': sel('None', 'Daily', 'Weekdays', 'Weekly', 'Monthly'),
+  'Repeat Every (days)': num(),
 };
 
 const projectsProps: Record<string, unknown> = {
@@ -195,4 +205,19 @@ export async function provisionCompanyDb(
     await updateDatabase(apiKey, projectsDatabaseId, { 'Company': relation(company.id) });
   }
   return { kind: 'company', notionDatabaseId: company.id, title: 'Company', url: company.url };
+}
+
+/**
+ * Additively add the proactive-scheduling fields to an already-provisioned Tasks DB:
+ * Scheduled For (date), Recurrence (select), Repeat Every (days) (number), and the
+ * 'Proposed' Status option. Idempotent — updateDatabase is a PATCH and Notion merges
+ * select options by name, so existing options and rows are preserved.
+ */
+export async function provisionSchedulingFields(apiKey: string, tasksDatabaseId: string): Promise<void> {
+  await updateDatabase(apiKey, tasksDatabaseId, {
+    'Status': sel(...TASK_STATUS_OPTIONS),
+    'Scheduled For': date(),
+    'Recurrence': sel('None', 'Daily', 'Weekdays', 'Weekly', 'Monthly'),
+    'Repeat Every (days)': num(),
+  });
 }

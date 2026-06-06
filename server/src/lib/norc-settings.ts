@@ -20,6 +20,9 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   heartbeatEnabled: true,
   heartbeatIntervalSec: 60,
   runTimeoutSec: 300,
+  schedulerEnabled: false,
+  autoProposeEnabled: false,
+  autoProposeIntervalHours: 12,
 };
 
 export function getNorcSettings(): NorcSettings | null {

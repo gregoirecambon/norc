@@ -712,6 +712,31 @@ export async function proposeTasks(opts: {
   return { created };
 }
 
+/**
+ * Dispatch a due scheduled task: if it has an "Assigned To" agent, run that agent;
+ * otherwise let the Triage Agent route it (assign + @mention). `occurrenceKey`
+ * stabilizes triage dedup for this occurrence.
+ */
+export async function dispatchScheduledTask(integration: Integration, taskPageId: string, how: string, occurrenceKey: string): Promise<void> {
+  const apiKey = integration.apiKey;
+  let anchor: Anchor;
+  try { anchor = await resolveAnchor(apiKey, taskPageId); } catch (err) {
+    emitLog(`scheduler: can't read task ${taskPageId}: ${err instanceof Error ? err.message : 'error'}`);
+    return;
+  }
+  const props = (anchor.page as Record<string, unknown>)['properties'];
+  const matched = matchAgents(getRelationIds(props, 'Assigned To'));
+  if (matched.length) {
+    const request = 'This scheduled task is now due. Complete it using the context above and report your result.';
+    for (const agent of matched) {
+      await runAgentTurn(integration, anchor, agent, { thread: [], request, manageTaskStatus: true, how });
+    }
+    return;
+  }
+  // No assignee → triage assigns/asks.
+  await triageUnhandled(integration, anchor, { text: getAnyTitle(props), thread: [], dedupId: occurrenceKey });
+}
+
 function dispositionLabel(d: TriageOutcome | 'created'): string {
   switch (d) {
     case 'routed': return 'created & routed to an agent';

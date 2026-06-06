@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { InvitePanel } from '../components/InvitePanel.js';
 import { PlatformsPanel } from '../components/PlatformsPanel.js';
-import { provisionCompanyDb } from '../api/notion.js';
+import { provisionCompanyDb, provisionSchedulingFields } from '../api/notion.js';
 import { getSettings, saveSettings, testTriageConnection, type NorcSettings } from '../api/settings.js';
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
@@ -236,6 +236,80 @@ function HeartbeatPanel() {
   );
 }
 
+function SchedulingPanel() {
+  const [s, setS] = useState<NorcSettings | null>(null);
+  const [state, setState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+  const [prov, setProv] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [provMsg, setProvMsg] = useState('');
+
+  useEffect(() => { getSettings().then(setS).catch(() => setMsg('Could not load settings')); }, []);
+
+  const save = async () => {
+    if (!s) return;
+    setState('busy'); setMsg('');
+    try {
+      const next = await saveSettings({
+        schedulerEnabled: s.schedulerEnabled,
+        autoProposeEnabled: s.autoProposeEnabled,
+        autoProposeIntervalHours: s.autoProposeIntervalHours,
+      });
+      setS(next); setState('saved'); setMsg('Saved.');
+    } catch (err) {
+      setState('error'); setMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  const addFields = async () => {
+    setProv('busy'); setProvMsg('');
+    try {
+      await provisionSchedulingFields();
+      setProv('done'); setProvMsg('Tasks DB now has Scheduled For / Recurrence / Repeat Every + a Proposed status.');
+    } catch (err) {
+      setProv('error'); setProvMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  if (!s) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{msg || 'Loading…'}</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 560 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start' }}>
+        <button onClick={addFields} disabled={prov === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 14px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)',
+          cursor: prov === 'busy' ? 'default' : 'pointer',
+        }}>{prov === 'busy' ? 'Adding…' : 'Add scheduling fields to Tasks DB'}</button>
+        {provMsg && <div style={{ fontSize: 12.5, color: prov === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{provMsg}</div>}
+      </div>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
+        <input type="checkbox" checked={s.schedulerEnabled} onChange={e => setS({ ...s, schedulerEnabled: e.target.checked })} />
+        Run scheduled &amp; recurring tasks (poll the Tasks DB "Scheduled For" dates)
+      </label>
+
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
+        <input type="checkbox" checked={s.autoProposeEnabled} onChange={e => setS({ ...s, autoProposeEnabled: e.target.checked })} />
+        Let the NORC Triage Agent propose new tasks on a schedule (human-validated)
+      </label>
+      <div>
+        <label style={labelStyle}>Proposal interval (hours, 1–24) — the co-CEO reviews company context and creates "Proposed" tasks for you to approve.</label>
+        <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={1} max={24} value={s.autoProposeIntervalHours}
+          onChange={e => setS({ ...s, autoProposeIntervalHours: Math.max(1, Math.min(24, parseInt(e.target.value || '12', 10))) })} />
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button onClick={save} disabled={state === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)',
+          cursor: state === 'busy' ? 'default' : 'pointer',
+        }}>{state === 'busy' ? 'Saving…' : 'Save'}</button>
+        {msg && <span style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 32 }}>
@@ -269,6 +343,13 @@ export default function SettingsPage() {
         description="Adds a Company database (Vision / Values / Strategy) for workspaces provisioned before strategic context existed. Only agents with Context Level = strategic see it. Safe to click — it's a no-op if the DB already exists."
       >
         <CompanyDbPanel />
+      </Section>
+
+      <Section
+        title="Scheduling & Automation"
+        description="Proactive work. Add scheduling fields to the Tasks DB, then NORC dispatches tasks when their 'Scheduled For' date is due (recurring tasks spawn a fresh instance each period). Separately, the Triage Agent can periodically review your company context and propose new tasks — created as 'Proposed' for you to validate, never auto-run."
+      >
+        <SchedulingPanel />
       </Section>
 
       <Section

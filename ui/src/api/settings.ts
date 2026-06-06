@@ -11,6 +11,9 @@ export interface NorcSettings {
   runTimeoutSec: number;
   heartbeatEnabled: boolean;
   heartbeatIntervalSec: number;
+  schedulerEnabled: boolean;
+  autoProposeEnabled: boolean;
+  autoProposeIntervalHours: number;
   updatedAt: number;
 }
 
@@ -25,6 +28,9 @@ export interface NorcSettingsPatch {
   runTimeoutSec?: number;
   heartbeatEnabled?: boolean;
   heartbeatIntervalSec?: number;
+  schedulerEnabled?: boolean;
+  autoProposeEnabled?: boolean;
+  autoProposeIntervalHours?: number;
 }
 
 export async function getSettings(): Promise<NorcSettings> {

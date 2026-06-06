@@ -26,6 +26,8 @@ import { skillRouter } from './routes/skill.js';
 import { settingsRouter } from './routes/settings.js';
 import { sweepStaleRuns } from './lib/runs.js';
 import { runHeartbeat } from './lib/heartbeat.js';
+import { runScheduler } from './lib/scheduler.js';
+import { runAutoPropose } from './lib/auto-propose.js';
 import { escalateTimedOutRun } from './lib/orchestrator.js';
 import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
 
@@ -90,6 +92,13 @@ setInterval(() => {
   }
 }, 60_000);
 
+// Scheduled / recurring tasks — poll the Tasks DB for due "Scheduled For" dates
+// and dispatch them (gated by the scheduler toggle).
+setInterval(() => {
+  if (!getNorcSettingsOrDefault().schedulerEnabled) return;
+  void runScheduler().catch(err => emitLog(`scheduler error: ${err instanceof Error ? err.message : 'unknown'}`));
+}, 60_000);
+
 // Heartbeat — self-rescheduling so live settings changes (interval / enable)
 // take effect without a restart.
 async function heartbeatLoop(): Promise<void> {
@@ -103,6 +112,19 @@ async function heartbeatLoop(): Promise<void> {
   setTimeout(() => { void heartbeatLoop(); }, intervalMs);
 }
 
+// Recurring co-CEO analysis — self-rescheduling so the interval/enable toggle
+// take effect live. Proposes tasks (as 'Proposed', human-validated) every N hours.
+async function autoProposeLoop(): Promise<void> {
+  const settings = getNorcSettingsOrDefault();
+  if (settings.autoProposeEnabled) {
+    try { await runAutoPropose(); } catch (err) {
+      emitLog(`auto-propose error: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
+  }
+  const intervalMs = Math.max(1, Math.min(24, settings.autoProposeIntervalHours)) * 3600_000;
+  setTimeout(() => { void autoProposeLoop(); }, intervalMs);
+}
+
 // Startup
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 
@@ -113,4 +135,6 @@ app.listen(PORT, '0.0.0.0', () => {
   emitLog(`norc listening on port ${PORT}`);
   // Kick off the heartbeat shortly after boot so startup settles first.
   setTimeout(() => { void heartbeatLoop(); }, 5_000);
+  // Recurring co-CEO analysis (first check a bit later; runs only when enabled).
+  setTimeout(() => { void autoProposeLoop(); }, 30_000);
 });

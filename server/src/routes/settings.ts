@@ -18,6 +18,9 @@ function safe(s: NorcSettings) {
     runTimeoutSec: s.runTimeoutSec,
     heartbeatEnabled: s.heartbeatEnabled,
     heartbeatIntervalSec: s.heartbeatIntervalSec,
+    schedulerEnabled: s.schedulerEnabled,
+    autoProposeEnabled: s.autoProposeEnabled,
+    autoProposeIntervalHours: s.autoProposeIntervalHours,
     updatedAt: s.updatedAt,
   };
 }
@@ -42,6 +45,9 @@ router.post('/', (req, res) => {
   if (typeof b['runTimeoutSec'] === 'number' && b['runTimeoutSec'] >= 60) patch['runTimeoutSec'] = Math.floor(b['runTimeoutSec']);
   if (typeof b['heartbeatEnabled'] === 'boolean') patch['heartbeatEnabled'] = b['heartbeatEnabled'];
   if (typeof b['heartbeatIntervalSec'] === 'number' && b['heartbeatIntervalSec'] >= 10) patch['heartbeatIntervalSec'] = Math.floor(b['heartbeatIntervalSec']);
+  if (typeof b['schedulerEnabled'] === 'boolean') patch['schedulerEnabled'] = b['schedulerEnabled'];
+  if (typeof b['autoProposeEnabled'] === 'boolean') patch['autoProposeEnabled'] = b['autoProposeEnabled'];
+  if (typeof b['autoProposeIntervalHours'] === 'number') patch['autoProposeIntervalHours'] = Math.max(1, Math.min(24, Math.floor(b['autoProposeIntervalHours'])));
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
 

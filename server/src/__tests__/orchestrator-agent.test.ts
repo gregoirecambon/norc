@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDecision, parseAssessment, parseTaskWorthy, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
+import { parseDecision, parseAssessment, parseTaskWorthy, parseBusinessTasks, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
 
 describe('openaiEndpoint', () => {
   it('appends /v1/chat/completions to a bare host', () => {
@@ -73,5 +73,18 @@ describe('parseTaskWorthy', () => {
   it('defaults to not-a-task on false or garbage', () => {
     expect(parseTaskWorthy('{"task":false}').task).toBe(false);
     expect(parseTaskWorthy('no json here').task).toBe(false);
+  });
+});
+
+describe('parseBusinessTasks', () => {
+  it('parses a JSON array of proposals, skipping titleless entries', () => {
+    const out = parseBusinessTasks('[{"title":"Launch beta","rationale":"momentum","kpis":"50 signups"},{"rationale":"no title"}]');
+    expect(out).toHaveLength(1);
+    expect(out[0]).toEqual({ title: 'Launch beta', rationale: 'momentum', kpis: '50 signups' });
+  });
+
+  it('tolerates surrounding prose and returns [] on garbage', () => {
+    expect(parseBusinessTasks('Here:\n[{"title":"X"}]\nthanks')).toEqual([{ title: 'X' }]);
+    expect(parseBusinessTasks('no array at all')).toEqual([]);
   });
 });
