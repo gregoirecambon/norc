@@ -49,6 +49,22 @@ function extractResultText(frame: Record<string, unknown>): string {
   return '';
 }
 
+/** Pull an assistant message's text out of a `session.message` payload's message
+ * object (role:'assistant', content:[{type:'text',text}] | string | .text). */
+function extractAssistantText(message: unknown): string {
+  const m = asRecord(message);
+  if (!m || m['role'] !== 'assistant') return '';
+  const content = m['content'];
+  if (typeof content === 'string' && content.trim()) return content;
+  if (Array.isArray(content)) {
+    const parts = content
+      .map(c => { const r = asRecord(c); return r && typeof r['text'] === 'string' ? r['text'] : ''; })
+      .filter(Boolean);
+    if (parts.length) return parts.join('');
+  }
+  return typeof m['text'] === 'string' ? m['text'] : '';
+}
+
 /** Pull text from an OpenAI-compatible chat-completions response body. */
 function extractChatCompletionText(body: unknown): string {
   const choices = asRecord(body)?.['choices'];
@@ -470,6 +486,19 @@ export async function dispatchOpenclaw(
   }
 }
 
+// How long to keep the socket open capturing the agent's reply before giving up
+// and falling back to the async (Agent-API / timeout-escalation) path.
+const WS_CAPTURE_MS = Number(process.env['NORC_OPENCLAW_WAIT_MS']) || 120_000;
+
+/**
+ * Dispatch an agent run and CAPTURE its eventual reply over the same socket.
+ * The gateway only ACKs `method:'agent'` with {runId, status:'accepted'} and runs
+ * asynchronously — so we subscribe to the session's messages first, then wait for
+ * the run to finish (agent.wait), accumulating the latest assistant message. This
+ * recovers replies from agents that answer in their own chat without calling the
+ * NORC Agent API. Returns the captured text, or '' (→ caller treats as async) on
+ * timeout / no answer, preserving the existing escalation fallback.
+ */
 async function dispatchViaWebSocket(
   wsUrl: string,
   keypair: WsKeypair,
@@ -478,40 +507,93 @@ async function dispatchViaWebSocket(
   message: string,
 ): Promise<string> {
   const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
+  const sessionKey = `agent:${ocAgentId}:norc:task:${idKey}`;
+  const subId = randomUUID();
   const reqId = randomUUID();
+  const waitId = randomUUID();
+
   return await new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => {
+    let settled = false;
+    let latestAssistant = '';
+    let ackText = '';
+
+    const finish = (text: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       try { ws.close(); } catch { /* */ }
-      reject(new Error('Timed out waiting for OpenClaw agent response'));
-    }, 90_000);
+      resolve(text);
+    };
+    const fail = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch { /* */ }
+      reject(err);
+    };
+
+    const timer = setTimeout(() => {
+      emitLog(`openclaw: capture cap reached for session ${sessionKey}`);
+      finish(latestAssistant || ackText);
+    }, WS_CAPTURE_MS);
+
+    ws.on('error', e => fail(e instanceof Error ? e : new Error('ws error')));
+    ws.on('close', () => finish(latestAssistant || ackText));
 
     ws.on('message', raw => {
       let parsed: unknown;
       try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
       const frame = asRecord(parsed);
-      if (frame?.id === reqId && frame['type'] === 'res') {
-        // Log the raw response so we can see whether the gateway returns the
-        // agent's output here (sync) or just an ACK (agent must call the API).
+      if (!frame) return;
+
+      // Agent output arrives as session.message event frames.
+      const isSessionMsg = (frame['type'] === 'event' && frame['event'] === 'session.message') || frame['type'] === 'session.message';
+      if (isSessionMsg) {
+        const payload = asRecord(frame['payload']) ?? frame;
+        if (!payload['sessionKey'] || payload['sessionKey'] === sessionKey) {
+          const t = extractAssistantText(payload['message']).trim();
+          if (t) latestAssistant = t;
+        }
+        return;
+      }
+
+      if (frame['type'] !== 'res') return;
+      const id = frame['id'];
+
+      if (id === reqId) {
         const dump = rawDataToString(raw);
         emitLog(`openclaw res frame: ${dump.length > 600 ? dump.slice(0, 600) + '…' : dump}`);
-        clearTimeout(timeout);
-        try { ws.close(); } catch { /* */ }
-        if (frame['ok'] === true) resolve(extractResultText(frame));
-        else reject(new Error(`agent method rejected: ${JSON.stringify(frame['error'])}`));
+        if (frame['ok'] !== true) { fail(new Error(`agent method rejected: ${JSON.stringify(frame['error'])}`)); return; }
+        // Some gateways answer synchronously in the ACK; honour that immediately.
+        ackText = extractResultText(frame);
+        if (ackText.trim()) { finish(ackText.trim()); return; }
+        // Otherwise wait for the run to complete, capturing session messages.
+        const runId = asRecord(frame['payload'])?.['runId'];
+        if (typeof runId === 'string' && runId) {
+          ws.send(JSON.stringify({ type: 'req', id: waitId, method: 'agent.wait', params: { runId, timeoutMs: WS_CAPTURE_MS } }));
+        } else {
+          // Bare ACK with no run handle — nothing to capture; treat as async.
+          finish('');
+        }
+        return;
       }
+
+      if (id === waitId) {
+        const status = asRecord(frame['payload'])?.['status'];
+        emitLog(`openclaw agent.wait: status=${String(status)} session=${sessionKey}`);
+        finish(latestAssistant || ackText);
+        return;
+      }
+      // id === subId (subscription ack) → nothing to do.
     });
 
+    // Subscribe BEFORE dispatching so no message is missed, then dispatch.
+    ws.send(JSON.stringify({ type: 'req', id: subId, method: 'sessions.messages.subscribe', params: { key: sessionKey } }));
     ws.send(JSON.stringify({
       type: 'req',
       id: reqId,
       method: 'agent',
-      params: {
-        message,
-        agentId: ocAgentId,
-        sessionKey: `agent:${ocAgentId}:norc:task:${idKey}`,
-        idempotencyKey: idKey,
-        timeout: 60000,
-      },
+      params: { message, agentId: ocAgentId, sessionKey, idempotencyKey: idKey, timeout: 60000 },
     }));
   });
 }

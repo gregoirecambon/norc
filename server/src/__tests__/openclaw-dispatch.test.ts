@@ -3,9 +3,12 @@ import { WebSocketServer, type WebSocket as WsType } from 'ws';
 import type { AddressInfo } from 'node:net';
 import { dispatchOpenclaw, generateWsKeypair } from '../adapters/openclaw.js';
 
-// A fake OpenClaw gateway: completes the device-auth handshake, then answers the
-// `agent` request either with a result-bearing `res` (sync) or a bare ACK (async).
-function startFakeGateway(mode: 'result' | 'ack'): Promise<{ url: string; close: () => void }> {
+// A fake OpenClaw gateway. Modes:
+//  - 'result':  agent res carries result.text (sync answer)
+//  - 'ack':     bare ACK, no runId (async — agent must use the Agent API)
+//  - 'capture': ACK with runId; on agent.wait, emits a session.message assistant
+//               frame then a terminal wait res (NORC captures the reply over WS)
+function startFakeGateway(mode: 'result' | 'ack' | 'capture'): Promise<{ url: string; close: () => void }> {
   return new Promise(resolve => {
     const wss = new WebSocketServer({ port: 0 }, () => {
       const port = (wss.address() as AddressInfo).port;
@@ -17,10 +20,21 @@ function startFakeGateway(mode: 'result' | 'ack'): Promise<{ url: string; close:
         const frame = JSON.parse(raw.toString());
         if (frame.method === 'connect') {
           ws.send(JSON.stringify({ type: 'res', id: frame.id, ok: true }));
+        } else if (frame.method === 'sessions.messages.subscribe') {
+          ws.send(JSON.stringify({ type: 'res', id: frame.id, ok: true, payload: { subscribed: true } }));
         } else if (frame.method === 'agent') {
           const res: Record<string, unknown> = { type: 'res', id: frame.id, ok: true };
           if (mode === 'result') res['result'] = { text: 'agent answer here' };
+          if (mode === 'capture') res['payload'] = { runId: 'run-1', status: 'accepted' };
           ws.send(JSON.stringify(res));
+        } else if (frame.method === 'agent.wait') {
+          if (mode === 'capture') {
+            ws.send(JSON.stringify({
+              type: 'event', event: 'session.message',
+              payload: { message: { role: 'assistant', content: [{ type: 'text', text: 'captured reply' }] } },
+            }));
+          }
+          ws.send(JSON.stringify({ type: 'res', id: frame.id, ok: true, payload: { runId: 'run-1', status: 'ok' } }));
         }
       });
     });
@@ -51,6 +65,14 @@ describe('dispatchOpenclaw (WebSocket)', () => {
     expect(res.ok).toBe(true);
     expect(res.async).toBe(true);
     expect(res.text).toBeUndefined();
+  });
+
+  it('captures the agent reply over WS (subscribe + agent.wait) when ACK has a runId', async () => {
+    gateway = await startFakeGateway('capture');
+    const res = await dispatchOpenclaw({ url: gateway.url, ...keypairConfig() }, 'emilien', 'SYS', 'do the thing', 'page-1');
+    expect(res.ok).toBe(true);
+    expect(res.text).toBe('captured reply');
+    expect(res.async).toBeUndefined();
   });
 });
 
