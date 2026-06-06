@@ -14,7 +14,7 @@
 
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agents, notionIntegration, orchestratorComments, processedTriggers } from '../db/schema.js';
+import { agents, notionIntegration, notionDatabases, orchestratorComments, processedTriggers } from '../db/schema.js';
 import type { AdapterType } from '../types.js';
 import { emitLog } from './logger.js';
 import { emitEvent } from './events.js';
@@ -26,7 +26,7 @@ import {
   type AgentRef,
 } from './notion-mentions.js';
 import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, userDisplayName, type Anchor, type ThreadComment } from './notion-anchor.js';
-import { getAnyTitle } from './notion-props.js';
+import { getAnyTitle, getRelationIds } from './notion-props.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, type TaskRun } from './runs.js';
@@ -34,9 +34,10 @@ import { getNorcSettings } from './norc-settings.js';
 import { triage } from './orchestrator-agent.js';
 import {
   postComment, postCommentReply, appendBlocks,
-  setTaskStatus, setTaskFields, setAgentStatus, touchLastActive,
+  setTaskStatus, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
 } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
+import { sendNotification } from './notifier.js';
 
 function norcBaseUrl(): string {
   return process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
@@ -364,15 +365,25 @@ interface TriageCtx {
   commentedText?: string;
 }
 
+export type TriageOutcome = 'routed' | 'suggested' | 'asked' | 'no-agents' | 'error' | 'disabled';
+
+/** Email a human (best-effort) with a deep link, when triage needs their input. */
+async function notifyHuman(_integration: Integration, anchor: Anchor, subject: string, body: string): Promise<void> {
+  const page = anchor.page as Record<string, unknown>;
+  const url = typeof page['url'] === 'string' ? page['url'] : `https://www.notion.so/${anchor.pageId.replace(/-/g, '')}`;
+  const title = getAnyTitle(page['properties']);
+  await sendNotification({ subject: title ? `${subject}: ${title}` : subject, body, url }).catch(() => { /* best-effort */ });
+}
+
 /**
  * Run the Triage Agent and apply its decision. Always communicates in Notion
  * (route → tag + explain then dispatch; suggest/ignore → ask). `excludeNames`
  * drops agents from the roster (used on re-routing after a timeout, so a failed
  * agent isn't picked again). `notePrefix` is prepended to every message.
  */
-async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCtx, excludeNames: string[], notePrefix: string): Promise<void> {
+async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCtx, excludeNames: string[], notePrefix: string): Promise<TriageOutcome> {
   const settings = getNorcSettings();
-  if (!triageConfigured(settings)) return;
+  if (!triageConfigured(settings)) return 'disabled';
   const apiKey = integration.apiKey;
   const prefix = notePrefix ? `${notePrefix}\n\n` : '';
 
@@ -387,7 +398,8 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   if (agentRows.length === 0) {
     await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.');
     emitLog('triage: no remaining agents after exclusions');
-    return;
+    await notifyHuman(integration, anchor, 'No agent available for triage', 'No remaining agents to try — please assign someone manually.');
+    return 'no-agents';
   }
 
   const candidates = agentRows.map(a => {
@@ -420,13 +432,15 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   } catch (err) {
     emitLog(`triage error: ${err instanceof Error ? err.message : 'unknown'}`);
     await announce('I hit an error deciding who should take this — please assign someone manually.');
-    return;
+    return 'error';
   }
 
   if (decision.decision === 'ignore') {
-    await announce(decision.message?.trim() || 'No one is assigned and no registered agent clearly fits this. Who should take it?');
+    const msg = decision.message?.trim() || 'No one is assigned and no registered agent clearly fits this. Who should take it?';
+    await announce(msg);
     emitLog(`triage: no clear owner (${decision.message || 'asked'})`);
-    return;
+    await notifyHuman(integration, anchor, 'NORC triage needs your input', msg);
+    return 'asked';
   }
 
   const routed = decision.agent ? matchAgentByName(decision.agent) : null;
@@ -440,15 +454,18 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       discussionId: ctx.discussionId, commentedText: ctx.commentedText,
       manageTaskStatus: anchor.kind === 'task', how: 'orchestrator auto-route',
     });
-    return;
+    return 'routed';
   }
 
   // Suggest (or "route" below threshold): ask the human to confirm.
-  await announce(decision.message?.trim()
+  const suggestMsg = decision.message?.trim()
     || (decision.agent
       ? `No one is assigned. I think **@${decision.agent}** could handle this — reply "@${decision.agent} go" to assign.`
-      : 'No one is assigned and no registered agent clearly fits. Who should take this?'));
+      : 'No one is assigned and no registered agent clearly fits. Who should take this?');
+  await announce(suggestMsg);
   emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
+  await notifyHuman(integration, anchor, 'NORC triage suggestion needs confirmation', suggestMsg);
+  return 'suggested';
 }
 
 /**
@@ -497,6 +514,93 @@ export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
   const excludeIds = new Set(timedOutAgentIdsForPage(run.pageId));
   const excludeNames = db.select().from(agents).all().filter(a => excludeIds.has(a.id)).map(a => a.name);
   await runTriage(integration, anchor, { text: '', thread }, excludeNames, prefix);
+}
+
+export interface ProposedTask {
+  title: string;
+  description?: string;
+  kpis?: string;
+}
+
+/**
+ * An agent (e.g. a company-brain after a planning discussion) hands NORC a list of
+ * follow-up tasks. For each: create a Backlog row in the Tasks DB (linked to the
+ * proposing run's project when there is one), then triage it — auto-route when
+ * confident, otherwise ask the human in Notion + email. Posts one summary comment
+ * on the source page and returns each task's id + disposition.
+ */
+export async function proposeTasks(opts: {
+  sourcePageId: string;
+  proposerName?: string;
+  tasks: ProposedTask[];
+}): Promise<{ created: { id: string; title: string; disposition: TriageOutcome | 'created' }[] }> {
+  const integration = db.select().from(notionIntegration).all()[0] ?? null;
+  if (!integration || integration.status !== 'active') throw new Error('notion integration not active');
+  const apiKey = integration.apiKey;
+
+  const tasksDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
+  if (!tasksDb) throw new Error('no tasks database provisioned');
+
+  // Link new tasks to the project the proposing run is anchored to (if any).
+  let projectId: string | null = null;
+  try {
+    const src = await resolveAnchor(apiKey, opts.sourcePageId);
+    if (src.kind === 'project') projectId = src.pageId;
+    else if (src.kind === 'task') projectId = getRelationIds((src.page as Record<string, unknown>)['properties'], 'Project')[0] ?? null;
+  } catch { /* no project link */ }
+
+  const created: { id: string; title: string; disposition: TriageOutcome | 'created' }[] = [];
+  for (const t of opts.tasks) {
+    const title = t.title.trim();
+    if (!title) continue;
+    let pageId = '';
+    try {
+      ({ pageId } = await createTaskPage(apiKey, tasksDb.notionDatabaseId, { title, kpis: t.kpis, projectId }));
+    } catch (err) {
+      emitLog(`propose-tasks: failed to create "${title}": ${err instanceof Error ? err.message : 'error'}`);
+      continue;
+    }
+    // Put the description in the task body so the assigned agent sees it as content.
+    if (t.description && t.description.trim()) {
+      await safeWrite('task description', () => appendBlocks(apiKey, pageId, markdownToBlocks(t.description!.trim())));
+    }
+    // A creation webhook on this fresh page must not re-trigger triage.
+    markProcessed(`triage:${pageId}`);
+
+    let disposition: TriageOutcome | 'created' = 'created';
+    if (triageConfigured(getNorcSettings())) {
+      try {
+        const anchor = await resolveAnchor(apiKey, pageId);
+        disposition = await runTriage(integration, anchor, { text: t.description?.trim() || title, thread: [] }, [], '');
+      } catch (err) {
+        emitLog(`propose-tasks: triage failed for "${title}": ${err instanceof Error ? err.message : 'error'}`);
+      }
+    }
+    created.push({ id: pageId, title, disposition });
+    emitLog(`propose-tasks: created "${title}" (${pageId}) → ${disposition}`);
+  }
+
+  // Summarize on the source page so the human sees what the agent spun up.
+  if (created.length > 0) {
+    const lines = created.map(c => `- ${c.title} — ${dispositionLabel(c.disposition)}`).join('\n');
+    const who = opts.proposerName ? `**@${opts.proposerName}**` : 'An agent';
+    await safeWrite('propose summary', () => postAgentComment(apiKey, opts.sourcePageId,
+      `🧭 **NORC Triage Agent**\n${who} proposed ${created.length} task${created.length === 1 ? '' : 's'}:\n${lines}`));
+  }
+
+  return { created };
+}
+
+function dispositionLabel(d: TriageOutcome | 'created'): string {
+  switch (d) {
+    case 'routed': return 'created & routed to an agent';
+    case 'suggested': return 'created — suggested an agent, awaiting your confirmation';
+    case 'asked': return 'created — no clear owner, asked the team';
+    case 'no-agents': return 'created — no agents available';
+    case 'error': return 'created — triage error';
+    case 'disabled': return 'created (triage off)';
+    default: return 'created';
+  }
 }
 
 interface TurnOpts {

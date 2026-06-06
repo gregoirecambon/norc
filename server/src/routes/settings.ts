@@ -1,7 +1,10 @@
 import { Router, type Router as ExpressRouter } from 'express';
 import { getNorcSettingsOrDefault, upsertNorcSettings, type NorcSettings } from '../lib/norc-settings.js';
 import { testTriageConnection, type TriageProvider } from '../lib/orchestrator-agent.js';
+import { testNotification } from '../lib/notifier.js';
 import { emitLog } from '../lib/logger.js';
+
+const strOrNull = (v: unknown): string | null => typeof v === 'string' && v.trim() ? v.trim() : null;
 
 const router: ExpressRouter = Router();
 
@@ -18,6 +21,13 @@ function safe(s: NorcSettings) {
     runTimeoutSec: s.runTimeoutSec,
     heartbeatEnabled: s.heartbeatEnabled,
     heartbeatIntervalSec: s.heartbeatIntervalSec,
+    notifyEnabled: s.notifyEnabled,
+    notifyEmail: s.notifyEmail,
+    smtpHost: s.smtpHost,
+    smtpPort: s.smtpPort,
+    smtpUser: s.smtpUser,
+    smtpPassSet: !!s.smtpPass,
+    smtpFrom: s.smtpFrom,
     updatedAt: s.updatedAt,
   };
 }
@@ -44,6 +54,18 @@ router.post('/', (req, res) => {
   if (typeof b['heartbeatIntervalSec'] === 'number' && b['heartbeatIntervalSec'] >= 10) patch['heartbeatIntervalSec'] = Math.floor(b['heartbeatIntervalSec']);
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
+
+  // Notifications (email-in-the-loop). Empty smtpPass is ignored (keeps the stored
+  // one); send null to clear. Other string fields normalize ''/whitespace to null.
+  if (typeof b['notifyEnabled'] === 'boolean') patch['notifyEnabled'] = b['notifyEnabled'];
+  if ('notifyEmail' in b) patch['notifyEmail'] = strOrNull(b['notifyEmail']);
+  if ('smtpHost' in b) patch['smtpHost'] = strOrNull(b['smtpHost']);
+  if (typeof b['smtpPort'] === 'number') patch['smtpPort'] = Math.floor(b['smtpPort']);
+  else if (b['smtpPort'] === null) patch['smtpPort'] = null;
+  if ('smtpUser' in b) patch['smtpUser'] = strOrNull(b['smtpUser']);
+  if ('smtpFrom' in b) patch['smtpFrom'] = strOrNull(b['smtpFrom']);
+  if (b['smtpPass'] === null) patch['smtpPass'] = null;
+  else if (typeof b['smtpPass'] === 'string' && b['smtpPass'].trim()) patch['smtpPass'] = b['smtpPass'].trim();
 
   const saved = upsertNorcSettings(patch);
   emitLog(`NORC settings updated (triage ${saved.orchestratorEnabled ? 'on' : 'off'} via ${saved.orchestratorProvider}, heartbeat ${saved.heartbeatEnabled ? 'on' : 'off'})`);
@@ -77,6 +99,13 @@ router.post('/test', async (req, res) => {
   const latencyMs = Date.now() - start;
   emitLog(`triage test (${provider}, ${model}): ${result.ok ? `OK (${latencyMs}ms)` : `FAILED — ${result.error}`}`);
   res.json({ ok: result.ok, latencyMs, sample: result.text?.slice(0, 80), error: result.error });
+});
+
+// POST /api/settings/test-notification — verify SMTP connectivity (saved config).
+router.post('/test-notification', async (_req, res) => {
+  const result = await testNotification();
+  emitLog(`notification test: ${result.ok ? 'OK' : `FAILED — ${result.error}`}`);
+  res.json(result);
 });
 
 export { router as settingsRouter };

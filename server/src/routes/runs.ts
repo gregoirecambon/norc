@@ -18,6 +18,7 @@ import { readPageMarkdown, resolveAnchor } from '../lib/notion-anchor.js';
 import { getAnyTitle, getSelect } from '../lib/notion-props.js';
 import { notionGet, notionPost, notionQuery } from '../lib/notion-client.js';
 import { assembleContext, type ContextLevel } from '../lib/context-assembler.js';
+import { proposeTasks } from '../lib/orchestrator.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 
 /** Open Notion search/query is opt-in (off by default) and strategic-only. */
@@ -242,6 +243,29 @@ export function makeRunsRouter(): ExpressRouter {
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // POST /api/runs/:token/propose-tasks  { tasks: [{ title, description?, kpis? }] }
+  // An agent hands NORC follow-up work; NORC creates Backlog tasks and triages each
+  // (auto-route when confident, else ask the human + email). Returns dispositions.
+  r.post('/:token/propose-tasks', async (req, res) => {
+    const { run } = req as unknown as { run: TaskRun; apiKey: string };
+    const { tasks } = req.body as { tasks?: { title?: string; description?: string; kpis?: string }[] };
+    if (!Array.isArray(tasks) || tasks.length === 0) { res.status(400).json({ error: 'tasks_required' }); return; }
+    const clean = tasks
+      .filter(t => t && typeof t.title === 'string' && t.title.trim())
+      .slice(0, 20)
+      .map(t => ({ title: t.title!.trim(), description: typeof t.description === 'string' ? t.description : undefined, kpis: typeof t.kpis === 'string' ? t.kpis : undefined }));
+    if (clean.length === 0) { res.status(400).json({ error: 'title_required' }); return; }
+    const proposer = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0]?.name;
+    try {
+      const { created } = await proposeTasks({ sourcePageId: run.pageId, proposerName: proposer, tasks: clean });
+      markActed(run.id);
+      emitLog(`agent API: ${created.length} task(s) proposed (run ${run.id})`);
+      res.json({ ok: true, created });
+    } catch (err) {
+      res.status(502).json({ error: 'propose_failed', message: err instanceof Error ? err.message : 'failed' });
     }
   });
 

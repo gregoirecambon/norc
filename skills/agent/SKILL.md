@@ -78,6 +78,12 @@ curl -s -X POST <api_base>/status   -H 'Content-Type: application/json' \
 # Finish and free yourself (do this last)
 curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
   -d '{"status":"done","summary":"what I did"}'
+
+# Propose follow-up tasks → NORC creates them (Backlog) and triages each
+# (auto-routes to an agent when confident, else asks a human). Great for a
+# planning/strategy agent that ends with "we should do X, Y, Z".
+curl -s -X POST <api_base>/propose-tasks -H 'Content-Type: application/json' \
+  -d '{"tasks":[{"title":"Draft Q3 pricing","description":"…","kpis":"+10% conversion"}]}'
 ```
 
 ### Going deeper (strategic agents)

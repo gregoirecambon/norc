@@ -5,6 +5,34 @@
 
 import { notionPost, notionPatch } from './notion-client.js';
 
+export interface NewTask {
+  title: string;
+  kpis?: string;
+  projectId?: string | null;
+}
+
+/**
+ * Create a Backlog task row in the Tasks DB — used when an agent proposes follow-up
+ * work that NORC then triages. Optionally links it to a Project. Returns the new id.
+ */
+export async function createTaskPage(apiKey: string, tasksDbId: string, task: NewTask): Promise<{ pageId: string }> {
+  const properties: Record<string, unknown> = {
+    'Name': { title: toRichText(task.title) },
+    'Status': { select: { name: 'Backlog' } },
+  };
+  if (task.kpis && task.kpis.trim()) {
+    properties['KPIs'] = { rich_text: toRichText(task.kpis.slice(0, RICH_TEXT_LIMIT)) };
+  }
+  if (task.projectId) {
+    properties['Project'] = { relation: [{ id: task.projectId }] };
+  }
+  const res = await notionPost<Record<string, unknown>>(apiKey, '/pages', {
+    parent: { database_id: tasksDbId },
+    properties,
+  });
+  return { pageId: String(res['id'] ?? '') };
+}
+
 // Notion accepts at most 100 child blocks per append request.
 const MAX_BLOCKS_PER_APPEND = 100;
 

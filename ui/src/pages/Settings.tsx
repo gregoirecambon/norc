@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { InvitePanel } from '../components/InvitePanel.js';
 import { PlatformsPanel } from '../components/PlatformsPanel.js';
 import { provisionCompanyDb } from '../api/notion.js';
-import { getSettings, saveSettings, testTriageConnection, type NorcSettings } from '../api/settings.js';
+import { getSettings, saveSettings, testTriageConnection, testNotification, type NorcSettings } from '../api/settings.js';
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
@@ -236,6 +236,103 @@ function HeartbeatPanel() {
   );
 }
 
+function NotificationsPanel() {
+  const [s, setS] = useState<NorcSettings | null>(null);
+  const [pass, setPass] = useState('');
+  const [state, setState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+  const [testState, setTestState] = useState<'idle' | 'busy' | 'ok' | 'error'>('idle');
+  const [testMsg, setTestMsg] = useState('');
+
+  useEffect(() => { getSettings().then(setS).catch(() => setMsg('Could not load settings')); }, []);
+
+  const save = async () => {
+    if (!s) return;
+    setState('busy'); setMsg('');
+    try {
+      const next = await saveSettings({
+        notifyEnabled: s.notifyEnabled,
+        notifyEmail: s.notifyEmail,
+        smtpHost: s.smtpHost,
+        smtpPort: s.smtpPort,
+        smtpUser: s.smtpUser,
+        smtpFrom: s.smtpFrom,
+        ...(pass.trim() ? { smtpPass: pass.trim() } : {}),
+      });
+      setS(next); setPass(''); setState('saved'); setMsg('Saved.');
+    } catch (err) {
+      setState('error'); setMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+
+  const test = async () => {
+    setTestState('busy'); setTestMsg('');
+    try {
+      const r = await testNotification();
+      if (r.ok) { setTestState('ok'); setTestMsg('SMTP reachable'); }
+      else { setTestState('error'); setTestMsg(r.error ?? 'Connection failed'); }
+    } catch (err) {
+      setTestState('error'); setTestMsg(err instanceof Error ? err.message : 'Connection failed');
+    }
+  };
+
+  if (!s) return <div style={{ fontSize: 13, color: 'var(--text-secondary)' }}>{msg || 'Loading…'}</div>;
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 560 }}>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
+        <input type="checkbox" checked={s.notifyEnabled} onChange={e => setS({ ...s, notifyEnabled: e.target.checked })} />
+        Email me when the Triage Agent is unsure or needs a decision
+      </label>
+      <div>
+        <label style={labelStyle}>Recipient email (defaults to the SMTP user if blank)</label>
+        <input style={inputStyle} placeholder="you@company.com" value={s.notifyEmail ?? ''} onChange={e => setS({ ...s, notifyEmail: e.target.value })} />
+      </div>
+      <div style={{ display: 'flex', gap: 10 }}>
+        <div style={{ flex: 2 }}>
+          <label style={labelStyle}>SMTP host</label>
+          <input style={inputStyle} placeholder="smtp.gmail.com" value={s.smtpHost ?? ''} onChange={e => setS({ ...s, smtpHost: e.target.value })} />
+        </div>
+        <div style={{ flex: 1 }}>
+          <label style={labelStyle}>Port</label>
+          <input style={inputStyle} type="number" placeholder="587" value={s.smtpPort ?? ''} onChange={e => setS({ ...s, smtpPort: e.target.value ? parseInt(e.target.value, 10) : null })} />
+        </div>
+      </div>
+      <div>
+        <label style={labelStyle}>SMTP username</label>
+        <input style={inputStyle} placeholder="you@company.com" value={s.smtpUser ?? ''} onChange={e => setS({ ...s, smtpUser: e.target.value })} />
+      </div>
+      <div>
+        <label style={labelStyle}>
+          SMTP password {s.smtpPassSet && <span style={{ color: 'var(--text-tertiary, #999)' }}>(set — leave blank to keep)</span>}
+        </label>
+        <input style={inputStyle} type="password" placeholder={s.smtpPassSet ? '••••••••' : 'app password'} value={pass} onChange={e => setPass(e.target.value)} />
+      </div>
+      <div>
+        <label style={labelStyle}>From address (optional — defaults to the SMTP user)</label>
+        <input style={inputStyle} placeholder="NORC <bot@company.com>" value={s.smtpFrom ?? ''} onChange={e => setS({ ...s, smtpFrom: e.target.value })} />
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <button onClick={save} disabled={state === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--accent, var(--surface1))', color: 'var(--text-primary)',
+          cursor: state === 'busy' ? 'default' : 'pointer',
+        }}>{state === 'busy' ? 'Saving…' : 'Save'}</button>
+        <button onClick={test} disabled={testState === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)',
+          cursor: testState === 'busy' ? 'default' : 'pointer',
+        }}>{testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
+        {msg && <span style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</span>}
+        {testMsg && <span style={{ fontSize: 12.5, color: testState === 'error' ? 'var(--danger, #d33)' : 'var(--success, #2a8)' }}>{testState === 'ok' ? '✓ ' : '✗ '}{testMsg}</span>}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-tertiary, #999)' }}>
+        Save before testing — the test verifies the stored SMTP settings.
+      </div>
+    </div>
+  );
+}
+
 export default function SettingsPage() {
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 32 }}>
@@ -269,6 +366,13 @@ export default function SettingsPage() {
         description="Adds a Company database (Vision / Values / Strategy) for workspaces provisioned before strategic context existed. Only agents with Context Level = strategic see it. Safe to click — it's a no-op if the DB already exists."
       >
         <CompanyDbPanel />
+      </Section>
+
+      <Section
+        title="Notifications"
+        description="Email-in-the-loop. When the Triage Agent is unsure (suggests an agent, asks who should take a task, or has no one to try), NORC emails you in addition to writing in Notion. Any SMTP works — a Gmail app password, your domain's SMTP, or a transactional service."
+      >
+        <NotificationsPanel />
       </Section>
 
       <Section
