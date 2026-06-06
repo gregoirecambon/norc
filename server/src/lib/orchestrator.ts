@@ -31,7 +31,7 @@ import { assembleContext, buildPrompt, type PageRef } from './context-assembler.
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, type TaskRun } from './runs.js';
 import { getNorcSettings } from './norc-settings.js';
-import { triage } from './orchestrator-agent.js';
+import { triage, assessOutcome, type TriageCandidate } from './orchestrator-agent.js';
 import {
   postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning,
   postCommentRich, postCommentReplyRich, type RichSeg, appendBlocks,
@@ -365,6 +365,22 @@ function triageConfigured(settings: ReturnType<typeof getNorcSettings>): boolean
   if (!settings?.orchestratorEnabled) return false;
   // anthropic needs a key; openai (LiteLLM) needs a base URL (key optional).
   return settings.orchestratorProvider === 'openai' ? !!settings.orchestratorBaseUrl : !!settings.orchestratorApiKey;
+}
+
+/** The agent roster (name/specialty/capabilities/technology) for triage/assessment,
+ * excluding the given names. Mirrors the Org DB metadata the agents registered with. */
+function rosterCandidates(excludeNames: string[]): TriageCandidate[] {
+  const excl = new Set(excludeNames.map(n => n.toLowerCase()));
+  return db.select().from(agents).all().filter(a => !excl.has(a.name.toLowerCase())).map(a => {
+    let meta: Record<string, unknown> = {};
+    try { meta = JSON.parse(a.metadata); } catch { /* */ }
+    return {
+      name: a.name,
+      specialty: typeof meta['specialty'] === 'string' ? meta['specialty'] : (typeof meta['role'] === 'string' ? meta['role'] : ''),
+      capabilities: typeof meta['capabilities'] === 'string' ? meta['capabilities'] : '',
+      technology: typeof meta['technology'] === 'string' ? meta['technology'] : '',
+    };
+  });
 }
 
 async function triageUnhandled(integration: Integration, anchor: Anchor, opts: TriageOpts): Promise<boolean> {
@@ -802,15 +818,64 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   if (anchor.kind === 'task') {
     // Task work: reply in the thread, drive Status, and record Agent Output.
     await postAgentComment(apiKey, anchor.pageId, `**@${agentRef.name}**\n\n${text}`);
-  } else {
-    // Free page: write content into the page or reply on the precise text.
-    await deliverPageReply(apiKey, anchor, opts, agentRef.name, text);
+
+    // Did the agent actually do it, or is it blocked/refusing? If blocked, hand off
+    // to someone who can help (or ask a human) instead of marking it Done.
+    if (opts.manageTaskStatus && await handleBlockedReply(integration, anchor, agentRef, runId, text)) return;
+
+    if (opts.manageTaskStatus) {
+      await safeWrite('task done', () => setTaskStatus(apiKey, anchor.pageId, 'Done'));
+      await safeWrite('agent output', () => setTaskFields(apiKey, anchor.pageId, { agentOutput: text }));
+    }
+    await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
+    finalizeRun(runId, 'done');
+    emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`);
+    return;
   }
-  if (opts.manageTaskStatus) {
-    await safeWrite('task done', () => setTaskStatus(apiKey, anchor.pageId, 'Done'));
-    await safeWrite('agent output', () => setTaskFields(apiKey, anchor.pageId, { agentOutput: text }));
-  }
+
+  // Free page: write content into the page or reply on the precise text.
+  await deliverPageReply(apiKey, anchor, opts, agentRef.name, text);
   await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
   finalizeRun(runId, 'done');
   emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`);
+}
+
+/**
+ * After an agent replies on a task, ask the Triage LLM whether it actually
+ * completed the work or is blocked/refusing. If blocked: free the agent, revert
+ * the task to Backlog, finalize this attempt, and re-triage excluding this agent
+ * (carrying what it said it needs) so a capable peer takes it — or the human is
+ * asked. Returns true when it took over (caller must stop). No-op when triage is
+ * off (returns false → caller marks Done as before).
+ */
+async function handleBlockedReply(integration: Integration, anchor: Anchor, agentRef: AgentRef, runId: string, reply: string): Promise<boolean> {
+  const settings = getNorcSettings();
+  if (!triageConfigured(settings)) return false;
+  const apiKey = integration.apiKey;
+
+  let assessment;
+  try {
+    assessment = await assessOutcome({
+      provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+      apiKey: settings!.orchestratorApiKey ?? '', baseUrl: settings!.orchestratorBaseUrl, model: settings!.orchestratorModel,
+      task: getAnyTitle((anchor.page as Record<string, unknown>)['properties']),
+      agentName: agentRef.name, reply, candidates: rosterCandidates([agentRef.name]),
+    });
+  } catch (err) {
+    emitLog(`outcome assessment failed: ${err instanceof Error ? err.message : 'unknown'}`);
+    return false;
+  }
+  if (assessment.outcome !== 'blocked') return false;
+
+  const need = assessment.need?.trim();
+  emitLog(`"${agentRef.name}" is blocked${need ? ` (needs: ${need})` : ''} — re-routing`);
+  // The attempt is over: free the agent, revert the task, close this run.
+  await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
+  await safeWrite('task backlog', () => setTaskStatus(apiKey, anchor.pageId, 'Backlog'));
+  finalizeRun(runId, 'done');
+
+  const prefix = `⚠️ **@${agentRef.name}** couldn't complete this${need ? ` — needs: ${need}` : ''}. Finding someone who can.`;
+  const thread = await listThreadComments(apiKey, anchor.pageId).catch(() => [] as ThreadComment[]);
+  await runTriage(integration, anchor, { text: need ?? '', thread }, [agentRef.name], prefix);
+  return true;
 }

@@ -111,6 +111,54 @@ export async function testTriageConnection(cfg: LLMConfig): Promise<{ ok: boolea
   return callTriageLLM(cfg, 'You are a connectivity check for NORC.', 'Reply with the single word: OK');
 }
 
+// ─── Outcome assessment: did the agent do the task, or is it blocked? ─────────
+
+export interface AssessInput extends LLMConfig {
+  task: string;
+  agentName: string;
+  reply: string;
+  candidates: TriageCandidate[];
+}
+
+export type AssessResult = { outcome: 'completed' | 'blocked'; need?: string; message?: string };
+
+const ASSESS_SYSTEM =
+  'You judge whether an AI agent actually completed a task from its reply. "completed" = it did the work ' +
+  '(answer, result, or a clear done). "blocked" = it could not or would not (asking for missing info, ' +
+  'refusing, erroring, saying it lacks access/skills/context). When blocked, briefly say what it needs.';
+
+/** Classify an agent's reply as completed vs blocked (safe default: completed, to
+ * avoid re-route loops if the LLM is unavailable). */
+export async function assessOutcome(input: AssessInput): Promise<AssessResult> {
+  const roster = input.candidates.length
+    ? input.candidates.map(c => `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}`).join('\n')
+    : '(no other agents)';
+  const prompt = [
+    `Agent "${input.agentName}" was asked to do a task and replied below.`,
+    `Task: ${input.task || '(untitled)'}`,
+    `Agent reply:`, `"""`, input.reply.slice(0, 2000), `"""`,
+    ``,
+    `Other available agents:`, roster,
+    ``,
+    `Did the agent COMPLETE the task, or is it BLOCKED (couldn't/wouldn't — needs info, access, a skill, or another agent)?`,
+    `Respond with ONLY JSON, no prose:`,
+    `{"outcome":"completed"|"blocked","need":"<what it needs / who could help, or empty>","message":"<one short sentence>"}`,
+  ].join('\n');
+  const res = await callTriageLLM(input, ASSESS_SYSTEM, prompt);
+  if (!res.ok || !res.text) return { outcome: 'completed' };
+  return parseAssessment(res.text);
+}
+
+/** Parse the assessment JSON; anything but an explicit "blocked" → completed. */
+export function parseAssessment(text: string): AssessResult {
+  const obj = extractJson(text);
+  if (!obj) return { outcome: 'completed' };
+  const outcome = obj['outcome'] === 'blocked' ? 'blocked' : 'completed';
+  const need = typeof obj['need'] === 'string' ? obj['need'] : undefined;
+  const message = typeof obj['message'] === 'string' ? obj['message'] : undefined;
+  return { outcome, ...(need ? { need } : {}), ...(message ? { message } : {}) };
+}
+
 /**
  * Call an OpenAI-compatible chat/completions endpoint (OpenAI, or a LiteLLM
  * proxy). The base URL is the proxy root or an `…/v1` URL; see openaiEndpoint.

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDecision, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
+import { parseDecision, parseAssessment, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
 
 describe('openaiEndpoint', () => {
   it('appends /v1/chat/completions to a bare host', () => {
@@ -45,5 +45,19 @@ describe('parseDecision', () => {
   it('falls back to ignore on non-JSON / garbage', () => {
     expect(parseDecision('the agent could not decide', candidates).decision).toBe('ignore');
     expect(parseDecision('', candidates).decision).toBe('ignore');
+  });
+});
+
+describe('parseAssessment', () => {
+  it('parses a blocked outcome with the need', () => {
+    const a = parseAssessment('{"outcome":"blocked","need":"DB credentials","message":"can\'t reach the database"}');
+    expect(a.outcome).toBe('blocked');
+    expect(a.need).toBe('DB credentials');
+  });
+
+  it('treats completed (and anything non-blocked) as completed', () => {
+    expect(parseAssessment('{"outcome":"completed"}').outcome).toBe('completed');
+    expect(parseAssessment('prose, no json').outcome).toBe('completed');
+    expect(parseAssessment('{"outcome":"weird"}').outcome).toBe('completed');
   });
 });
