@@ -1,5 +1,6 @@
 import { Router, type Router as ExpressRouter } from 'express';
 import { getNorcSettingsOrDefault, upsertNorcSettings, type NorcSettings } from '../lib/norc-settings.js';
+import { testTriageConnection, type TriageProvider } from '../lib/orchestrator-agent.js';
 import { emitLog } from '../lib/logger.js';
 
 const router: ExpressRouter = Router();
@@ -45,6 +46,35 @@ router.post('/', (req, res) => {
   const saved = upsertNorcSettings(patch);
   emitLog(`NORC settings updated (triage ${saved.orchestratorEnabled ? 'on' : 'off'} via ${saved.orchestratorProvider}, heartbeat ${saved.heartbeatEnabled ? 'on' : 'off'})`);
   res.json(safe(saved));
+});
+
+// POST /api/settings/test — verify the triage LLM is reachable. Body may carry
+// unsaved form values { provider?, apiKey?, baseUrl?, model? }; anything omitted
+// falls back to the saved settings (so a blank key reuses the stored one).
+router.post('/test', async (req, res) => {
+  const saved = getNorcSettingsOrDefault();
+  const b = req.body as Record<string, unknown>;
+
+  const provider: TriageProvider = b['provider'] === 'openai' || b['provider'] === 'anthropic'
+    ? b['provider'] : (saved.orchestratorProvider as TriageProvider);
+  const baseUrl = typeof b['baseUrl'] === 'string' && b['baseUrl'].trim() ? b['baseUrl'].trim() : saved.orchestratorBaseUrl;
+  const model = typeof b['model'] === 'string' && b['model'].trim() ? b['model'].trim() : saved.orchestratorModel;
+  const apiKey = typeof b['apiKey'] === 'string' && b['apiKey'].trim() ? b['apiKey'].trim() : (saved.orchestratorApiKey ?? '');
+
+  if (provider === 'openai' && !baseUrl) {
+    res.status(400).json({ ok: false, error: 'A base URL is required for the OpenAI-compatible provider.' });
+    return;
+  }
+  if (provider === 'anthropic' && !apiKey) {
+    res.status(400).json({ ok: false, error: 'An API key is required for the Anthropic provider.' });
+    return;
+  }
+
+  const start = Date.now();
+  const result = await testTriageConnection({ provider, apiKey, baseUrl, model });
+  const latencyMs = Date.now() - start;
+  emitLog(`triage test (${provider}, ${model}): ${result.ok ? `OK (${latencyMs}ms)` : `FAILED — ${result.error}`}`);
+  res.json({ ok: result.ok, latencyMs, sample: result.text?.slice(0, 80), error: result.error });
 });
 
 export { router as settingsRouter };

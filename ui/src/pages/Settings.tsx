@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { InvitePanel } from '../components/InvitePanel.js';
 import { PlatformsPanel } from '../components/PlatformsPanel.js';
 import { provisionCompanyDb } from '../api/notion.js';
-import { getSettings, saveSettings, type NorcSettings } from '../api/settings.js';
+import { getSettings, saveSettings, testTriageConnection, type NorcSettings } from '../api/settings.js';
 
 function Section({ title, description, children }: { title: string; description?: string; children: React.ReactNode }) {
   return (
@@ -73,8 +73,27 @@ function OrchestratorPanel() {
   const [apiKey, setApiKey] = useState('');
   const [state, setState] = useState<'idle' | 'busy' | 'saved' | 'error'>('idle');
   const [msg, setMsg] = useState('');
+  const [testState, setTestState] = useState<'idle' | 'busy' | 'ok' | 'error'>('idle');
+  const [testMsg, setTestMsg] = useState('');
 
   useEffect(() => { getSettings().then(setS).catch(() => setMsg('Could not load settings')); }, []);
+
+  const test = async () => {
+    if (!s) return;
+    setTestState('busy'); setTestMsg('');
+    try {
+      const r = await testTriageConnection({
+        provider: s.orchestratorProvider,
+        model: s.orchestratorModel,
+        baseUrl: s.orchestratorBaseUrl,
+        ...(apiKey.trim() ? { apiKey: apiKey.trim() } : {}),
+      });
+      if (r.ok) { setTestState('ok'); setTestMsg(`Connected${r.latencyMs != null ? ` (${r.latencyMs}ms)` : ''}${r.sample ? ` — replied “${r.sample}”` : ''}`); }
+      else { setTestState('error'); setTestMsg(r.error ?? 'Connection failed'); }
+    } catch (err) {
+      setTestState('error'); setTestMsg(err instanceof Error ? err.message : 'Connection failed');
+    }
+  };
 
   const save = async () => {
     if (!s) return;
@@ -143,16 +162,25 @@ function OrchestratorPanel() {
         <label style={labelStyle}>Co-CEO system prompt (optional — overrides the default persona)</label>
         <textarea style={{ ...inputStyle, minHeight: 80, fontFamily: 'inherit', resize: 'vertical' }}
           value={s.orchestratorSystemPrompt ?? ''} onChange={e => setS({ ...s, orchestratorSystemPrompt: e.target.value })}
-          placeholder="You are the NORC Orchestrator, a co-CEO who…" />
+          placeholder="You are the NORC Triage Agent, a co-CEO who…" />
       </div>
 
-      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
         <button onClick={save} disabled={state === 'busy'} style={{
           fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
           border: '1px solid var(--border)', background: 'var(--accent, var(--surface1))', color: 'var(--text-primary)',
           cursor: state === 'busy' ? 'default' : 'pointer',
         }}>{state === 'busy' ? 'Saving…' : 'Save'}</button>
+        <button onClick={test} disabled={testState === 'busy'} style={{
+          fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
+          border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)',
+          cursor: testState === 'busy' ? 'default' : 'pointer',
+        }}>{testState === 'busy' ? 'Testing…' : 'Test connection'}</button>
         {msg && <span style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</span>}
+        {testMsg && <span style={{ fontSize: 12.5, color: testState === 'error' ? 'var(--danger, #d33)' : 'var(--success, #2a8)' }}>{testState === 'ok' ? '✓ ' : '✗ '}{testMsg}</span>}
+      </div>
+      <div style={{ fontSize: 12, color: 'var(--text-tertiary, #999)' }}>
+        Test uses the values above (leave the key blank to test with the saved one). It doesn't save.
       </div>
     </div>
   );

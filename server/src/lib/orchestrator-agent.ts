@@ -73,17 +73,35 @@ export async function triage(input: TriageInput): Promise<TriageDecision> {
     `In "message", address the user and write the agent as @name when routing or suggesting.`,
   ].join('\n');
 
-  const res = input.provider === 'openai'
-    ? await callOpenAICompatible(input.baseUrl ?? '', input.apiKey, input.model, system, prompt)
-    : await dispatch({
-        adapterType: 'claude-api',
-        config: { apiKey: input.apiKey, model: input.model, ...(input.baseUrl ? { baseUrl: input.baseUrl } : {}) },
-        system, prompt,
-      });
+  const res = await callTriageLLM(input, system, prompt);
   if (!res.ok || !res.text) {
     return { decision: 'ignore', agent: null, confidence: 0, message: res.error ?? 'no response' };
   }
   return parseDecision(res.text, input.candidates);
+}
+
+export interface LLMConfig {
+  provider: TriageProvider;
+  apiKey: string;
+  baseUrl?: string | null;
+  model: string;
+}
+
+/** One provider-agnostic LLM call → { ok, text?, error? }. */
+export async function callTriageLLM(cfg: LLMConfig, system: string, prompt: string): Promise<{ ok: boolean; text?: string; error?: string }> {
+  if (cfg.provider === 'openai') {
+    return callOpenAICompatible(cfg.baseUrl ?? '', cfg.apiKey, cfg.model, system, prompt);
+  }
+  return dispatch({
+    adapterType: 'claude-api',
+    config: { apiKey: cfg.apiKey, model: cfg.model, ...(cfg.baseUrl ? { baseUrl: cfg.baseUrl } : {}) },
+    system, prompt,
+  });
+}
+
+/** A lightweight connectivity check: ask the model to echo a token. */
+export async function testTriageConnection(cfg: LLMConfig): Promise<{ ok: boolean; text?: string; error?: string }> {
+  return callTriageLLM(cfg, 'You are a connectivity check for NORC.', 'Reply with the single word: OK');
 }
 
 /**

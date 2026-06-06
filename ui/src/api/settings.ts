@@ -40,3 +40,26 @@ export async function saveSettings(patch: NorcSettingsPatch): Promise<NorcSettin
   if (!res.ok) throw new Error(`${res.status}`);
   return res.json() as Promise<NorcSettings>;
 }
+
+export interface TriageTestRequest {
+  provider?: TriageProvider;
+  apiKey?: string;
+  baseUrl?: string | null;
+  model?: string;
+}
+
+export interface TriageTestResult {
+  ok: boolean;
+  latencyMs?: number;
+  sample?: string;
+  error?: string;
+}
+
+export async function testTriageConnection(req: TriageTestRequest): Promise<TriageTestResult> {
+  const res = await fetch('/api/settings/test', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return res.json() as Promise<TriageTestResult>;
+}
