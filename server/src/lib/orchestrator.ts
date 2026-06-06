@@ -33,7 +33,7 @@ import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForP
 import { getNorcSettings } from './norc-settings.js';
 import { triage } from './orchestrator-agent.js';
 import {
-  postComment, postCommentReply, appendBlocks,
+  postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning, appendBlocks,
   setTaskStatus, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
 } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
@@ -122,14 +122,22 @@ function recordOurComment(commentId: string): void {
   }
 }
 
-/** Post a page-level NORC comment and record its id so we don't re-trigger on it. */
-async function postAgentComment(apiKey: string, pageId: string, text: string): Promise<void> {
-  recordOurComment((await postComment(apiKey, pageId, text)).commentId);
+/** Post a page-level NORC comment and record its id so we don't re-trigger on it.
+ * When mentionUserId is set, the comment opens with a real @user mention so that
+ * person gets a Notion notification (used to pull a human in when triage is unsure). */
+async function postAgentComment(apiKey: string, pageId: string, text: string, mentionUserId?: string | null): Promise<void> {
+  const res = mentionUserId
+    ? await postCommentMentioning(apiKey, pageId, mentionUserId, text)
+    : await postComment(apiKey, pageId, text);
+  recordOurComment(res.commentId);
 }
 
 /** Reply on the precise text (into a discussion) and record the comment id. */
-async function postAgentReply(apiKey: string, discussionId: string, text: string): Promise<void> {
-  recordOurComment((await postCommentReply(apiKey, discussionId, text)).commentId);
+async function postAgentReply(apiKey: string, discussionId: string, text: string, mentionUserId?: string | null): Promise<void> {
+  const res = mentionUserId
+    ? await postCommentReplyMentioning(apiKey, discussionId, mentionUserId, text)
+    : await postCommentReply(apiKey, discussionId, text);
+  recordOurComment(res.commentId);
 }
 
 /**
@@ -192,11 +200,14 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
     return;
   }
 
+  // The human who triggered this event (no bot here — loop guard returned above).
+  const triggeringUserId = authorIds[0] ?? null;
+
   try {
     if (event.type === 'comment.created') {
-      await handleCommentEvent(integration, event);
+      await handleCommentEvent(integration, event, triggeringUserId);
     } else if (event.type && PAGE_EVENT_TYPES.has(event.type)) {
-      await handlePageEvent(integration, event);
+      await handlePageEvent(integration, event, triggeringUserId);
     } else {
       emitLog(`webhook ignored: "${type}" is not a trigger event type`);
     }
@@ -207,7 +218,7 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
 }
 
 /** comment.created — a conversational turn; mentions live in the comment text. */
-async function handleCommentEvent(integration: Integration, event: NotionWebhookEvent): Promise<void> {
+async function handleCommentEvent(integration: Integration, event: NotionWebhookEvent, triggeringUserId: string | null): Promise<void> {
   const apiKey = integration.apiKey;
   const commentId = event.entity?.id;
   if (!commentId) {
@@ -245,6 +256,7 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
     const handled = await triageUnhandled(integration, anchor, {
       text: (triggering?.plainText ?? '').trim(),
       thread, discussionId: triggering?.discussionId ?? null, commentedText, dedupId: commentId,
+      triggeringUserId: triggering?.authorId ?? triggeringUserId,
     });
     if (!handled) emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`);
     return;
@@ -271,7 +283,7 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
 }
 
 /** page.* — mentions in property values / block content. On a Task = work. */
-async function handlePageEvent(integration: Integration, event: NotionWebhookEvent): Promise<void> {
+async function handlePageEvent(integration: Integration, event: NotionWebhookEvent, triggeringUserId: string | null): Promise<void> {
   const apiKey = integration.apiKey;
   const pageId = event.entity?.id;
   if (!pageId) {
@@ -290,7 +302,7 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   const matched = matchAgents(candidateIds);
   if (matched.length === 0) {
     const thread = await listThreadComments(apiKey, pageId);
-    const handled = await triageUnhandled(integration, anchor, { text: '', thread, dedupId: pageId });
+    const handled = await triageUnhandled(integration, anchor, { text: '', thread, dedupId: pageId, triggeringUserId });
     if (!handled) emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`);
     return;
   }
@@ -329,6 +341,8 @@ interface TriageOpts {
   discussionId?: string | null;
   commentedText?: string;
   dedupId: string;
+  /** Notion user id that triggered the event — @mentioned when triage is unsure. */
+  triggeringUserId?: string | null;
 }
 
 /**
@@ -354,6 +368,7 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
 
   await runTriage(integration, anchor, {
     text: opts.text, thread: opts.thread, discussionId: opts.discussionId, commentedText: opts.commentedText,
+    triggeringUserId: opts.triggeringUserId,
   }, [], '');
   return true;
 }
@@ -363,6 +378,8 @@ interface TriageCtx {
   thread: ThreadComment[];
   discussionId?: string | null;
   commentedText?: string;
+  /** Notion user id to @mention when triage is unsure (needs a human). */
+  triggeringUserId?: string | null;
 }
 
 export type TriageOutcome = 'routed' | 'suggested' | 'asked' | 'no-agents' | 'error' | 'disabled';
@@ -387,16 +404,20 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   const apiKey = integration.apiKey;
   const prefix = notePrefix ? `${notePrefix}\n\n` : '';
 
-  const announce = async (text: string) => {
+  // When `mention` is true and we know who triggered the event, the comment opens
+  // with a real @user mention so that person gets a Notion notification — the
+  // native way to pull a human in when triage is unsure.
+  const announce = async (text: string, mention = false) => {
     const full = `🧭 **NORC Triage Agent**\n${prefix}${text}`;
-    if (ctx.discussionId) await safeWrite('triage reply', () => postAgentReply(apiKey, ctx.discussionId!, full));
-    else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, full));
+    const who = mention ? (ctx.triggeringUserId ?? null) : null;
+    if (ctx.discussionId) await safeWrite('triage reply', () => postAgentReply(apiKey, ctx.discussionId!, full, who));
+    else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, full, who));
   };
 
   const excl = new Set(excludeNames.map(n => n.toLowerCase()));
   const agentRows = db.select().from(agents).all().filter(a => !excl.has(a.name.toLowerCase()));
   if (agentRows.length === 0) {
-    await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.');
+    await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.', true);
     emitLog('triage: no remaining agents after exclusions');
     await notifyHuman(integration, anchor, 'No agent available for triage', 'No remaining agents to try — please assign someone manually.');
     return 'no-agents';
@@ -438,7 +459,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
 
   if (decision.decision === 'ignore') {
     const msg = decision.message?.trim() || 'No one is assigned and no registered agent clearly fits this. Who should take it?';
-    await announce(msg);
+    await announce(msg, true);
     emitLog(`triage: no clear owner (${decision.message || 'asked'})`);
     await notifyHuman(integration, anchor, 'NORC triage needs your input', msg);
     return 'asked';
@@ -463,7 +484,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     || (decision.agent
       ? `No one is assigned. I think **@${decision.agent}** could handle this — reply "@${decision.agent} go" to assign.`
       : 'No one is assigned and no registered agent clearly fits. Who should take this?');
-  await announce(suggestMsg);
+  await announce(suggestMsg, true);
   emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
   await notifyHuman(integration, anchor, 'NORC triage suggestion needs confirmation', suggestMsg);
   return 'suggested';

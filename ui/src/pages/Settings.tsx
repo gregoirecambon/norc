@@ -282,7 +282,7 @@ function NotificationsPanel() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 14, maxWidth: 560 }}>
       <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13.5, color: 'var(--text-primary)' }}>
         <input type="checkbox" checked={s.notifyEnabled} onChange={e => setS({ ...s, notifyEnabled: e.target.checked })} />
-        Email me when the Triage Agent is unsure or needs a decision
+        Also email me when the Triage Agent is unsure (the Notion @mention happens regardless)
       </label>
       <div>
         <label style={labelStyle}>Recipient email (defaults to the SMTP user if blank)</label>
@@ -370,7 +370,7 @@ export default function SettingsPage() {
 
       <Section
         title="Notifications"
-        description="Email-in-the-loop. When the Triage Agent is unsure (suggests an agent, asks who should take a task, or has no one to try), NORC emails you in addition to writing in Notion. Any SMTP works — a Gmail app password, your domain's SMTP, or a transactional service."
+        description="When the Triage Agent is unsure (suggests an agent, asks who should take a task, or has no one to try), it comments on the exact item and @mentions the person who triggered the event — so they're notified natively in Notion. This panel adds an OPTIONAL email on top of that, for when you're not watching Notion. Any SMTP works — a Gmail app password, your domain's SMTP, or a transactional service."
       >
         <NotificationsPanel />
       </Section>

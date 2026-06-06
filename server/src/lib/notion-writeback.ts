@@ -50,6 +50,14 @@ export function toRichText(text: string): { type: 'text'; text: { content: strin
   return segments;
 }
 
+/** Rich text that opens with a real Notion @user mention (so they get notified). */
+function toRichTextMentioning(userId: string, text: string): unknown[] {
+  return [
+    { type: 'mention', mention: { type: 'user', user: { id: userId } } },
+    ...toRichText(` ${text}`),
+  ];
+}
+
 /** Post a comment on a page; returns the created comment id (for loop guard). */
 export async function postComment(
   apiKey: string,
@@ -76,6 +84,34 @@ export async function postCommentReply(
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     discussion_id: discussionId,
     rich_text: toRichText(text),
+  });
+  return { commentId: String(res['id'] ?? '') };
+}
+
+/** Post a page comment that @mentions a user (used to pull a human into the loop). */
+export async function postCommentMentioning(
+  apiKey: string,
+  pageId: string,
+  userId: string,
+  text: string,
+): Promise<{ commentId: string }> {
+  const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
+    parent: { page_id: pageId },
+    rich_text: toRichTextMentioning(userId, text),
+  });
+  return { commentId: String(res['id'] ?? '') };
+}
+
+/** Reply into a discussion with a leading @user mention. */
+export async function postCommentReplyMentioning(
+  apiKey: string,
+  discussionId: string,
+  userId: string,
+  text: string,
+): Promise<{ commentId: string }> {
+  const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
+    discussion_id: discussionId,
+    rich_text: toRichTextMentioning(userId, text),
   });
   return { commentId: String(res['id'] ?? '') };
 }
