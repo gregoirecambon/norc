@@ -15,6 +15,12 @@ export interface TriageCandidate {
   specialty: string;
   capabilities: string;
   technology?: string;
+  /** In-flight work runs right now. */
+  activeRuns?: number;
+  /** Turns waiting in the agent's dispatch queue. */
+  queuedCount?: number;
+  /** The agent's concurrent-run cap. */
+  maxConcurrentRuns?: number;
 }
 
 export interface TriageInput {
@@ -47,12 +53,18 @@ const DEFAULT_SYSTEM =
   'should take it. Prefer "suggest" (human confirms) under any doubt; "route" only for an obvious, confident, ' +
   'evidenced fit; "ignore" for noise, items needing no agent, or when no agent has the needed capability.';
 
+/** One roster line, including current load when the caller provided it. */
+function rosterLine(c: TriageCandidate): string {
+  const load = typeof c.activeRuns === 'number'
+    ? ` (load: ${c.activeRuns} running${c.queuedCount ? `, ${c.queuedCount} queued` : ''}${typeof c.maxConcurrentRuns === 'number' ? ` / cap ${c.maxConcurrentRuns}` : ''})`
+    : '';
+  return `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.technology ? ` (tech: ${c.technology})` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}${load}`;
+}
+
 export async function triage(input: TriageInput): Promise<TriageDecision> {
   const system = input.systemPrompt?.trim() || DEFAULT_SYSTEM;
   const roster = input.candidates.length
-    ? input.candidates
-        .map(c => `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.technology ? ` (tech: ${c.technology})` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}`)
-        .join('\n')
+    ? input.candidates.map(rosterLine).join('\n')
     : '(no agents registered)';
   const commented = input.commentedText?.trim()
     ? `\n\nText being commented on:\n"""\n${input.commentedText.trim()}\n"""`
@@ -77,6 +89,7 @@ export async function triage(input: TriageInput): Promise<TriageDecision> {
     `- suggest: a listed agent likely fits, but a human should confirm.`,
     `- ignore: NO listed agent has the needed capability (ask the human), or no agent action is needed.`,
     `Only pick an agent whose listed specialty/capabilities/technology actually cover this task. Do NOT guess or invent a fit, and never name an agent not in the list above.`,
+    `Each agent shows its current load (running/queued/cap). When two candidates fit comparably, prefer the less-loaded one — work routed to a saturated agent waits in its queue. Capability fit always comes first.`,
     `In "message", address the user and write the agent as @name when routing or suggesting; when ignoring for lack of a fit, say so and ask who should take it.`,
   ].join('\n');
 
@@ -205,6 +218,61 @@ export function parseTaskWorthy(text: string): TaskWorthy {
   const title = typeof obj['title'] === 'string' ? obj['title'] : undefined;
   const kpis = typeof obj['kpis'] === 'string' ? obj['kpis'] : undefined;
   return { task, ...(title ? { title } : {}), ...(kpis ? { kpis } : {}) };
+}
+
+// ─── Duplicate-task judge: is an out-of-band request the SAME work as an open task? ───
+
+export interface JudgeSimilarityInput extends LLMConfig {
+  title: string;
+  description?: string;
+  candidates: { title: string; status: string }[];
+}
+
+export type SimilarityVerdict = { index: number; reason: string };
+
+const JUDGE_SYSTEM =
+  'You judge whether a NEW task duplicates EXISTING open tasks in a company workspace. "Same work" means ' +
+  'doing it would make the existing task redundant (rephrasings, translations, and subsets/supersets of the ' +
+  'same deliverable count). Related-but-distinct work does NOT count. Be precise — a false "same" blocks ' +
+  'real work, a false "different" creates a duplicate.';
+
+/**
+ * Ask the triage LLM which candidates are the SAME work as the new task.
+ * Returns null when the LLM is unavailable/unparseable so the caller can fall
+ * back to the heuristic verdict (never silently "no duplicates").
+ */
+export async function judgeTaskSimilarity(input: JudgeSimilarityInput): Promise<SimilarityVerdict[] | null> {
+  if (input.candidates.length === 0) return [];
+  const list = input.candidates.map((c, i) => `${i}. "${c.title}" (status: ${c.status})`).join('\n');
+  const prompt = [
+    `New task: "${input.title}"`,
+    input.description?.trim() ? `Details: ${input.description.trim().slice(0, 1000)}` : '',
+    ``,
+    `Existing open tasks on the same project:`,
+    list,
+    ``,
+    `Which existing tasks are the SAME work as the new task (doing the new task would duplicate them)?`,
+    `Respond with ONLY a JSON array, no prose — empty array if none:`,
+    `[{"index":<number from the list>,"reason":"<one short sentence>"}]`,
+  ].filter(l => l !== '').join('\n');
+  const res = await callTriageLLM(input, JUDGE_SYSTEM, prompt);
+  if (!res.ok || !res.text) return null;
+  return parseSimilarityVerdicts(res.text, input.candidates.length);
+}
+
+/** Parse the judge's JSON array; null when unparseable (caller falls back). */
+export function parseSimilarityVerdicts(text: string, candidateCount: number): SimilarityVerdict[] | null {
+  const arr = extractJsonArray(text);
+  if (!arr) return null;
+  const out: SimilarityVerdict[] = [];
+  for (const item of arr) {
+    if (!item || typeof item !== 'object') continue;
+    const r = item as Record<string, unknown>;
+    const index = typeof r['index'] === 'number' ? r['index'] : NaN;
+    if (!Number.isInteger(index) || index < 0 || index >= candidateCount) continue;
+    out.push({ index, reason: typeof r['reason'] === 'string' ? r['reason'] : '' });
+  }
+  return out;
 }
 
 // ─── Outcome assessment: did the agent do the task, or is it blocked? ─────────

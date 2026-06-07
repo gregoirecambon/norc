@@ -11,6 +11,7 @@ export interface AgentRow {
   registeredAt: number;
   metadata: Record<string, unknown>;
   orgDbPageId: string | null;
+  maxConcurrentRuns: number;
 }
 
 export interface InviteData {
@@ -106,6 +107,19 @@ export async function updateAgentSkills(id: string): Promise<SkillUpdateResponse
     throw new Error(body.message ?? body.error ?? `${res.status}`);
   }
   return res.json() as Promise<SkillUpdateResponse>;
+}
+
+export async function updateAgentLimits(id: string, maxConcurrentRuns: number): Promise<{ maxConcurrentRuns: number }> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(id)}/limits`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ maxConcurrentRuns }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
+    throw new Error(body.message ?? body.error ?? `${res.status}`);
+  }
+  return res.json() as Promise<{ maxConcurrentRuns: number }>;
 }
 
 export async function deleteAgent(id: string): Promise<void> {

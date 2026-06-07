@@ -82,8 +82,13 @@ curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
 # Propose follow-up tasks → NORC creates them (Backlog) and triages each
 # (auto-routes to an agent when confident, else asks a human). Great for a
 # planning/strategy agent that ends with "we should do X, Y, Z".
+# To SEQUENCE the plan, add "dependsOn": indices of EARLIER tasks in the same
+# batch — those tasks are created on hold and start automatically when their
+# predecessors are Done (here, task 2 waits for tasks 0 and 1).
 curl -s -X POST <api_base>/propose-tasks -H 'Content-Type: application/json' \
-  -d '{"tasks":[{"title":"Draft Q3 pricing","description":"…","kpis":"+10% conversion"}]}'
+  -d '{"tasks":[{"title":"Draft Q3 pricing","description":"…","kpis":"+10% conversion"},
+               {"title":"Competitive scan","description":"…"},
+               {"title":"Final pricing proposal","description":"…","dependsOn":[0,1]}]}'
 ```
 
 ### Going deeper (strategic agents)
@@ -115,6 +120,56 @@ frees you.
 
 **2. If you cannot make HTTP requests:** simply return your answer as your normal
 text output. NORC will post it as a comment on the page for you.
+
+## Out-of-band work — the CORE RULE
+
+You also talk to humans outside NORC (Slack, chat, email, …). **Never silently
+do project work that was asked out-of-band.** Every piece of real work must be
+a NORC task — otherwise the team can't see it, and you may duplicate work that
+is already running. Questions and pure conversation are fine to answer
+directly; this rule is for actual WORK (produce, build, fix, write, analyse…).
+
+These calls use the `agentSecret` you saved at registration
+(`Authorization: Bearer <agentSecret>`) — NOT a run token.
+
+When a human asks you for project work outside Notion:
+
+**1. Check** for an existing open task on that project:
+
+```bash
+curl -s '{{NORC_URL}}/api/me/tasks?project=Site%20v2&q=login%20bug' \
+  -H 'Authorization: Bearer <agentSecret>'
+```
+
+**2. Create or claim** the task. NORC re-checks for duplicates server-side, so
+this step is safe even if you skipped the check:
+
+```bash
+curl -s -X POST {{NORC_URL}}/api/me/tasks \
+  -H 'Authorization: Bearer <agentSecret>' -H 'Content-Type: application/json' \
+  -d '{"title":"Fix login bug","description":"<the user'\''s exact ask>","project":"Site v2","source":"slack"}'
+```
+
+**3. Act on the response:**
+
+- **`409 similar_tasks_exist`** → an open task already looks like the same
+  work. WARN the user in your channel, show them the `candidates`, and let
+  THEM decide — never decide alone. Then re-POST with
+  `{"existingTaskPageId":"<id>"}` to claim the existing task, or
+  `{"force":true}` to create anyway.
+- **`mode:"dispatched"`** → the task is yours and the response carries a
+  `run` block (`api_base`). Do the work NOW, in this conversation, and report
+  exactly like a normal run: `/comment`, `/blocks`, `/status` — and ALWAYS
+  finish with `POST <api_base>/complete`, promptly. An unreported run times
+  out and the task gets reassigned.
+- **`mode:"queued"`** → you are busy with other NORC work. The task was
+  created (or claimed) and queued at the FRONT of your queue — tell the user
+  it runs next. NORC will send you the original request the moment your
+  current run finishes. Do NOT start the work now.
+
+NORC guarantees no double-run: the task page it creates for you is webhook-loop
+protected, so you will never receive a second dispatch for work you already
+started this way.
 
 ## Delegating to another agent
 

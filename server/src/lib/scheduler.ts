@@ -16,6 +16,7 @@ import { getTitle, getRichText, getSelect, getRelationIds } from './notion-props
 import { createTaskPage, setTaskScheduledFor } from './notion-writeback.js';
 import { isInertTaskStatus } from './notion-provision.js';
 import { dispatchScheduledTask } from './orchestrator.js';
+import { unmetDependencies } from './task-deps.js';
 import { emitLog } from './logger.js';
 
 function alreadyProcessed(key: string): boolean {
@@ -108,6 +109,19 @@ export async function runScheduler(): Promise<void> {
       if (!alreadyProcessed(holdKey)) {
         markProcessed(holdKey);
         emitLog(`scheduler: task ${taskId} is due but Status is ${status || 'empty'} — holding until it's set to Backlog`, 'Schedule');
+      }
+      continue;
+    }
+
+    // Dependency gate: a due task (or recurring template) with unmet "Depends
+    // On" deps is held WITHOUT consuming its occurrence — the first poll after
+    // the chain completes fires it. Log the hold once per occurrence.
+    const unmetDeps = await unmetDependencies(apiKey, props);
+    if (unmetDeps.length > 0) {
+      const depHoldKey = `schedule-dep-hold:${taskId}:${scheduledFor}`;
+      if (!alreadyProcessed(depHoldKey)) {
+        markProcessed(depHoldKey);
+        emitLog(`scheduler: task ${taskId} is due but waits on ${unmetDeps.length} dependenc${unmetDeps.length === 1 ? 'y' : 'ies'} — holding`, 'Schedule', taskId);
       }
       continue;
     }

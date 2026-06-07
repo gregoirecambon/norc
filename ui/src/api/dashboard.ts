@@ -14,10 +14,24 @@ export interface DashboardRun {
   completedAt: number | null;
 }
 
+export interface QueuedItem {
+  id: number;
+  agentId: string;
+  agentName: string;
+  title: string | null;
+  anchorKind: string;
+  pageId: string;
+  taskPageId: string | null;
+  projectId: string | null;
+  priority: number;
+  enqueuedAt: number;
+}
+
 export interface DashboardData {
   activeRuns: DashboardRun[];
   recentRuns: DashboardRun[];
-  stats: { activeRuns: number; agentsConnected: number; agentsTotal: number };
+  queued: QueuedItem[];
+  stats: { activeRuns: number; queuedItems: number; agentsConnected: number; agentsTotal: number };
 }
 
 async function getJson<T>(path: string): Promise<T> {

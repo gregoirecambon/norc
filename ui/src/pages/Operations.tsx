@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { PageHeader, Tabs, Section } from '../components/ui.js';
 import {
-  TriageAgentPanel, StrategicContextPanel, SchedulePanel, ProposalsPanel, HeartbeatPanel,
+  TriageAgentPanel, StrategicContextPanel, SchedulePanel, ProposalsPanel, HeartbeatPanel, DependenciesPanel,
 } from '../components/panels/ConfigPanels.js';
 import { ProposalsList, ScheduledTasksList } from '../components/panels/TaskViews.js';
 import { AgentHealth } from '../components/panels/AgentHealth.js';
@@ -47,6 +47,12 @@ export default function OperationsPage() {
             description="Tasks with a 'Scheduled For' date run when due; recurring tasks spawn a fresh instance each period. Add the scheduling fields to the Tasks DB, then enable the poller."
           >
             <SchedulePanel />
+          </Section>
+          <Section
+            title="Task dependencies & queueing"
+            description="Adds a 'Depends On' relation (reverse: 'Blocks') and the 'Queued' status to your Tasks DB. A task with unmet dependencies waits and starts automatically when they're all Done; work beyond an agent's concurrent-run cap shows as Queued. Safe to re-run."
+          >
+            <DependenciesPanel />
           </Section>
           <Section title="Upcoming">
             <ScheduledTasksList />

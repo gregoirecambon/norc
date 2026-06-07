@@ -13,6 +13,8 @@ export interface NewTask {
   status?: string;
   /** Org DB page ids to set as "Assigned To" (e.g. copied from a recurring template). */
   assigneeIds?: string[];
+  /** Task page ids this task "Depends On" — held until they're all Done. */
+  dependsOn?: string[];
 }
 
 /**
@@ -20,7 +22,7 @@ export interface NewTask {
  * and recurring-task instances. Defaults to Backlog; optionally links a Project and
  * sets assignees. Returns the new id.
  */
-export async function createTaskPage(apiKey: string, tasksDbId: string, task: NewTask): Promise<{ pageId: string }> {
+export async function createTaskPage(apiKey: string, tasksDbId: string, task: NewTask): Promise<{ pageId: string; url: string }> {
   const properties: Record<string, unknown> = {
     'Name': { title: toRichText(task.title) },
     'Status': { select: { name: task.status ?? 'Backlog' } },
@@ -34,11 +36,14 @@ export async function createTaskPage(apiKey: string, tasksDbId: string, task: Ne
   if (task.assigneeIds && task.assigneeIds.length) {
     properties['Assigned To'] = { relation: task.assigneeIds.filter(Boolean).map(id => ({ id })) };
   }
+  if (task.dependsOn && task.dependsOn.length) {
+    properties['Depends On'] = { relation: task.dependsOn.filter(Boolean).map(id => ({ id })) };
+  }
   const res = await notionPost<Record<string, unknown>>(apiKey, '/pages', {
     parent: { database_id: tasksDbId },
     properties,
   });
-  return { pageId: String(res['id'] ?? '') };
+  return { pageId: String(res['id'] ?? ''), url: String(res['url'] ?? '') };
 }
 
 /** Archive a page (move to Notion trash) — e.g. dismissing a proposed task. */
@@ -177,7 +182,7 @@ export async function appendBlocks(apiKey: string, pageId: string, blocks: Recor
   }
 }
 
-export type TaskStatus = 'Backlog' | 'In Progress' | 'Done' | 'Failed';
+export type TaskStatus = 'Backlog' | 'Queued' | 'In Progress' | 'Done' | 'Failed';
 
 /** Set a Task page's Status select. */
 export async function setTaskStatus(apiKey: string, taskPageId: string, status: TaskStatus): Promise<void> {

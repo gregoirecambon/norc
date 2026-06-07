@@ -20,6 +20,9 @@ export const agents = sqliteTable('agents', {
   upSinceAt:         integer('up_since_at'),       // start of the current confirmed-up period
   lastOkAt:          integer('last_ok_at'),        // last successful check (any kind)
   downNotifiedAt:    integer('down_notified_at'),  // set once the owner was notified for this outage
+  // Dispatch capacity: how many WORK runs may be in flight at once for this
+  // agent. Excess work waits in dispatch_queue. Chat-lane runs are exempt.
+  maxConcurrentRuns: integer('max_concurrent_runs').notNull().default(1),
 });
 
 export const registrationTokens = sqliteTable('registration_tokens', {
@@ -205,10 +208,35 @@ export const taskRuns = sqliteTable('task_runs', {
   taskPageId:       text('task_page_id'),             // set when the anchor is a Task
   anchorKind:       text('anchor_kind').notNull(),    // 'task' | 'project' | 'page'
   title:            text('title'),                    // page/task title snapshot at dispatch time (display only)
+  projectId:        text('project_id'),               // the Notion project this run belongs to (serialization key)
+  lane:             text('lane').notNull().default('work'), // 'work' (capacity-gated) | 'chat' (parallel, exempt)
   triggeringUserId: text('triggering_user_id'),       // who kicked it off — @mentioned on timeout escalation
   manageTaskStatus: integer('manage_task_status', { mode: 'boolean' }).notNull().default(false),
   status:           text('status').notNull().default('in_flight'), // in_flight|done|failed|timed_out
   agentActed:       integer('agent_acted', { mode: 'boolean' }).notNull().default(false),
   createdAt:        integer('created_at').notNull(),
   completedAt:      integer('completed_at'),
+});
+
+// Work waiting for agent capacity. A turn that can't dispatch (the agent is at
+// its maxConcurrentRuns cap, or already has an in-flight run on the same
+// project/page) parks here and is drained FIFO as runs finalize. `payload` is
+// the serialized turn (request, discussion ids, …) minus the comment thread,
+// which is re-fetched fresh at drain time. Integer PK = free FIFO ordering.
+export const dispatchQueue = sqliteTable('dispatch_queue', {
+  id:            integer('id').primaryKey({ autoIncrement: true }),
+  agentId:       text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+  pageId:        text('page_id').notNull(),
+  taskPageId:    text('task_page_id'),
+  projectId:     text('project_id'),
+  anchorKind:    text('anchor_kind').notNull(),  // 'task' | 'project' | 'page'
+  title:         text('title'),
+  payload:       text('payload').notNull(),      // JSON QueuedTurn
+  // Higher drains first (then FIFO). 0 = normal webhook work; 1 = priority —
+  // e.g. a task an agent claimed from an out-of-band (Slack) request.
+  priority:      integer('priority').notNull().default(0),
+  status:        text('status').notNull().default('pending'), // pending|dispatched|dropped
+  enqueuedAt:    integer('enqueued_at').notNull(),
+  dispatchedAt:  integer('dispatched_at'),
+  droppedReason: text('dropped_reason'),
 });

@@ -15,6 +15,10 @@ import { generateWsKeypair, initiateWsPairing } from '../adapters/openclaw.js';
 import { notifySkillUpdate } from '../adapters/index.js';
 import { getOrgContext, upsertAgentPage, archiveAgentPage } from '../lib/notion-orgdb.js';
 import { NORC_SKILL_VERSION } from '../lib/skill.js';
+import { pendingItems } from '../lib/dispatch-queue.js';
+import { drainAgent } from '../lib/orchestrator.js';
+import { setTaskStatus } from '../lib/notion-writeback.js';
+import { notionIntegration } from '../db/schema.js';
 import type { AdapterType } from '../types.js';
 
 const router: ExpressRouter = Router();
@@ -71,7 +75,23 @@ router.get('/', (_req, res) => {
     registeredAt: r.registeredAt,
     metadata: parseJson(r.metadata),
     orgDbPageId: r.orgDbPageId ?? null,
+    maxConcurrentRuns: r.maxConcurrentRuns,
   })));
+});
+
+// PATCH /api/agents/:id/limits — dispatch capacity (how many work runs at once).
+const LimitsSchema = z.object({ maxConcurrentRuns: z.number().int().min(1).max(20) });
+router.patch('/:id/limits', zodMiddleware(LimitsSchema), (req, res) => {
+  const { id } = req.params as { id: string };
+  const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
+  if (!row) { res.status(404).json({ error: 'not_found' }); return; }
+  const { maxConcurrentRuns } = req.body as z.infer<typeof LimitsSchema>;
+  db.update(agents).set({ maxConcurrentRuns }).where(eq(agents.id, id)).run();
+  emitLog(`agent ${row.name} max concurrent runs → ${maxConcurrentRuns}`);
+  emitEvent({ type: 'agent.updated', data: { id, maxConcurrentRuns } });
+  // A raised cap may free queued work right away.
+  setImmediate(() => void drainAgent(id).catch(() => {}));
+  res.json({ updated: true, maxConcurrentRuns });
 });
 
 // GET /api/agents/invite
@@ -364,7 +384,20 @@ router.delete('/:id', async (req, res) => {
     if (ctx) await archiveAgentPage(ctx.apiKey, row.orgDbPageId);
   }
 
+  // Queued work dies with the agent (FK cascade) — first put the tasks back to
+  // Backlog so they're human-visible (and re-triageable) instead of stuck Queued.
+  const queued = pendingItems(id);
+  const integration = db.select().from(notionIntegration).all()[0] ?? null;
+  if (queued.length > 0 && integration?.status === 'active') {
+    for (const item of queued) {
+      if (!item.taskPageId) continue;
+      try { await setTaskStatus(integration.apiKey, item.taskPageId, 'Backlog'); } catch { /* best-effort */ }
+    }
+    emitLog(`agent ${row.name} had ${queued.length} queued item(s) — tasks reverted to Backlog`);
+  }
+
   db.delete(agents).where(eq(agents.id, id)).run();
+  if (queued.length > 0) emitEvent({ type: 'queue.updated', data: { agentId: id, pending: 0 } });
   emitLog(`agent ${row.name} deleted`);
   emitEvent({ type: 'agent.deleted', data: { id } });
   res.json({ deleted: true });

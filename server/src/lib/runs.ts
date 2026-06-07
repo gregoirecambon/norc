@@ -21,6 +21,10 @@ export interface NewRun {
   anchorKind: string;
   /** Page/task title snapshot at dispatch time — display only (dashboard). */
   title?: string | null;
+  /** The Notion project this run belongs to — the per-(agent, project) serialization key. */
+  projectId?: string | null;
+  /** 'work' runs are capacity-gated/queued; 'chat' runs are parallel and exempt. */
+  lane?: 'work' | 'chat';
   manageTaskStatus: boolean;
   /** The human who triggered this run — re-@mentioned if it later times out. */
   triggeringUserId?: string | null;
@@ -39,6 +43,8 @@ export function createRun(input: NewRun): { id: string; token: string } {
     taskPageId: input.taskPageId,
     anchorKind: input.anchorKind,
     title: input.title ?? null,
+    projectId: input.projectId ?? null,
+    lane: input.lane ?? 'work',
     triggeringUserId: input.triggeringUserId ?? null,
     manageTaskStatus: input.manageTaskStatus,
     status: 'in_flight',
@@ -86,6 +92,27 @@ export function hasInFlightRun(agentId: string): boolean {
   return !!db.select().from(taskRuns)
     .where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.status, 'in_flight')))
     .all()[0];
+}
+
+/** In-flight WORK runs for this agent — the number compared against the
+ * agent's maxConcurrentRuns cap. Chat-lane runs are exempt (parallel). */
+export function activeRunCount(agentId: string): number {
+  return db.select().from(taskRuns)
+    .where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.status, 'in_flight'), eq(taskRuns.lane, 'work')))
+    .all().length;
+}
+
+/**
+ * Does this agent already have an in-flight work run on the same page or the
+ * same project? The HARD serialization rule: one session per (agent, project)
+ * — and per (agent, page), since two runs on one page would share the
+ * adapter's per-page session memory.
+ */
+export function hasRunConflict(agentId: string, projectId: string | null, pageId: string): boolean {
+  const inFlight = db.select().from(taskRuns)
+    .where(and(eq(taskRuns.agentId, agentId), eq(taskRuns.status, 'in_flight'), eq(taskRuns.lane, 'work')))
+    .all();
+  return inFlight.some(r => r.pageId === pageId || (projectId !== null && r.projectId === projectId));
 }
 
 /** Distinct agent ids that have a timed-out run on this page — the Triage Agent

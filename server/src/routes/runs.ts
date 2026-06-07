@@ -18,7 +18,7 @@ import { readPageMarkdown, resolveAnchor } from '../lib/notion-anchor.js';
 import { getAnyTitle, getSelect } from '../lib/notion-props.js';
 import { notionGet, notionPost, notionQuery } from '../lib/notion-client.js';
 import { assembleContext, type ContextLevel } from '../lib/context-assembler.js';
-import { proposeTasks } from '../lib/orchestrator.js';
+import { proposeTasks, releaseDependents } from '../lib/orchestrator.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 
 /** Open Notion search/query is opt-in (off by default) and strategic-only. */
@@ -62,9 +62,21 @@ async function requireOpenSearch(apiKey: string, run: TaskRun, res: import('expr
   return true;
 }
 
-function activeApiKey(): string | null {
+function activeIntegration() {
   const row = db.select().from(notionIntegration).all()[0] ?? null;
-  return row && row.status === 'active' ? row.apiKey : null;
+  return row && row.status === 'active' ? row : null;
+}
+
+function activeApiKey(): string | null {
+  return activeIntegration()?.apiKey ?? null;
+}
+
+/** A task just went Done — kick the dependency release (fire-and-forget). */
+function releaseAfterDone(taskPageId: string): void {
+  const integration = activeIntegration();
+  if (!integration) return;
+  void releaseDependents(integration, taskPageId).catch(err =>
+    emitLog(`dependency release failed for ${taskPageId}: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage', taskPageId));
 }
 
 function recordCommentId(commentId: string): void {
@@ -241,6 +253,7 @@ export function makeRunsRouter(): ExpressRouter {
       if (status) {
         if (!allowed.includes(status as TaskStatus)) { res.status(400).json({ error: 'bad_status', allowed }); return; }
         await setTaskStatus(apiKey, run.taskPageId, status as TaskStatus);
+        if (status === 'Done') releaseAfterDone(run.taskPageId);
       }
       if (typeof agentOutput === 'string') await setTaskFields(apiKey, run.taskPageId, { agentOutput });
       markActed(run.id);
@@ -251,18 +264,45 @@ export function makeRunsRouter(): ExpressRouter {
     }
   });
 
-  // POST /api/runs/:token/propose-tasks  { tasks: [{ title, description?, kpis? }] }
+  // POST /api/runs/:token/propose-tasks
+  //   { tasks: [{ title, description?, kpis?, dependsOn?: number[] }] }
   // An agent hands NORC follow-up work; NORC creates Backlog tasks and triages each
-  // (auto-route when confident, else ask the human + email). Returns dispositions.
+  // (auto-route when confident, else ask the human + email). `dependsOn` entries are
+  // indices of EARLIER tasks in the same batch (a DAG by construction) — dependent
+  // tasks are created held and auto-released as their predecessors complete.
   r.post('/:token/propose-tasks', async (req, res) => {
     const { run } = req as unknown as { run: TaskRun; apiKey: string };
-    const { tasks } = req.body as { tasks?: { title?: string; description?: string; kpis?: string }[] };
+    const { tasks } = req.body as { tasks?: { title?: string; description?: string; kpis?: string; dependsOn?: unknown }[] };
     if (!Array.isArray(tasks) || tasks.length === 0) { res.status(400).json({ error: 'tasks_required' }); return; }
-    const clean = tasks
-      .filter(t => t && typeof t.title === 'string' && t.title.trim())
-      .slice(0, 20)
-      .map(t => ({ title: t.title!.trim(), description: typeof t.description === 'string' ? t.description : undefined, kpis: typeof t.kpis === 'string' ? t.kpis : undefined }));
+    const submitted = tasks.slice(0, 20);
+    // Build the clean list, remembering submitted-index → clean-index so
+    // dependsOn references survive dropped (titleless) entries.
+    const cleanIdx = new Map<number, number>();
+    const clean: { title: string; description?: string; kpis?: string; dependsOn?: number[] }[] = [];
+    for (let i = 0; i < submitted.length; i++) {
+      const t = submitted[i];
+      if (!t || typeof t.title !== 'string' || !t.title.trim()) continue;
+      cleanIdx.set(i, clean.length);
+      clean.push({
+        title: t.title.trim(),
+        description: typeof t.description === 'string' ? t.description : undefined,
+        kpis: typeof t.kpis === 'string' ? t.kpis : undefined,
+      });
+    }
     if (clean.length === 0) { res.status(400).json({ error: 'title_required' }); return; }
+    for (let i = 0; i < submitted.length; i++) {
+      const t = submitted[i];
+      const ci = cleanIdx.get(i);
+      if (ci === undefined || t?.dependsOn === undefined) continue;
+      const deps = t.dependsOn;
+      const valid = Array.isArray(deps) && deps.every(v =>
+        typeof v === 'number' && Number.isInteger(v) && v >= 0 && v < i && cleanIdx.has(v));
+      if (!valid) {
+        res.status(400).json({ error: 'bad_dependsOn', message: 'each dependsOn entry must be the index of an EARLIER task in this batch' });
+        return;
+      }
+      clean[ci]!.dependsOn = (deps as number[]).map(v => cleanIdx.get(v)!);
+    }
     const proposer = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0]?.name;
     try {
       const { created } = await proposeTasks({ sourcePageId: run.pageId, proposerName: proposer, tasks: clean });
@@ -288,6 +328,7 @@ export function makeRunsRouter(): ExpressRouter {
         if (typeof summary === 'string' && summary.trim()) {
           await setTaskFields(apiKey, run.taskPageId, { agentOutput: summary.trim() });
         }
+        if (ok) releaseAfterDone(run.taskPageId);
       }
       const agentRow = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
       if (agentRow?.orgDbPageId) await setAgentStatus(apiKey, agentRow.orgDbPageId, 'Available');

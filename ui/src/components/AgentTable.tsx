@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { StatusBadge } from './StatusBadge.js';
 import { HandshakeButton } from './HandshakeButton.js';
-import { deleteAgent, updateAgentConfig, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
+import { deleteAgent, updateAgentConfig, updateAgentLimits, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
 
 interface Props {
   agents: AgentRow[];
@@ -398,6 +398,7 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                         />
                       )}
                       <SkillUpdatePanel agent={a} />
+                      <DispatchLimitPanel agent={a} />
                       <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
                         ID: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{a.id}</span>
                         &nbsp;&nbsp;Registered: <span style={{ color: 'var(--text-secondary)' }}>{new Date(a.registeredAt).toLocaleString()}</span>
@@ -412,6 +413,69 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
         }
       </tbody>
     </table>
+  );
+}
+
+function DispatchLimitPanel({ agent }: { agent: AgentRow }) {
+  const [value, setValue] = useState(String(agent.maxConcurrentRuns ?? 1));
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+
+  const save = async () => {
+    const n = parseInt(value, 10);
+    if (!Number.isInteger(n) || n < 1 || n > 20) {
+      setState('error'); setMsg('must be 1–20');
+      return;
+    }
+    setState('busy'); setMsg('');
+    try {
+      const r = await updateAgentLimits(agent.id, n);
+      setState('done');
+      setMsg(`saved — up to ${r.maxConcurrentRuns} run${r.maxConcurrentRuns === 1 ? '' : 's'} at once`);
+    } catch (e) {
+      setState('error');
+      setMsg(e instanceof Error ? e.message : 'failed');
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        Max concurrent runs
+      </span>
+      <input
+        type="number"
+        min={1}
+        max={20}
+        value={value}
+        onChange={e => setValue(e.target.value)}
+        title="How many work runs this agent may have in flight at once. Extra work waits in its queue — and tasks on the SAME project always run one after the other."
+        style={{
+          fontSize: 12, padding: '3px 8px', borderRadius: 4, width: 60,
+          border: '1px solid var(--border)', background: 'var(--surface1)',
+          color: 'var(--text-primary)', outline: 'none',
+        }}
+      />
+      <button
+        onClick={save}
+        disabled={state === 'busy'}
+        style={{
+          fontSize: 11, padding: '2px 8px', borderRadius: 4,
+          border: '1px solid var(--border)', background: 'var(--surface2)',
+          color: 'var(--text-secondary)', cursor: state === 'busy' ? 'default' : 'pointer',
+        }}
+      >
+        {state === 'busy' ? 'Saving…' : 'Save'}
+      </button>
+      <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+        same-project tasks always run sequentially
+      </span>
+      {msg && (
+        <span style={{ fontSize: 11, color: state === 'error' ? 'var(--accent-red)' : 'var(--text-dim)' }}>
+          {msg}
+        </span>
+      )}
+    </div>
   );
 }
 

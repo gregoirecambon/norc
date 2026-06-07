@@ -2,9 +2,9 @@
 // (scheduled/proposed) are intentionally excluded: the UI composes those from
 // /api/tasks/* so this endpoint never blocks on the Notion API.
 import { Router, type Router as ExpressRouter } from 'express';
-import { eq, ne, desc } from 'drizzle-orm';
+import { eq, ne, desc, asc } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agents, taskRuns } from '../db/schema.js';
+import { agents, taskRuns, dispatchQueue } from '../db/schema.js';
 
 const router: ExpressRouter = Router();
 
@@ -35,12 +35,30 @@ router.get('/', (_req, res) => {
     .orderBy(desc(taskRuns.completedAt))
     .limit(20)
     .all();
+  const queued = db.select({
+    id: dispatchQueue.id,
+    agentId: dispatchQueue.agentId,
+    agentName: agents.name,
+    title: dispatchQueue.title,
+    anchorKind: dispatchQueue.anchorKind,
+    pageId: dispatchQueue.pageId,
+    taskPageId: dispatchQueue.taskPageId,
+    projectId: dispatchQueue.projectId,
+    priority: dispatchQueue.priority,
+    enqueuedAt: dispatchQueue.enqueuedAt,
+  }).from(dispatchQueue)
+    .innerJoin(agents, eq(dispatchQueue.agentId, agents.id))
+    .where(eq(dispatchQueue.status, 'pending'))
+    .orderBy(desc(dispatchQueue.priority), asc(dispatchQueue.id))
+    .all();
   const allAgents = db.select().from(agents).all();
   res.json({
     activeRuns,
     recentRuns,
+    queued,
     stats: {
       activeRuns: activeRuns.length,
+      queuedItems: queued.length,
       agentsConnected: allAgents.filter(a => a.status === 'connected').length,
       agentsTotal: allAgents.length,
     },

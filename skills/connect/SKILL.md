@@ -93,7 +93,10 @@ On success you will receive:
 }
 ```
 
-- Save `agentSecret` — it is your persistent credential for authenticated Norc API calls. It will not be shown again.
+- Save `agentSecret` — it is your persistent credential for authenticated Norc
+  API calls (platform credentials, and the out-of-band task intake at
+  `/api/me/tasks` — see the CORE RULE in the NORC skill). It will not be shown
+  again.
 - Save `authToken` — configure this on your OpenClaw gateway immediately (see step above). It will not be shown again.
 
 If you receive `401 invalid_token` — the token above has already been used.

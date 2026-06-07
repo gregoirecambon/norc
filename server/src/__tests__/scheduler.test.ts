@@ -58,8 +58,16 @@ describe('isInertTaskStatus', () => {
     expect(isInertTaskStatus('Failed')).toBe(false);
   });
 
+  it('Queued is NOT inert (NORC owns it — the work is accepted, just waiting)', () => {
+    expect(isInertTaskStatus('Queued')).toBe(false);
+  });
+
   it('every inert status is a provisioned select option (except empty)', () => {
     const opts = new Set<string>(TASK_STATUS_OPTIONS);
     for (const s of ['Draft', 'Proposed']) expect(opts.has(s)).toBe(true);
+  });
+
+  it("'Queued' is a provisioned select option", () => {
+    expect(new Set<string>(TASK_STATUS_OPTIONS).has('Queued')).toBe(true);
   });
 });

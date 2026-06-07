@@ -8,7 +8,7 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
-import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields } from '../lib/notion-provision.js';
+import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields } from '../lib/notion-provision.js';
 
 const router: ExpressRouter = Router();
 
@@ -235,6 +235,30 @@ router.post('/provision/scheduling', async (_req, res) => {
     return;
   }
   emitLog('Tasks DB scheduling fields provisioned (Scheduled For / Recurrence / Repeat Every / Draft + Proposed statuses)');
+  res.status(200).json({ ok: true });
+});
+
+// POST /api/notion/provision/dependencies — additively add the 'Queued' Status
+// option + a 'Depends On' self-relation (reverse: 'Blocks') to the Tasks DB.
+// Idempotent — safe to re-run.
+router.post('/provision/dependencies', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the workspace first.' });
+    return;
+  }
+  const tasks = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
+  if (!tasks) {
+    res.status(400).json({ error: 'no_tasks_db', message: 'No Tasks database recorded.' });
+    return;
+  }
+  try {
+    await provisionDependencyFields(integration.apiKey, tasks.notionDatabaseId);
+  } catch (err) {
+    res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
+    return;
+  }
+  emitLog('Tasks DB dependency fields provisioned (Depends On / Blocks relation + Queued status)');
   res.status(200).json({ ok: true });
 });
 

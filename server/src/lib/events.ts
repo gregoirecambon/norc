@@ -30,6 +30,7 @@ export interface AgentUpdatedEvent {
     status?: string;
     lastPingedAt?: number | null;
     lastLatencyMs?: number | null;
+    maxConcurrentRuns?: number;
   };
 }
 
@@ -90,6 +91,13 @@ export interface RunFinishedEvent {
   data: { id: string; agentId: string; status: 'done' | 'failed' | 'timed_out'; completedAt: number };
 }
 
+/** The dispatch queue changed for an agent (enqueue/claim/drop). `pending` is
+ * the agent's fresh pending count so consumers can render without re-querying. */
+export interface QueueUpdatedEvent {
+  type: 'queue.updated';
+  data: { agentId: string; pending: number };
+}
+
 export type NorcEvent =
   | AgentRegisteredEvent
   | AgentDeletedEvent
@@ -100,7 +108,8 @@ export type NorcEvent =
   | NotionWorkspaceUpdatedEvent
   | MentionDetectedEvent
   | RunStartedEvent
-  | RunFinishedEvent;
+  | RunFinishedEvent
+  | QueueUpdatedEvent;
 
 const listeners = new Set<(event: NorcEvent) => void>();
 
@@ -108,6 +117,14 @@ export function emitEvent(event: NorcEvent): void {
   for (const fn of listeners) {
     try { fn(event); } catch { /* ignore closed */ }
   }
+}
+
+/** Subscribe an in-process listener (e.g. the queue drain reacting to
+ * run.finished). Returns the unsubscribe function. Emission is synchronous —
+ * heavy work should hop off the emitter's stack (setImmediate). */
+export function onEvent(fn: (event: NorcEvent) => void): () => void {
+  listeners.add(fn);
+  return () => listeners.delete(fn);
 }
 
 export function attachEventListener(res: Response): void {

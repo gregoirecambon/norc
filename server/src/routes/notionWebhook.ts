@@ -6,8 +6,14 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { verifyNotionSignature } from '../lib/notion-webhook-verify.js';
 import { processWebhookEvent } from '../lib/orchestrator.js';
+import { createSemaphore } from '../lib/semaphore.js';
 
 const router: ExpressRouter = Router();
+
+// Bound concurrent event processing so a bulk drop (200 tasks created at once)
+// is worked through a few at a time instead of stampeding Notion. Each handler
+// already ACKs before this, so Notion never retries while we queue.
+const webhookGate = createSemaphore(4);
 
 function getWebhookUrl(): string {
   const base = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
@@ -76,7 +82,10 @@ router.post('/', (req, res) => {
 
   // Ack immediately so Notion doesn't retry, then process out of band.
   res.status(200).json({ ok: true });
-  void processWebhookEvent(body);
+  if (webhookGate.pending() > 50) {
+    emitLog(`webhook intake backlog: ${webhookGate.pending()} events waiting`, 'Notion');
+  }
+  void webhookGate.run(() => processWebhookEvent(body));
 });
 
 export { router as notionWebhookRouter };

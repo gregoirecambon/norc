@@ -100,6 +100,7 @@ export default function DashboardPage() {
     const es = new EventSource('/api/events/stream');
     es.addEventListener('run.started', refresh);
     es.addEventListener('run.finished', refresh);
+    es.addEventListener('queue.updated', refresh);
     const t = setInterval(refresh, 30_000);
     return () => { es.close(); clearInterval(t); };
   }, []);
@@ -112,8 +113,9 @@ export default function DashboardPage() {
         <PageHeader title="Dashboard" />
 
         {/* Stat row */}
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 16 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12, marginBottom: 16 }}>
           <StatCard value={stats?.activeRuns ?? '—'} label="Active runs" accent={(stats?.activeRuns ?? 0) > 0} />
+          <StatCard value={stats?.queuedItems ?? '—'} label="Queued" />
           <StatCard value={stats ? `${stats.agentsConnected} / ${stats.agentsTotal}` : '—'} label="Agents connected" />
           <StatCard value={scheduled?.length ?? '—'} label="Scheduled tasks" />
           <StatCard value={proposed?.length ?? '—'} label="Pending proposals" />
@@ -137,6 +139,49 @@ export default function DashboardPage() {
             ))
           )}
         </Section>
+
+        {/* Queued — work waiting for agent capacity (hidden when empty) */}
+        {data && data.queued.length > 0 && (
+          <Section title="Queued" description="Work waiting for an agent slot — runs as soon as capacity frees up.">
+            {data.queued.map((item, i) => {
+              // The server returns drain order (priority desc, then FIFO) — the
+              // item's index among its agent's items IS its queue position.
+              const position = data.queued.filter((q, j) => q.agentId === item.agentId && j <= i).length;
+              return (
+                <div key={item.id} style={{ ...rowStyle, borderBottom: i === data.queued.length - 1 ? 'none' : rowStyle.borderBottom }}>
+                  <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{item.agentName}</span>
+                  {item.title ? (
+                    <span style={{ color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {item.title}
+                    </span>
+                  ) : (
+                    <span style={{ padding: '1px 7px', borderRadius: 4, fontSize: 11.5, fontWeight: 500, background: 'var(--surface1)', color: 'var(--text-dim)' }}>
+                      {item.anchorKind}
+                    </span>
+                  )}
+                  <span style={{
+                    padding: '1px 7px', borderRadius: 4, fontSize: 11.5, fontWeight: 500,
+                    background: 'var(--tint-peach)', color: 'var(--tint-peach-text)', whiteSpace: 'nowrap',
+                  }}>
+                    #{position} in queue
+                  </span>
+                  {item.priority > 0 && (
+                    <span style={{
+                      padding: '1px 7px', borderRadius: 4, fontSize: 11.5, fontWeight: 500,
+                      background: 'var(--tint-rose)', color: 'var(--tint-rose-text)', whiteSpace: 'nowrap',
+                    }}>
+                      priority
+                    </span>
+                  )}
+                  <span style={{ flex: 1 }} />
+                  <span style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
+                    queued {timeAgo(item.enqueuedAt)}
+                  </span>
+                </div>
+              );
+            })}
+          </Section>
+        )}
 
         {/* Recent runs */}
         <Section title="Recent runs" description="Last 20 completed dispatches.">

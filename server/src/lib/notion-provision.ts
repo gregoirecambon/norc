@@ -101,11 +101,17 @@ const num = () => ({ number: {} });
 const relation = (databaseId: string) => ({
   relation: { database_id: databaseId, type: 'single_property', single_property: {} },
 });
+// A two-way relation: Notion auto-creates the synced reverse property on the
+// target database (renamed to something readable in a follow-up PATCH).
+const dualRelation = (databaseId: string) => ({
+  relation: { database_id: databaseId, type: 'dual_property', dual_property: {} },
+});
 
-// Task Status options (incl. 'Draft' for tasks humans are still writing and
-// 'Proposed' for NORC co-CEO proposals awaiting human validation). Kept as a
-// constant so provisioning + the additive patch agree.
-export const TASK_STATUS_OPTIONS = ['Draft', 'Backlog', 'In Progress', 'Done', 'Failed', 'Proposed'] as const;
+// Task Status options (incl. 'Draft' for tasks humans are still writing,
+// 'Queued' for work waiting in an agent's dispatch queue, and 'Proposed' for
+// NORC co-CEO proposals awaiting human validation). Kept as a constant so
+// provisioning + the additive patch agree.
+export const TASK_STATUS_OPTIONS = ['Draft', 'Backlog', 'Queued', 'In Progress', 'Done', 'Failed', 'Proposed'] as const;
 
 // Statuses NORC never acts on: empty (a half-drafted row — Notion's default for a
 // new task), 'Draft' (explicitly parked by a human), and 'Proposed' (a co-CEO
@@ -186,7 +192,9 @@ export async function provisionWorkspace(apiKey: string, parentPageId: string): 
   await updateDatabase(apiKey, tasks.id, {
     'Project': relation(projects.id),
     'Assigned To': relation(org.id),
+    'Depends On': dualRelation(tasks.id),
   });
+  await renameDependsOnReverse(apiKey, tasks.id);
   await updateDatabase(apiKey, projects.id, {
     'Agents': relation(org.id),
     'Company': relation(company.id),
@@ -231,4 +239,52 @@ export async function provisionSchedulingFields(apiKey: string, tasksDatabaseId:
     'Recurrence': sel('None', 'Daily', 'Weekdays', 'Weekly', 'Monthly'),
     'Repeat Every (days)': num(),
   });
+}
+
+async function getDatabase(apiKey: string, databaseId: string): Promise<Record<string, unknown>> {
+  const res = await fetch(`${NOTION_API}/databases/${databaseId}`, { headers: headers(apiKey) });
+  const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+  if (!res.ok) {
+    const msg = typeof body['message'] === 'string' ? body['message'] : `Failed to read database (${res.status})`;
+    throw new Error(msg);
+  }
+  return body;
+}
+
+/**
+ * Best-effort: Notion auto-names the reverse of the 'Depends On' dual relation
+ * (e.g. "Related to Tasks (Depends On)") — rename it to 'Blocks' so the inverse
+ * reads naturally on task pages. Failure is tolerated: nothing reads 'Blocks'
+ * programmatically.
+ */
+async function renameDependsOnReverse(apiKey: string, tasksDatabaseId: string): Promise<void> {
+  try {
+    const body = await getDatabase(apiKey, tasksDatabaseId);
+    const props = (body['properties'] ?? {}) as Record<string, Record<string, unknown>>;
+    if (props['Blocks']) return; // already renamed
+    for (const [name, prop] of Object.entries(props)) {
+      if (name === 'Depends On' || prop['type'] !== 'relation') continue;
+      const rel = prop['relation'] as Record<string, unknown> | undefined;
+      const dual = rel?.['dual_property'] as Record<string, unknown> | undefined;
+      if (dual?.['synced_property_name'] === 'Depends On') {
+        await updateDatabase(apiKey, tasksDatabaseId, { [name]: { name: 'Blocks' } });
+        return;
+      }
+    }
+  } catch { /* cosmetic only */ }
+}
+
+/**
+ * Additively add task-dependency fields to an already-provisioned Tasks DB:
+ * the 'Queued' Status option and a 'Depends On' self-relation (dual — the
+ * reverse appears as 'Blocks'). Idempotent: the Status PATCH merges options by
+ * name, and the relation is only created when missing.
+ */
+export async function provisionDependencyFields(apiKey: string, tasksDatabaseId: string): Promise<void> {
+  const body = await getDatabase(apiKey, tasksDatabaseId);
+  const props = (body['properties'] ?? {}) as Record<string, Record<string, unknown>>;
+  const patch: Record<string, unknown> = { 'Status': sel(...TASK_STATUS_OPTIONS) };
+  if (!props['Depends On']) patch['Depends On'] = dualRelation(tasksDatabaseId);
+  await updateDatabase(apiKey, tasksDatabaseId, patch);
+  await renameDependsOnReverse(apiKey, tasksDatabaseId);
 }

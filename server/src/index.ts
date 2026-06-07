@@ -11,7 +11,7 @@ import { db } from './db/client.js';
 import { handshakes } from './db/schema.js';
 import { ensureActiveToken } from './lib/tokens.js';
 import { emitLog } from './lib/logger.js';
-import { emitEvent } from './lib/events.js';
+import { emitEvent, onEvent } from './lib/events.js';
 import { agentsRouter } from './routes/agents.js';
 import { pingRouter } from './routes/ping.js';
 import { logsRouter } from './routes/logs.js';
@@ -31,11 +31,12 @@ import { teamRouter } from './routes/team.js';
 import { versionRouter } from './routes/version.js';
 import { apiAuthGuard, pruneExpiredSessions } from './lib/user-auth.js';
 import { startVersionLoop } from './lib/version-check.js';
-import { sweepStaleRuns } from './lib/runs.js';
+import { sweepStaleRuns, getRun } from './lib/runs.js';
 import { runHeartbeat, runDeepHeartbeat } from './lib/heartbeat.js';
 import { runScheduler } from './lib/scheduler.js';
 import { runAutoPropose } from './lib/auto-propose.js';
-import { escalateTimedOutRun } from './lib/orchestrator.js';
+import { escalateTimedOutRun, drainAgent } from './lib/orchestrator.js';
+import { dropPendingForAgentPage, agentsWithPending } from './lib/dispatch-queue.js';
 import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
 
 const app = express();
@@ -106,6 +107,8 @@ setInterval(() => {
 // Time out agent runs left in flight (an async agent that never reported back),
 // then escalate each: free the agent, tell the team in Notion, and (if triage is
 // on) re-route to a different agent. Timeout is configurable (default 5 min).
+// The same pass drains every agent with queued work — the missed-event backstop
+// behind the run.finished listener below.
 setInterval(() => {
   const timeoutMs = Math.max(60, getNorcSettingsOrDefault().runTimeoutSec) * 1000;
   const timedOut = sweepStaleRuns(timeoutMs);
@@ -113,7 +116,28 @@ setInterval(() => {
     void escalateTimedOutRun(run).catch(err =>
       emitLog(`escalation error for run ${run.id}: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage'));
   }
+  for (const agentId of agentsWithPending()) {
+    void drainAgent(agentId).catch(err =>
+      emitLog(`queue drain error for agent ${agentId}: ${err instanceof Error ? err.message : 'unknown'}`));
+  }
 }, 60_000);
+
+// Every finalized run frees capacity — drain that agent's queue. On a timeout,
+// first drop pending items on the same page: escalation re-routes that work to
+// a DIFFERENT agent, so dispatching the queued sibling would double-assign it.
+// setImmediate hops off finalizeRun's call stack (emitEvent is synchronous and
+// may fire inside a turn — draining inline would recurse dispatch-in-dispatch).
+onEvent(event => {
+  if (event.type !== 'run.finished') return;
+  if (event.data.status === 'timed_out') {
+    const run = getRun(event.data.id);
+    if (run) dropPendingForAgentPage(run.agentId, run.pageId, 'superseded by timeout escalation');
+  }
+  setImmediate(() => {
+    void drainAgent(event.data.agentId).catch(err =>
+      emitLog(`queue drain error for agent ${event.data.agentId}: ${err instanceof Error ? err.message : 'unknown'}`));
+  });
+});
 
 // Scheduled / recurring tasks — poll the Tasks DB for due "Scheduled For" dates
 // and dispatch them (gated by the scheduler toggle).
@@ -171,6 +195,13 @@ await ensureActiveToken();
 
 app.listen(PORT, '0.0.0.0', () => {
   emitLog(`norc listening on port ${PORT}`);
+  // Resume queued work that survived a restart (the queue is durable).
+  setTimeout(() => {
+    for (const agentId of agentsWithPending()) {
+      void drainAgent(agentId).catch(err =>
+        emitLog(`boot drain error for agent ${agentId}: ${err instanceof Error ? err.message : 'unknown'}`));
+    }
+  }, 8_000);
   // Kick off the heartbeat shortly after boot so startup settles first.
   setTimeout(() => { void heartbeatLoop(); }, 5_000);
   // Deep heartbeat a bit later still (each check is a real AI call).
