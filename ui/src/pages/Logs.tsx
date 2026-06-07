@@ -12,6 +12,7 @@ interface ParsedLine {
   tag: string;            // source: NORC | Triage | Schedule | Co-CEO | agent name
   level: 'success' | 'error' | 'warn' | 'info';
   raw: string;
+  pageId?: string;        // Notion page the event relates to → "Open in Notion" link
 }
 
 // Relative-time buckets, newest first. `max` is the upper age bound (ms).
@@ -28,7 +29,7 @@ function bucketIndex(ageMs: number): number {
   return i < 0 ? BUCKETS.length - 1 : i;
 }
 
-function parseLine(epoch: number, raw: string, id: number, tag?: string): ParsedLine {
+function parseLine(epoch: number, raw: string, id: number, tag?: string, pageId?: string): ParsedLine {
   // NORC log lines are "[<tag> HH:MM:SS] message" (tag may contain spaces, e.g.
   // an agent name). Prefer the embedded clock for display; fall back to the
   // epoch we received over the wire. The structured `tag` from the SSE payload
@@ -42,8 +43,12 @@ function parseLine(epoch: number, raw: string, id: number, tag?: string): Parsed
     : message.includes('failed') || message.includes('error') || message.includes('rejected') ? 'error'
     : message.includes('ignored') || message.includes('discarded') || message.includes('retry') || message.includes('stale') ? 'warn'
     : 'info';
-  return { id, epoch, ts, tag: tag || prefixTag || 'NORC', level, raw: message };
+  return { id, epoch, ts, tag: tag || prefixTag || 'NORC', level, raw: message, pageId };
 }
+
+// Notion accepts the bare 32-char page id (dashes stripped) and redirects to
+// the right workspace + full page URL.
+const notionUrl = (pageId: string) => `https://www.notion.so/${pageId.replace(/-/g, '')}`;
 
 const LEVEL: Record<ParsedLine['level'], { dot: string; color: string }> = {
   success: { dot: '●', color: 'var(--accent-green)' },
@@ -105,14 +110,16 @@ export default function LogsPage() {
       let epoch = Date.now();
       let line = e.data as string;
       let tag: string | undefined;
+      let pageId: string | undefined;
       try {
-        const parsed = JSON.parse(e.data as string) as { ts?: number; line?: string; tag?: string };
+        const parsed = JSON.parse(e.data as string) as { ts?: number; line?: string; tag?: string; pageId?: string };
         if (typeof parsed.ts === 'number') epoch = parsed.ts;
         if (typeof parsed.line === 'string') line = parsed.line;
         if (typeof parsed.tag === 'string') tag = parsed.tag;
+        if (typeof parsed.pageId === 'string') pageId = parsed.pageId;
       } catch { /* fall back to raw string */ }
       setLines(prev => {
-        const next = [...prev, parseLine(epoch, line, idRef.current++, tag)];
+        const next = [...prev, parseLine(epoch, line, idRef.current++, tag, pageId)];
         return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
       });
     };
@@ -169,6 +176,19 @@ export default function LogsPage() {
       (!q || l.raw.toLowerCase().includes(q) || l.tag.toLowerCase().includes(q)),
     );
   }, [lines, query, tagFilter, range, customFrom, customTo, now]);
+
+  // One webhook produces several lines for the same page (received / payload /
+  // ignored…) — repeating the link on each would be noise. Only the most recent
+  // row of a consecutive same-page run gets the "Open in Notion" button.
+  // `visible` is chronological, so that's the row whose successor differs.
+  const linkIds = useMemo(() => {
+    const ids = new Set<number>();
+    for (let i = 0; i < visible.length; i++) {
+      const cur = visible[i]!;
+      if (cur.pageId && visible[i + 1]?.pageId !== cur.pageId) ids.add(cur.id);
+    }
+    return ids;
+  }, [visible]);
 
   // Group into buckets (newest bucket first); within each, newest line first.
   const grouped = BUCKETS.map(() => [] as ParsedLine[]);
@@ -358,6 +378,23 @@ export default function LogsPage() {
                   }}>
                     {l.raw}
                   </span>
+                  {l.pageId && linkIds.has(l.id) && (
+                    <a
+                      href={notionUrl(l.pageId)}
+                      target="_blank"
+                      rel="noreferrer"
+                      title="Open the Notion page this event relates to"
+                      style={{
+                        flexShrink: 0, marginLeft: 12, alignSelf: 'center',
+                        fontSize: 11, fontWeight: 600, whiteSpace: 'nowrap',
+                        padding: '2px 8px', borderRadius: 4,
+                        border: '1px solid var(--border)', background: 'var(--surface1)',
+                        color: 'var(--text-secondary)', textDecoration: 'none',
+                      }}
+                    >
+                      Open in Notion ↗
+                    </a>
+                  )}
                 </div>
               );
             })}

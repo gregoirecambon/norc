@@ -9,7 +9,7 @@ import { logs } from '../db/schema.js';
 const RETENTION_MS = 3 * 24 * 60 * 60 * 1_000;
 const PRUNE_EVERY = 200; // amortize pruning across roughly every N writes
 
-interface LogEntry { ts: number; tag: string; line: string }
+interface LogEntry { ts: number; tag: string; line: string; pageId?: string }
 
 const listeners = new Set<(entry: LogEntry) => void>();
 const clearers = new Set<() => void>();
@@ -39,15 +39,17 @@ export function clearLogs(): void {
 /**
  * Emit a log line. `tag` identifies the source: 'NORC' (system — heartbeat,
  * webhooks, startup…), 'Triage', 'Schedule', 'Co-CEO', or an agent's name.
+ * `pageId` (optional) is the Notion page the event relates to — the Logs UI
+ * renders an "Open in Notion" link when present.
  */
-export function emitLog(message: string, tag = 'NORC') {
+export function emitLog(message: string, tag = 'NORC', pageId?: string) {
   const ts = Date.now();
   const line = `[${tag} ${new Date(ts).toISOString().slice(11, 19)}] ${message}`;
   process.stdout.write(line + '\n');
 
   // Persist (best-effort: logging must never throw, e.g. before migrations run).
   try {
-    db.insert(logs).values({ ts, tag, line }).run();
+    db.insert(logs).values({ ts, tag, line, pageId: pageId ?? null }).run();
     if (++writesSincePrune >= PRUNE_EVERY) {
       writesSincePrune = 0;
       pruneOldLogs();
@@ -57,7 +59,7 @@ export function emitLog(message: string, tag = 'NORC') {
   }
 
   for (const fn of listeners) {
-    try { fn({ ts, tag, line }); } catch { /* ignore closed connections */ }
+    try { fn({ ts, tag, line, pageId }); } catch { /* ignore closed connections */ }
   }
 }
 
@@ -67,9 +69,9 @@ export function attachSseListener(res: Response) {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  // Each SSE message is a JSON object { ts, tag, line } so the client can
-  // compute accurate relative times and render the source tag for replayed
-  // history too.
+  // Each SSE message is a JSON object { ts, tag, line, pageId? } so the client
+  // can compute accurate relative times and render the source tag (and an
+  // "Open in Notion" link) for replayed history too.
   const send = (entry: LogEntry) => res.write(`data: ${JSON.stringify(entry)}\n\n`);
 
   // Replay the retention window from durable storage so a refresh/restart keeps history.
@@ -80,7 +82,7 @@ export function attachSseListener(res: Response) {
       .where(gte(logs.ts, cutoff))
       .orderBy(asc(logs.id))
       .all();
-    for (const row of history) send({ ts: row.ts, tag: row.tag, line: row.line });
+    for (const row of history) send({ ts: row.ts, tag: row.tag, line: row.line, pageId: row.pageId ?? undefined });
   } catch {
     // no history available yet — stream live only
   }

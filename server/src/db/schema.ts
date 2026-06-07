@@ -107,11 +107,14 @@ export const processedTriggers = sqliteTable('processed_triggers', {
 // Durable log lines for the Logs feed — persisted so they survive page
 // refreshes and server restarts; pruned by age (3-day retention), never on load.
 // `tag` is the log source: 'NORC' (system), 'Triage', 'Schedule', 'Co-CEO', or an agent name.
+// `pageId` (optional) is the Notion page the event relates to — the UI renders
+// an "Open in Notion" link when present.
 export const logs = sqliteTable('logs', {
-  id:   integer('id').primaryKey({ autoIncrement: true }),
-  ts:   integer('ts').notNull(),
-  tag:  text('tag').notNull().default('NORC'),
-  line: text('line').notNull(),
+  id:     integer('id').primaryKey({ autoIncrement: true }),
+  ts:     integer('ts').notNull(),
+  tag:    text('tag').notNull().default('NORC'),
+  line:   text('line').notNull(),
+  pageId: text('page_id'),
 });
 
 // Singleton NORC settings (one row): the co-CEO Orchestrator triage agent and the

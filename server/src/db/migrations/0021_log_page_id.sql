@@ -1,0 +1,1 @@
+ALTER TABLE `logs` ADD `page_id` text;

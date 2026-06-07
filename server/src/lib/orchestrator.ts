@@ -89,6 +89,13 @@ const PAGE_EVENT_TYPES = new Set([
 
 const RAW_LOG_LIMIT = 2_000;
 
+/** Best-effort: the Notion page a webhook event is about (undefined if unknown). */
+function triggeringPageId(event: NotionWebhookEvent): string | undefined {
+  return event.data?.page_id
+    ?? (event.data?.parent?.type === 'page' ? event.data.parent.id : undefined)
+    ?? (event.type && PAGE_EVENT_TYPES.has(event.type) ? event.entity?.id : undefined);
+}
+
 function safeJson(raw: unknown): string {
   try {
     const s = JSON.stringify(raw);
@@ -190,13 +197,18 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
   const type = event.type ?? 'unknown';
   const entityId = event.entity?.id ?? '—';
 
-  emitLog(`webhook received: type=${type} entity=${entityId}`, 'Notion');
+  // The Notion page this webhook is about — for page events the entity IS the
+  // page; comment events carry it in data.page_id (or a page-type parent).
+  // Attached to log lines so the UI can link straight to the page.
+  const triggerPageId = triggeringPageId(event);
+
+  emitLog(`webhook received: type=${type} entity=${entityId}`, 'Notion', triggerPageId);
   const rawJson = safeJson(raw);
-  if (rawJson) emitLog(`webhook payload: ${rawJson}`, 'Notion');
+  if (rawJson) emitLog(`webhook payload: ${rawJson}`, 'Notion', triggerPageId);
 
   const integration = db.select().from(notionIntegration).all()[0] ?? null;
   if (!integration || integration.status !== 'active') {
-    emitLog('webhook ignored: Notion integration not active', 'Notion');
+    emitLog('webhook ignored: Notion integration not active', 'Notion', triggerPageId);
     return;
   }
 
@@ -205,7 +217,7 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
     .map(a => a?.id)
     .filter((id): id is string => typeof id === 'string');
   if (integration.botUserId && authorIds.includes(integration.botUserId)) {
-    emitLog('webhook ignored: authored by NORC bot (loop guard)', 'Notion');
+    emitLog('webhook ignored: authored by NORC bot (loop guard)', 'Notion', triggerPageId);
     return;
   }
 
@@ -218,7 +230,7 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
     } else if (event.type && PAGE_EVENT_TYPES.has(event.type)) {
       await handlePageEvent(integration, event, triggeringUserId);
     } else {
-      emitLog(`webhook ignored: "${type}" is not a trigger event type`, 'Notion');
+      emitLog(`webhook ignored: "${type}" is not a trigger event type`, 'Notion', triggerPageId);
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown error';
@@ -235,12 +247,12 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
     return;
   }
   if (db.select().from(orchestratorComments).where(eq(orchestratorComments.commentId, commentId)).all()[0]) {
-    emitLog(`webhook ignored: comment ${commentId} was authored by NORC (loop guard)`, 'Notion');
+    emitLog(`webhook ignored: comment ${commentId} was authored by NORC (loop guard)`, 'Notion', triggeringPageId(event));
     return;
   }
   const triggerKey = `comment:${commentId}`;
   if (alreadyProcessed(triggerKey)) {
-    emitLog(`webhook ignored: comment ${commentId} already processed`, 'Notion');
+    emitLog(`webhook ignored: comment ${commentId} already processed`, 'Notion', triggeringPageId(event));
     return;
   }
   // A comment's parent may be the page (page-level thread) OR a block (an inline
@@ -267,14 +279,14 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
       thread, discussionId: triggering?.discussionId ?? null, commentedText, dedupId: commentId,
       triggeringUserId: triggering?.authorId ?? triggeringUserId,
     });
-    if (!handled) emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`, 'Notion');
+    if (!handled) emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`, 'Notion', pageId);
     return;
   }
 
   const anchor = await resolveAnchor(apiKey, pageId);
   markProcessed(triggerKey);
   const onText = parent?.type === 'block' ? ' (on text)' : '';
-  emitLog(`mention detected in comment on ${anchor.kind} page ${pageId}${onText}: ${matched.map(a => a.name).join(', ')}`);
+  emitLog(`mention detected in comment on ${anchor.kind} page ${pageId}${onText}: ${matched.map(a => a.name).join(', ')}`, 'NORC', pageId);
 
   // For an inline comment, fetch the text it's anchored to so the agent knows
   // exactly what the human is reacting to.
@@ -376,7 +388,7 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   if (anchor.kind === 'task') {
     const status = getSelect(properties, 'Status') ?? '';
     if (isInertTaskStatus(status)) {
-      emitLog(`webhook ignored: task ${pageId} Status is ${status || 'empty'} — set it to Backlog to hand it to NORC`, 'Notion');
+      emitLog(`webhook ignored: task ${pageId} Status is ${status || 'empty'} — set it to Backlog to hand it to NORC`, 'Notion', pageId);
       return;
     }
   }
@@ -392,12 +404,12 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
       const future = ms > Date.now();
       if (schedulerOn) {
         // Single owner: the scheduler runs it (past-due is picked up within a poll).
-        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} — deferring to the scheduler`, 'Schedule');
+        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} — deferring to the scheduler`, 'Schedule', pageId);
         return;
       }
       if (future) {
         // Can't honor a future schedule without the scheduler — defer + tell the human once.
-        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} but the scheduler is OFF — deferring`, 'Schedule');
+        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} but the scheduler is OFF — deferring`, 'Schedule', pageId);
         const warnKey = `sched-off-warn:${pageId}`;
         if (!alreadyProcessed(warnKey)) {
           markProcessed(warnKey);
@@ -407,7 +419,7 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
         return;
       }
       // Past date + scheduler off → nothing will pick it up later; run now.
-      emitLog(`task ${pageId} has a past Scheduled For and the scheduler is off — running now`, 'Schedule');
+      emitLog(`task ${pageId} has a past Scheduled For and the scheduler is off — running now`, 'Schedule', pageId);
     }
   }
 
@@ -421,19 +433,19 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   if (matched.length === 0) {
     const thread = await listThreadComments(apiKey, pageId);
     const handled = await triageUnhandled(integration, anchor, { text: '', thread, dedupId: pageId, triggeringUserId });
-    if (!handled) emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`);
+    if (!handled) emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`, 'NORC', pageId);
     return;
   }
 
   // Per-(page, agent) idempotency so repeated edits don't re-fire.
   const fresh = matched.filter(a => !alreadyProcessed(`page:${pageId}:${a.agentId}`));
   if (fresh.length === 0) {
-    emitLog(`webhook ignored: ${anchor.kind} page ${pageId} already handled for ${matched.map(a => a.name).join(', ')}`);
+    emitLog(`webhook ignored: ${anchor.kind} page ${pageId} already handled for ${matched.map(a => a.name).join(', ')}`, 'NORC', pageId);
     return;
   }
 
   const thread = await listThreadComments(apiKey, pageId);
-  emitLog(`mention detected on ${anchor.kind} page ${pageId}: ${fresh.map(a => a.name).join(', ')}`);
+  emitLog(`mention detected on ${anchor.kind} page ${pageId}: ${fresh.map(a => a.name).join(', ')}`, 'NORC', pageId);
   for (const agent of fresh) {
     markProcessed(`page:${pageId}:${agent.agentId}`);
     const request = anchor.kind === 'task'
