@@ -1,9 +1,13 @@
 import React, { useEffect, useState } from 'react';
 import type { Page } from '../App.js';
+import type { SessionUser } from '../api/auth.js';
+import { getVersion, type VersionInfo } from '../api/version.js';
 
 interface Props {
   currentPage: Page;
   onNavigate: (p: Page) => void;
+  user: SessionUser;
+  onLogout: () => void;
 }
 
 function AgentsIcon() {
@@ -55,6 +59,26 @@ function SettingsIcon() {
   );
 }
 
+function TeamIcon() {
+  // Two people
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <circle cx="5.5" cy="4.5" r="2" stroke="currentColor" strokeWidth="1.3"/>
+      <path d="M1.5 12.5c0-2.21 1.79-4 4-4s4 1.79 4 4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+      <path d="M10 2.8a2 2 0 0 1 0 3.4M11.5 8.8c1.21.62 2 1.86 2 3.7" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+function SignOutIcon() {
+  return (
+    <svg width="14" height="14" viewBox="0 0 15 15" fill="none">
+      <path d="M9.5 2H4a1 1 0 0 0-1 1v9a1 1 0 0 0 1 1h5.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+      <path d="M7 7.5h6.5M11 4.5l2.5 3-2.5 3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round"/>
+    </svg>
+  );
+}
+
 function NotionIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
@@ -66,8 +90,9 @@ function NotionIcon() {
 
 const HEALTH_URL = '/api/health';
 
-export default function Sidebar({ currentPage, onNavigate }: Props) {
+export default function Sidebar({ currentPage, onNavigate, user, onLogout }: Props) {
   const [healthy, setHealthy] = useState<boolean | null>(null);
+  const [version, setVersion] = useState<VersionInfo | null>(null);
 
   useEffect(() => {
     const check = async () => {
@@ -76,6 +101,13 @@ export default function Sidebar({ currentPage, onNavigate }: Props) {
     };
     check();
     const t = setInterval(check, 15_000);
+    return () => clearInterval(t);
+  }, []);
+
+  useEffect(() => {
+    getVersion().then(setVersion).catch(() => setVersion(null));
+    // The server re-checks GitHub every ~6h; refresh the badge hourly to pick that up.
+    const t = setInterval(() => { getVersion().then(setVersion).catch(() => {}); }, 3600_000);
     return () => clearInterval(t);
   }, []);
 
@@ -135,8 +167,47 @@ export default function Sidebar({ currentPage, onNavigate }: Props) {
         <NavItem id="logs" Icon={LogsIcon} label="Logs" />
 
         <div style={{ ...sectionLabel, marginTop: 16 }}>Configure</div>
+        <NavItem id="team" Icon={TeamIcon} label="Team" />
         <NavItem id="settings" Icon={SettingsIcon} label="Settings" />
         <NavItem id="notion" Icon={NotionIcon} label="Notion" />
+      </div>
+
+      {/* Signed-in user */}
+      <div style={{
+        padding: '10px 16px', borderTop: '1px solid var(--border)',
+        display: 'flex', alignItems: 'center', gap: 9,
+      }}>
+        {user.avatarUrl ? (
+          <img src={user.avatarUrl} alt="" style={{ width: 26, height: 26, borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
+        ) : (
+          <span style={{
+            width: 26, height: 26, borderRadius: '50%', flexShrink: 0,
+            background: 'var(--tint-lavender)', color: 'var(--primary)',
+            display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+            fontSize: 12, fontWeight: 600, textTransform: 'uppercase',
+          }}>
+            {(user.name ?? user.email).slice(0, 1)}
+          </span>
+        )}
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 500, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {user.name ?? user.email}
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'capitalize' }}>{user.role}</div>
+        </div>
+        <button
+          onClick={onLogout}
+          title="Sign out"
+          style={{
+            appearance: 'none', background: 'transparent', border: 'none', cursor: 'pointer',
+            color: 'var(--text-dim)', padding: 4, borderRadius: 'var(--radius-sm)',
+            display: 'inline-flex', alignItems: 'center',
+          }}
+          onMouseEnter={e => { (e.currentTarget as HTMLElement).style.color = 'var(--accent-red)'; }}
+          onMouseLeave={e => { (e.currentTarget as HTMLElement).style.color = 'var(--text-dim)'; }}
+        >
+          <SignOutIcon />
+        </button>
       </div>
 
       {/* Footer */}
@@ -149,7 +220,19 @@ export default function Sidebar({ currentPage, onNavigate }: Props) {
           <span style={{ width: 7, height: 7, borderRadius: '50%', background: healthDot, display: 'inline-block' }} />
           <span style={{ color: healthDot }}>{healthLabel}</span>
         </span>
-        <span>v0.1</span>
+        {version?.updateAvailable ? (
+          <a
+            href={version.url ?? 'https://github.com/gregoirecambon/norc/releases'}
+            target="_blank"
+            rel="noreferrer"
+            title={`${version.latest} is available — you're on v${version.current}. See the README for update steps.`}
+            style={{ color: 'var(--accent-amber)', fontWeight: 600, textDecoration: 'none' }}
+          >
+            Update available →
+          </a>
+        ) : (
+          <span>{version ? `v${version.current}` : ''}</span>
+        )}
       </div>
     </nav>
   );

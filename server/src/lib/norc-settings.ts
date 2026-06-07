@@ -26,6 +26,12 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   schedulerEnabled: false,
   autoProposeEnabled: false,
   autoProposeIntervalHours: 12,
+  smtpHost: null,
+  smtpPort: null,
+  smtpUser: null,
+  smtpPass: null,
+  smtpFrom: null,
+  smtpSecure: false,
 };
 
 export function getNorcSettings(): NorcSettings | null {

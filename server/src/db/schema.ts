@@ -135,8 +135,59 @@ export const norcSettings = sqliteTable('norc_settings', {
   schedulerEnabled:         integer('scheduler_enabled', { mode: 'boolean' }).notNull().default(false),       // scheduled/recurring task poller
   autoProposeEnabled:       integer('auto_propose_enabled', { mode: 'boolean' }).notNull().default(false),    // recurring co-CEO task proposals
   autoProposeIntervalHours: integer('auto_propose_interval_hours').notNull().default(12),                     // 1–24
+  // Outgoing email (team invites). DB values win; SMTP_* env vars are the
+  // fallback. host…from columns predate this feature (0013_notifications.sql,
+  // unused until now) — smtp_port is nullable there, so the 587 default lives
+  // in code; only smtp_secure is new (0020).
+  smtpHost:                 text('smtp_host'),
+  smtpPort:                 integer('smtp_port'),
+  smtpUser:                 text('smtp_user'),
+  smtpPass:                 text('smtp_pass'),
+  smtpFrom:                 text('smtp_from'),
+  smtpSecure:               integer('smtp_secure', { mode: 'boolean' }).notNull().default(false),
   createdAt:                integer('created_at').notNull(),
   updatedAt:                integer('updated_at').notNull(),
+});
+
+// Dashboard users (OAuth identities). The first user to sign in on an empty
+// table becomes 'owner'; everyone after that must hold a matching invite.
+export const users = sqliteTable('users', {
+  id:              text('id').primaryKey(),
+  email:           text('email').notNull().unique(),   // always lowercased
+  name:            text('name'),
+  avatarUrl:       text('avatar_url'),
+  role:            text('role').notNull().default('member'), // 'owner' | 'admin' | 'member'
+  provider:        text('provider'),                   // last provider used: 'google' | 'github'
+  providerSubject: text('provider_subject'),           // provider's user id (audit)
+  createdAt:       integer('created_at').notNull(),
+  lastLoginAt:     integer('last_login_at'),
+});
+
+// DB-backed dashboard sessions — the cookie holds an opaque token; only its
+// sha256 lives here, so a DB read never yields a usable cookie. Cascade on
+// user delete = instant logout.
+export const sessions = sqliteTable('sessions', {
+  id:         text('id').primaryKey(),
+  tokenHash:  text('token_hash').notNull().unique(),
+  userId:     text('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  createdAt:  integer('created_at').notNull(),
+  expiresAt:  integer('expires_at').notNull(),
+  lastSeenAt: integer('last_seen_at'),
+  userAgent:  text('user_agent'),
+});
+
+// Team invites. Accepting = signing in via OAuth with the matching email
+// (the invite link just pre-fills the token). Token stored hashed, like sessions.
+export const invites = sqliteTable('invites', {
+  id:         text('id').primaryKey(),
+  email:      text('email').notNull(),                 // always lowercased
+  role:       text('role').notNull().default('member'), // 'admin' | 'member'
+  tokenHash:  text('token_hash').notNull().unique(),
+  invitedBy:  text('invited_by').references(() => users.id, { onDelete: 'set null' }),
+  createdAt:  integer('created_at').notNull(),
+  expiresAt:  integer('expires_at').notNull(),
+  acceptedAt: integer('accepted_at'),
+  revokedAt:  integer('revoked_at'),
 });
 
 // One row per agent dispatch. The opaque `token` is what the agent echoes back

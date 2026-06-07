@@ -5,8 +5,11 @@ services:
     env_file:
       - path: .env
         required: false
+    # Loopback-only: nginx (the ui service) is the single public entrypoint.
+    # Everything — dashboard, agents, OAuth callbacks, Notion webhooks — goes
+    # through port 3000 / your reverse proxy at NORC_PUBLIC_URL.
     ports:
-      - "${PORT:-3001}:3001"
+      - "127.0.0.1:${PORT:-3001}:3001"
     volumes:
       - norc-data:/data
     environment:
@@ -23,7 +26,7 @@ services:
       - server
     restart: unless-stopped
     environment:
-      NEXUS_API_URL: http://server:3001
+      NORC_API_URL: http://server:3001
 
 volumes:
   norc-data:

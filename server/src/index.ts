@@ -26,6 +26,11 @@ import { makeRunsRouter } from './routes/runs.js';
 import { makeTasksRouter } from './routes/tasks.js';
 import { skillRouter } from './routes/skill.js';
 import { settingsRouter } from './routes/settings.js';
+import { authRouter } from './routes/auth.js';
+import { teamRouter } from './routes/team.js';
+import { versionRouter } from './routes/version.js';
+import { apiAuthGuard, pruneExpiredSessions } from './lib/user-auth.js';
+import { startVersionLoop } from './lib/version-check.js';
 import { sweepStaleRuns } from './lib/runs.js';
 import { runHeartbeat, runDeepHeartbeat } from './lib/heartbeat.js';
 import { runScheduler } from './lib/scheduler.js';
@@ -56,6 +61,12 @@ const health = (_req: express.Request, res: express.Response) => {
 app.get('/health', health);
 app.get('/api/health', health);
 
+// Dashboard auth: the auth flow itself is public; everything else under /api
+// requires a session cookie, except agent/webhook endpoints that carry their
+// own credentials — the single allowlist lives in lib/user-auth.ts.
+app.use('/api/auth', authRouter);
+app.use('/api', apiAuthGuard);
+
 // Routes
 app.use('/api/agents', agentsRouter);
 app.use('/api/agents/:id/ping', pingRouter);
@@ -71,7 +82,12 @@ app.use('/api/skill', skillRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/runs', makeRunsRouter());
 app.use('/api/tasks', makeTasksRouter());
+app.use('/api/team', teamRouter);
+app.use('/api/version', versionRouter);
 app.use('/webhooks/notion', notionWebhookRouter);
+
+// Drop expired dashboard sessions hourly.
+setInterval(() => pruneExpiredSessions(), 3600_000);
 
 // Expire stale pending handshakes
 setInterval(() => {
@@ -161,4 +177,6 @@ app.listen(PORT, '0.0.0.0', () => {
   setTimeout(() => { void deepHeartbeatLoop(); }, 20_000);
   // Recurring co-CEO analysis (first check a bit later; runs only when enabled).
   setTimeout(() => { void autoProposeLoop(); }, 30_000);
+  // Update check against GitHub releases (re-checks every ~6h).
+  setTimeout(() => { void startVersionLoop(); }, 10_000);
 });

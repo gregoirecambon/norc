@@ -134,6 +134,20 @@
       "when": 1782200000000,
       "tag": "0018_deep_heartbeat",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1782300000000,
+      "tag": "0019_users_auth",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1782400000000,
+      "tag": "0020_smtp_settings",
+      "breakpoints": true
     }
   ]
 }

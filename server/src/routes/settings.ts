@@ -1,6 +1,8 @@
 import { Router, type Router as ExpressRouter } from 'express';
 import { getNorcSettingsOrDefault, upsertNorcSettings, type NorcSettings } from '../lib/norc-settings.js';
 import { testTriageConnection, type TriageProvider } from '../lib/orchestrator-agent.js';
+import { sendTestEmail, smtpSource, type SmtpConfig } from '../lib/mailer.js';
+import { requestUser } from '../lib/user-auth.js';
 import { emitLog } from '../lib/logger.js';
 
 const router: ExpressRouter = Router();
@@ -24,6 +26,14 @@ function safe(s: NorcSettings) {
     schedulerEnabled: s.schedulerEnabled,
     autoProposeEnabled: s.autoProposeEnabled,
     autoProposeIntervalHours: s.autoProposeIntervalHours,
+    // Email — password hidden, like the orchestrator key.
+    smtpHost: s.smtpHost,
+    smtpPort: s.smtpPort ?? 587,
+    smtpUser: s.smtpUser,
+    smtpPassSet: !!s.smtpPass,
+    smtpFrom: s.smtpFrom,
+    smtpSecure: s.smtpSecure,
+    smtpSource: smtpSource(),
     updatedAt: s.updatedAt,
   };
 }
@@ -57,6 +67,16 @@ router.post('/', (req, res) => {
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
 
+  // Email (SMTP). Empty smtpPass is ignored (saving other fields keeps the
+  // stored one); send null explicitly to clear — same contract as the API key.
+  if ('smtpHost' in b) patch['smtpHost'] = typeof b['smtpHost'] === 'string' && b['smtpHost'].trim() ? b['smtpHost'].trim() : null;
+  if (typeof b['smtpPort'] === 'number' && b['smtpPort'] >= 1 && b['smtpPort'] <= 65535) patch['smtpPort'] = Math.floor(b['smtpPort']);
+  if ('smtpUser' in b) patch['smtpUser'] = typeof b['smtpUser'] === 'string' && b['smtpUser'].trim() ? b['smtpUser'].trim() : null;
+  if ('smtpFrom' in b) patch['smtpFrom'] = typeof b['smtpFrom'] === 'string' && b['smtpFrom'].trim() ? b['smtpFrom'].trim() : null;
+  if (typeof b['smtpSecure'] === 'boolean') patch['smtpSecure'] = b['smtpSecure'];
+  if (b['smtpPass'] === null) patch['smtpPass'] = null;
+  else if (typeof b['smtpPass'] === 'string' && b['smtpPass'].trim()) patch['smtpPass'] = b['smtpPass'];
+
   const saved = upsertNorcSettings(patch);
   emitLog(`NORC settings updated (triage ${saved.orchestratorEnabled ? 'on' : 'off'} via ${saved.orchestratorProvider}, heartbeat ${saved.heartbeatEnabled ? 'on' : 'off'})`);
   res.json(safe(saved));
@@ -89,6 +109,31 @@ router.post('/test', async (req, res) => {
   const latencyMs = Date.now() - start;
   emitLog(`triage test (${provider}, ${model}): ${result.ok ? `OK (${latencyMs}ms)` : `FAILED — ${result.error}`}`, 'Triage');
   res.json({ ok: result.ok, latencyMs, sample: result.text?.slice(0, 80), error: result.error });
+});
+
+// POST /api/settings/test-email — send a test message to the signed-in user.
+// Body may carry unsaved form values { host?, port?, user?, pass?, from?, secure? };
+// anything omitted falls back to the effective config (a blank pass reuses the
+// stored one).
+router.post('/test-email', async (req, res) => {
+  const to = requestUser(req).email;
+  const b = req.body as Record<string, unknown>;
+  const saved = getNorcSettingsOrDefault();
+
+  const override: Partial<SmtpConfig> = {};
+  if (typeof b['host'] === 'string' && b['host'].trim()) override.host = b['host'].trim();
+  if (typeof b['port'] === 'number') override.port = Math.floor(b['port']);
+  if ('user' in b) override.user = typeof b['user'] === 'string' && b['user'].trim() ? b['user'].trim() : null;
+  if ('from' in b) override.from = typeof b['from'] === 'string' && b['from'].trim() ? b['from'].trim() : null;
+  if (typeof b['secure'] === 'boolean') override.secure = b['secure'];
+  if (typeof b['pass'] === 'string' && b['pass'].trim()) override.pass = b['pass'];
+  else if (override.host && override.host === saved.smtpHost && saved.smtpPass) override.pass = saved.smtpPass;
+
+  const start = Date.now();
+  const result = await sendTestEmail(to, override);
+  const latencyMs = Date.now() - start;
+  emitLog(`test email to ${to}: ${result.sent ? `sent (${latencyMs}ms)` : `FAILED — ${result.error}`}`);
+  res.json({ ok: result.sent, latencyMs, to, error: result.error });
 });
 
 export { router as settingsRouter };

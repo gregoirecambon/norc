@@ -17,6 +17,13 @@ export interface NorcSettings {
   schedulerEnabled: boolean;
   autoProposeEnabled: boolean;
   autoProposeIntervalHours: number;
+  smtpHost: string | null;
+  smtpPort: number;
+  smtpUser: string | null;
+  smtpPassSet: boolean;
+  smtpFrom: string | null;
+  smtpSecure: boolean;
+  smtpSource: 'settings' | 'env' | null;
   updatedAt: number;
 }
 
@@ -37,6 +44,12 @@ export interface NorcSettingsPatch {
   schedulerEnabled?: boolean;
   autoProposeEnabled?: boolean;
   autoProposeIntervalHours?: number;
+  smtpHost?: string | null;
+  smtpPort?: number;
+  smtpUser?: string | null;
+  smtpPass?: string | null;
+  smtpFrom?: string | null;
+  smtpSecure?: boolean;
 }
 
 export async function getSettings(): Promise<NorcSettings> {
@@ -76,4 +89,29 @@ export async function testTriageConnection(req: TriageTestRequest): Promise<Tria
     body: JSON.stringify(req),
   });
   return res.json() as Promise<TriageTestResult>;
+}
+
+export interface TestEmailRequest {
+  host?: string;
+  port?: number;
+  user?: string | null;
+  pass?: string;
+  from?: string | null;
+  secure?: boolean;
+}
+
+export interface TestEmailResult {
+  ok: boolean;
+  latencyMs?: number;
+  to?: string;
+  error?: string;
+}
+
+export async function sendTestEmail(req: TestEmailRequest): Promise<TestEmailResult> {
+  const res = await fetch('/api/settings/test-email', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  return res.json() as Promise<TestEmailResult>;
 }
