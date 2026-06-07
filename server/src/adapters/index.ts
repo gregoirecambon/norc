@@ -40,6 +40,10 @@ export interface DispatchArgs {
   agentName?: string;
   /** Stable session key (the page id) so openclaw keeps per-page memory. */
   sessionId?: string;
+  /** Max ms to wait for a sync reply (openclaw capture window / HTTP abort). Default: adapter's own (~120s). */
+  captureMs?: number;
+  /** OpenClaw session namespace: 'task' (default, per-page) or 'healthcheck' (one stable session per agent). */
+  sessionKind?: 'task' | 'healthcheck';
 }
 
 const DISPATCH_SUPPORTED = new Set<AdapterType>(['claude-api', 'http', 'claude-local', 'codex-local', 'openclaw']);
@@ -57,7 +61,8 @@ export async function dispatch(args: DispatchArgs): Promise<DispatchResult> {
     case 'http': return dispatchHttp(config, system, prompt);
     case 'claude-local': return dispatchLocalCli(config, system, prompt, 'claude');
     case 'codex-local': return dispatchLocalCli(config, system, prompt, 'codex');
-    case 'openclaw': return dispatchOpenclaw(config, agentName ?? '', system, prompt, sessionId);
+    case 'openclaw': return dispatchOpenclaw(config, agentName ?? '', system, prompt, sessionId,
+      { captureMs: args.captureMs, sessionKind: args.sessionKind });
     default:
       return { ok: false, supported: false, error: `Unknown adapter type: ${String(adapterType)}` };
   }

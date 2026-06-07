@@ -53,6 +53,15 @@ export function getDate(properties: unknown, name: string): string | null {
   return typeof d?.['start'] === 'string' ? d['start'] : null;
 }
 
+/** User ids from a people property (e.g. the Org DB "Owner"), or []. */
+export function getPeople(properties: unknown, name: string): string[] {
+  const p = prop(properties, name);
+  if (p?.['type'] !== 'people' || !Array.isArray(p['people'])) return [];
+  return (p['people'] as unknown[])
+    .map(u => (u as Record<string, unknown> | null)?.['id'])
+    .filter((id): id is string => typeof id === 'string');
+}
+
 export function getRelationIds(properties: unknown, name: string): string[] {
   const p = prop(properties, name);
   if (p?.['type'] !== 'relation' || !Array.isArray(p['relation'])) return [];

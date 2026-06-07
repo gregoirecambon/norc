@@ -72,7 +72,7 @@ export default function OperationsPage() {
         <>
           <Section
             title="Heartbeat"
-            description="Keeps agent Status accurate: NORC pings each agent on a schedule and reflects reachable → Available, unreachable → Offline on the Org DB. Agents mid-task are never disturbed."
+            description="Keeps agent Status accurate: NORC pings each agent on a schedule and reflects reachable → Available, unreachable → Offline on the Org DB. Deep checks additionally send a real test prompt through each agent's AI; after repeated failures the agent's Owner is @mentioned on its Org DB page. Agents mid-task are never disturbed."
           >
             <HeartbeatPanel />
           </Section>

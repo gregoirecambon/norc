@@ -456,12 +456,20 @@ async function sendChallengeViaHttp(
  * `sessionId` (the page id) gives OpenClaw a stable per-page session key so it
  * keeps its own conversational memory across turns on the same page.
  */
+export interface OpenclawDispatchOpts {
+  /** Max ms to wait capturing the reply before falling back to async. Default WS_CAPTURE_MS. */
+  captureMs?: number;
+  /** 'healthcheck' uses one stable per-agent session so heartbeat pings don't litter task sessions. */
+  sessionKind?: 'task' | 'healthcheck';
+}
+
 export async function dispatchOpenclaw(
   config: Record<string, unknown>,
   agentName: string,
   system: string,
   prompt: string,
   sessionId?: string,
+  opts?: OpenclawDispatchOpts,
 ): Promise<DispatchResult> {
   const wsUrl = typeof config['url'] === 'string' ? config['url'].trim() : '';
   if (!wsUrl) return { ok: false, supported: true, error: 'adapterConfig.url is required' };
@@ -473,11 +481,15 @@ export async function dispatchOpenclaw(
     : agentName;
   const message = system ? `${system}\n\n${prompt}` : prompt;
   const idKey = sessionId && sessionId.trim() ? sessionId.trim() : `task-${Date.now()}`;
+  const captureMs = opts?.captureMs ?? WS_CAPTURE_MS;
+  const sessionKey = (opts?.sessionKind ?? 'task') === 'healthcheck'
+    ? `agent:${ocAgentId}:norc:healthcheck`
+    : `agent:${ocAgentId}:norc:task:${idKey}`;
 
   try {
     const text = keypair
-      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName)
-      : await dispatchViaHttp(wsUrl, authToken, ocAgentId, idKey, message);
+      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName, sessionKey, captureMs)
+      : await dispatchViaHttp(wsUrl, authToken, ocAgentId, message, sessionKey, captureMs);
     if (text && text.trim()) return { ok: true, supported: true, text: text.trim() };
     // Bare ACK — the agent will report back via the Agent API.
     return { ok: true, supported: true, async: true };
@@ -506,9 +518,10 @@ async function dispatchViaWebSocket(
   idKey: string,
   message: string,
   agentName: string,
+  sessionKey: string,
+  captureMs: number,
 ): Promise<string> {
   const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
-  const sessionKey = `agent:${ocAgentId}:norc:task:${idKey}`;
   const subId = randomUUID();
   const reqId = randomUUID();
   const waitId = randomUUID();
@@ -536,7 +549,7 @@ async function dispatchViaWebSocket(
     const timer = setTimeout(() => {
       emitLog(`openclaw: capture cap reached for session ${sessionKey}`, agentName);
       finish(latestAssistant || ackText);
-    }, WS_CAPTURE_MS);
+    }, captureMs);
 
     ws.on('error', e => fail(e instanceof Error ? e : new Error('ws error')));
     ws.on('close', () => finish(latestAssistant || ackText));
@@ -571,7 +584,7 @@ async function dispatchViaWebSocket(
         // Otherwise wait for the run to complete, capturing session messages.
         const runId = asRecord(frame['payload'])?.['runId'];
         if (typeof runId === 'string' && runId) {
-          ws.send(JSON.stringify({ type: 'req', id: waitId, method: 'agent.wait', params: { runId, timeoutMs: WS_CAPTURE_MS } }));
+          ws.send(JSON.stringify({ type: 'req', id: waitId, method: 'agent.wait', params: { runId, timeoutMs: captureMs } }));
         } else {
           // Bare ACK with no run handle — nothing to capture; treat as async.
           finish('');
@@ -603,8 +616,9 @@ async function dispatchViaHttp(
   wsUrl: string,
   authToken: string | null,
   ocAgentId: string,
-  idKey: string,
   message: string,
+  sessionKey: string,
+  timeoutMs: number,
 ): Promise<string> {
   if (!authToken) throw new Error('adapterConfig.authToken is required when WebSocket pairing is not set up — use the "Setup WebSocket" button or set authToken in Adapter Config');
 
@@ -614,14 +628,14 @@ async function dispatchViaHttp(
     headers: {
       'Authorization': `Bearer ${authToken}`,
       'Content-Type': 'application/json',
-      'x-openclaw-session-key': `agent:${ocAgentId}:norc:task:${idKey}`,
+      'x-openclaw-session-key': sessionKey,
     },
     body: JSON.stringify({
       model: `openclaw/${ocAgentId}`,
       messages: [{ role: 'user', content: message }],
       stream: false,
     }),
-    signal: AbortSignal.timeout(120_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
 
   if (!response.ok) {

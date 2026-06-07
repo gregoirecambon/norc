@@ -12,6 +12,14 @@ export const agents = sqliteTable('agents', {
   registeredAt: integer('registered_at').notNull(),
   metadata: text('metadata').notNull().default('{}'),
   orgDbPageId: text('org_db_page_id'),
+  // Outage tracking (heartbeat). Two consecutive-failure counters: a transport
+  // success only proves the gateway is reachable, so it must not reset the deep
+  // counter — only a real deep-ping reply does.
+  transportFailures: integer('transport_failures').notNull().default(0),
+  deepFailures:      integer('deep_failures').notNull().default(0),
+  upSinceAt:         integer('up_since_at'),       // start of the current confirmed-up period
+  lastOkAt:          integer('last_ok_at'),        // last successful check (any kind)
+  downNotifiedAt:    integer('down_notified_at'),  // set once the owner was notified for this outage
 });
 
 export const registrationTokens = sqliteTable('registration_tokens', {
@@ -119,6 +127,9 @@ export const norcSettings = sqliteTable('norc_settings', {
   autoRouteThreshold:       real('auto_route_threshold').notNull().default(0.7),
   heartbeatEnabled:         integer('heartbeat_enabled', { mode: 'boolean' }).notNull().default(true),
   heartbeatIntervalSec:     integer('heartbeat_interval_sec').notNull().default(60),
+  deepPingEnabled:          integer('deep_ping_enabled', { mode: 'boolean' }).notNull().default(true),  // real test prompt through each agent's AI
+  deepPingIntervalSec:      integer('deep_ping_interval_sec').notNull().default(600),                   // min 60
+  failureNotifyThreshold:   integer('failure_notify_threshold').notNull().default(2),                   // tag Owner after N consecutive failures
   runTimeoutSec:            integer('run_timeout_sec').notNull().default(300),  // dispatch → escalate if no callback
   // Proactive automations.
   schedulerEnabled:         integer('scheduler_enabled', { mode: 'boolean' }).notNull().default(false),       // scheduled/recurring task poller

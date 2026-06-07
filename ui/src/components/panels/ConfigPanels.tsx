@@ -242,7 +242,11 @@ export function HeartbeatPanel() {
     if (!s) return;
     setState('busy'); setMsg('');
     try {
-      const next = await saveSettings({ heartbeatEnabled: s.heartbeatEnabled, heartbeatIntervalSec: s.heartbeatIntervalSec });
+      const next = await saveSettings({
+        heartbeatEnabled: s.heartbeatEnabled, heartbeatIntervalSec: s.heartbeatIntervalSec,
+        deepPingEnabled: s.deepPingEnabled, deepPingIntervalSec: s.deepPingIntervalSec,
+        failureNotifyThreshold: s.failureNotifyThreshold,
+      });
       setS(next); setState('saved'); setMsg('Saved.');
     } catch (err) { setState('error'); setMsg(err instanceof Error ? err.message : 'Failed'); }
   };
@@ -258,6 +262,20 @@ export function HeartbeatPanel() {
         <label style={labelStyle}>Interval (seconds, min 10)</label>
         <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={10} value={s.heartbeatIntervalSec}
           onChange={e => setS({ ...s, heartbeatIntervalSec: parseInt(e.target.value || '60', 10) })} />
+      </div>
+      <label style={checkRow}>
+        <input type="checkbox" checked={s.deepPingEnabled} onChange={e => setS({ ...s, deepPingEnabled: e.target.checked })} />
+        Deep health checks — periodically send a real test prompt through each agent's AI (catches broken credentials behind a reachable gateway)
+      </label>
+      <div>
+        <label style={labelStyle}>Deep check interval (seconds, min 60) — each check is a real AI call</label>
+        <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={60} value={s.deepPingIntervalSec}
+          onChange={e => setS({ ...s, deepPingIntervalSec: parseInt(e.target.value || '600', 10) })} />
+      </div>
+      <div>
+        <label style={labelStyle}>Notify after N consecutive failures (min 1) — @mentions the agent's Owner on its Org DB page, once per outage</label>
+        <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={1} value={s.failureNotifyThreshold}
+          onChange={e => setS({ ...s, failureNotifyThreshold: Math.max(1, parseInt(e.target.value || '2', 10)) })} />
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <button onClick={save} disabled={state === 'busy'} style={{ ...saveBtn, cursor: state === 'busy' ? 'default' : 'pointer' }}>{state === 'busy' ? 'Saving…' : 'Save'}</button>

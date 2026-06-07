@@ -11,6 +11,9 @@ export interface NorcSettings {
   runTimeoutSec: number;
   heartbeatEnabled: boolean;
   heartbeatIntervalSec: number;
+  deepPingEnabled: boolean;
+  deepPingIntervalSec: number;
+  failureNotifyThreshold: number;
   schedulerEnabled: boolean;
   autoProposeEnabled: boolean;
   autoProposeIntervalHours: number;
@@ -28,6 +31,9 @@ export interface NorcSettingsPatch {
   runTimeoutSec?: number;
   heartbeatEnabled?: boolean;
   heartbeatIntervalSec?: number;
+  deepPingEnabled?: boolean;
+  deepPingIntervalSec?: number;
+  failureNotifyThreshold?: number;
   schedulerEnabled?: boolean;
   autoProposeEnabled?: boolean;
   autoProposeIntervalHours?: number;

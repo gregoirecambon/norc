@@ -18,6 +18,9 @@ function safe(s: NorcSettings) {
     runTimeoutSec: s.runTimeoutSec,
     heartbeatEnabled: s.heartbeatEnabled,
     heartbeatIntervalSec: s.heartbeatIntervalSec,
+    deepPingEnabled: s.deepPingEnabled,
+    deepPingIntervalSec: s.deepPingIntervalSec,
+    failureNotifyThreshold: s.failureNotifyThreshold,
     schedulerEnabled: s.schedulerEnabled,
     autoProposeEnabled: s.autoProposeEnabled,
     autoProposeIntervalHours: s.autoProposeIntervalHours,
@@ -45,6 +48,9 @@ router.post('/', (req, res) => {
   if (typeof b['runTimeoutSec'] === 'number' && b['runTimeoutSec'] >= 60) patch['runTimeoutSec'] = Math.floor(b['runTimeoutSec']);
   if (typeof b['heartbeatEnabled'] === 'boolean') patch['heartbeatEnabled'] = b['heartbeatEnabled'];
   if (typeof b['heartbeatIntervalSec'] === 'number' && b['heartbeatIntervalSec'] >= 10) patch['heartbeatIntervalSec'] = Math.floor(b['heartbeatIntervalSec']);
+  if (typeof b['deepPingEnabled'] === 'boolean') patch['deepPingEnabled'] = b['deepPingEnabled'];
+  if (typeof b['deepPingIntervalSec'] === 'number' && b['deepPingIntervalSec'] >= 60) patch['deepPingIntervalSec'] = Math.floor(b['deepPingIntervalSec']);
+  if (typeof b['failureNotifyThreshold'] === 'number' && b['failureNotifyThreshold'] >= 1) patch['failureNotifyThreshold'] = Math.floor(b['failureNotifyThreshold']);
   if (typeof b['schedulerEnabled'] === 'boolean') patch['schedulerEnabled'] = b['schedulerEnabled'];
   if (typeof b['autoProposeEnabled'] === 'boolean') patch['autoProposeEnabled'] = b['autoProposeEnabled'];
   if (typeof b['autoProposeIntervalHours'] === 'number') patch['autoProposeIntervalHours'] = Math.max(1, Math.min(24, Math.floor(b['autoProposeIntervalHours'])));

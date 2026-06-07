@@ -27,7 +27,7 @@ import { makeTasksRouter } from './routes/tasks.js';
 import { skillRouter } from './routes/skill.js';
 import { settingsRouter } from './routes/settings.js';
 import { sweepStaleRuns } from './lib/runs.js';
-import { runHeartbeat } from './lib/heartbeat.js';
+import { runHeartbeat, runDeepHeartbeat } from './lib/heartbeat.js';
 import { runScheduler } from './lib/scheduler.js';
 import { runAutoPropose } from './lib/auto-propose.js';
 import { escalateTimedOutRun } from './lib/orchestrator.js';
@@ -119,6 +119,21 @@ async function heartbeatLoop(): Promise<void> {
   setTimeout(() => { void heartbeatLoop(); }, intervalMs);
 }
 
+// Deep heartbeat — a real test prompt through each agent's AI stack, on its own
+// (longer) cadence since every check is a real AI call. Same self-rescheduling
+// pattern; gated on the master heartbeat toggle too, so "heartbeat off" means
+// "never probe agents".
+async function deepHeartbeatLoop(): Promise<void> {
+  const settings = getNorcSettingsOrDefault();
+  if (settings.heartbeatEnabled && settings.deepPingEnabled) {
+    try { await runDeepHeartbeat(); } catch (err) {
+      emitLog(`deep heartbeat error: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
+  }
+  const intervalMs = Math.max(60, settings.deepPingIntervalSec) * 1000;
+  setTimeout(() => { void deepHeartbeatLoop(); }, intervalMs);
+}
+
 // Recurring co-CEO analysis — self-rescheduling so the interval/enable toggle
 // take effect live. Proposes tasks (as 'Proposed', human-validated) every N hours.
 async function autoProposeLoop(): Promise<void> {
@@ -142,6 +157,8 @@ app.listen(PORT, '0.0.0.0', () => {
   emitLog(`norc listening on port ${PORT}`);
   // Kick off the heartbeat shortly after boot so startup settles first.
   setTimeout(() => { void heartbeatLoop(); }, 5_000);
+  // Deep heartbeat a bit later still (each check is a real AI call).
+  setTimeout(() => { void deepHeartbeatLoop(); }, 20_000);
   // Recurring co-CEO analysis (first check a bit later; runs only when enabled).
   setTimeout(() => { void autoProposeLoop(); }, 30_000);
 });
