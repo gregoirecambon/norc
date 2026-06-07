@@ -63,6 +63,7 @@ async function gatherContext(apiKey: string): Promise<{ context: string; existin
   if (tasksId) {
     const open = await rows(apiKey, tasksId, {
       filter: { or: [
+        { property: 'Status', select: { equals: 'Draft' } },
         { property: 'Status', select: { equals: 'Backlog' } },
         { property: 'Status', select: { equals: 'In Progress' } },
         { property: 'Status', select: { equals: 'Proposed' } },

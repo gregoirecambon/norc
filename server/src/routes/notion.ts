@@ -234,7 +234,7 @@ router.post('/provision/scheduling', async (_req, res) => {
     res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
     return;
   }
-  emitLog('Tasks DB scheduling fields provisioned (Scheduled For / Recurrence / Repeat Every / Proposed)');
+  emitLog('Tasks DB scheduling fields provisioned (Scheduled For / Recurrence / Repeat Every / Draft + Proposed statuses)');
   res.status(200).json({ ok: true });
 });
 

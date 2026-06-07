@@ -5,6 +5,8 @@
 //     instance, dispatch that, and advance the template's date to the next
 //     occurrence. The template is never worked directly, so each run keeps its own
 //     history. Every occurrence is de-duped via processedTriggers.
+// Tasks with an inert Status (empty / Draft / Proposed) are held, not consumed:
+// flip the Status to Backlog and the next poll fires them.
 
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
@@ -12,6 +14,7 @@ import { notionIntegration, notionDatabases, processedTriggers } from '../db/sch
 import { notionQuery } from './notion-client.js';
 import { getTitle, getRichText, getSelect, getRelationIds } from './notion-props.js';
 import { createTaskPage, setTaskScheduledFor } from './notion-writeback.js';
+import { isInertTaskStatus } from './notion-provision.js';
 import { dispatchScheduledTask } from './orchestrator.js';
 import { emitLog } from './logger.js';
 
@@ -97,7 +100,17 @@ export async function runScheduler(): Promise<void> {
     if (!taskId || !scheduledFor) continue;
 
     const status = getSelect(props, 'Status') ?? '';
-    if (status === 'Proposed') continue; // awaiting human validation
+    // Inert statuses (empty / Draft / Proposed) hold a due task — one-shot or
+    // recurring template — without consuming its occurrence, so setting the
+    // Status to Backlog later fires it on the next poll. Log the hold once.
+    if (isInertTaskStatus(status)) {
+      const holdKey = `schedule-hold:${taskId}:${scheduledFor}:${status}`;
+      if (!alreadyProcessed(holdKey)) {
+        markProcessed(holdKey);
+        emitLog(`scheduler: task ${taskId} is due but Status is ${status || 'empty'} — holding until it's set to Backlog`, 'Schedule');
+      }
+      continue;
+    }
 
     const recurrence = getSelect(props, 'Recurrence') ?? 'None';
     const occKey = `schedule:${taskId}:${scheduledFor}`;

@@ -170,7 +170,7 @@ export function SchedulePanel() {
     setProv('busy'); setProvMsg('');
     try {
       await provisionSchedulingFields();
-      setProv('done'); setProvMsg('Tasks DB now has Scheduled For / Recurrence / Repeat Every + a Proposed status.');
+      setProv('done'); setProvMsg('Tasks DB now has Scheduled For / Recurrence / Repeat Every + Draft and Proposed statuses.');
     } catch (err) { setProv('error'); setProvMsg(err instanceof Error ? err.message : 'Failed'); }
   };
 

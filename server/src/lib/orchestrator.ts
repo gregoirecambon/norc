@@ -26,7 +26,8 @@ import {
   type AgentRef,
 } from './notion-mentions.js';
 import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, userDisplayName, type Anchor, type ThreadComment } from './notion-anchor.js';
-import { getAnyTitle, getRelationIds, getDate } from './notion-props.js';
+import { getAnyTitle, getRelationIds, getDate, getSelect } from './notion-props.js';
+import { isInertTaskStatus } from './notion-provision.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, type TaskRun } from './runs.js';
@@ -367,6 +368,19 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   const anchor = await resolveAnchor(apiKey, pageId);
   const properties = (anchor.page as Record<string, unknown>)['properties'];
 
+  // A task with an inert Status (empty / Draft / Proposed) is still being written
+  // or validated by a human — don't dispatch or triage it, even if an agent is
+  // already in "Assigned To". Return BEFORE any markProcessed so no idempotency
+  // key is consumed: setting the Status to Backlog fires a properties_updated
+  // event and the task dispatches normally then.
+  if (anchor.kind === 'task') {
+    const status = getSelect(properties, 'Status') ?? '';
+    if (isInertTaskStatus(status)) {
+      emitLog(`webhook ignored: task ${pageId} Status is ${status || 'empty'} — set it to Backlog to hand it to NORC`, 'Notion');
+      return;
+    }
+  }
+
   // A task with a "Scheduled For" date is owned by the SCHEDULER, not the
   // create/assign webhook — otherwise it would run the moment it's assigned,
   // ignoring the schedule. Defer here so the scheduler runs it at the due time.
@@ -480,6 +494,17 @@ function rosterCandidates(excludeNames: string[]): TriageCandidate[] {
 
 async function triageUnhandled(integration: Integration, anchor: Anchor, opts: TriageOpts): Promise<boolean> {
   if (!triageConfigured(getNorcSettings())) return false;
+
+  // An inert task (empty / Draft / Proposed Status) is parked by a human — the
+  // co-CEO must not auto-route it. Deliberate hold, so take ownership (true);
+  // no dedup key is consumed, so it triages normally once the Status changes.
+  if (anchor.kind === 'task') {
+    const status = getSelect((anchor.page as Record<string, unknown>)['properties'], 'Status') ?? '';
+    if (isInertTaskStatus(status)) {
+      emitLog(`triage skipped: task ${anchor.pageId} Status is ${status || 'empty'} — parked until a human sets it to Backlog`, 'Triage');
+      return true;
+    }
+  }
 
   const dedupKey = `triage:${opts.dedupId}`;
   if (alreadyProcessed(dedupKey)) return true; // already triaged — don't re-fire or re-log

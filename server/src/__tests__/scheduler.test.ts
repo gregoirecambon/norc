@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { nextOccurrence } from '../lib/scheduler.js';
+import { isInertTaskStatus, TASK_STATUS_OPTIONS } from '../lib/notion-provision.js';
 
 describe('nextOccurrence', () => {
   const at = (iso: string) => new Date(iso);
@@ -34,5 +35,31 @@ describe('nextOccurrence', () => {
   it('None (or unknown) yields no further occurrence', () => {
     expect(nextOccurrence(at('2026-06-07T00:00:00.000Z'), 'None', 0)).toBeNull();
     expect(nextOccurrence(at('2026-06-07T00:00:00.000Z'), 'whatever', 0)).toBeNull();
+  });
+});
+
+describe('isInertTaskStatus', () => {
+  it('empty / unset / whitespace is inert (a half-drafted Notion row)', () => {
+    expect(isInertTaskStatus('')).toBe(true);
+    expect(isInertTaskStatus('  ')).toBe(true);
+    expect(isInertTaskStatus(null)).toBe(true);
+    expect(isInertTaskStatus(undefined)).toBe(true);
+  });
+
+  it('Draft and Proposed are inert (parked by a human / awaiting validation)', () => {
+    expect(isInertTaskStatus('Draft')).toBe(true);
+    expect(isInertTaskStatus('Proposed')).toBe(true);
+  });
+
+  it('active lifecycle statuses are not inert', () => {
+    expect(isInertTaskStatus('Backlog')).toBe(false);
+    expect(isInertTaskStatus('In Progress')).toBe(false);
+    expect(isInertTaskStatus('Done')).toBe(false);
+    expect(isInertTaskStatus('Failed')).toBe(false);
+  });
+
+  it('every inert status is a provisioned select option (except empty)', () => {
+    const opts = new Set<string>(TASK_STATUS_OPTIONS);
+    for (const s of ['Draft', 'Proposed']) expect(opts.has(s)).toBe(true);
   });
 });

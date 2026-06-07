@@ -102,9 +102,20 @@ const relation = (databaseId: string) => ({
   relation: { database_id: databaseId, type: 'single_property', single_property: {} },
 });
 
-// Task Status options (incl. 'Proposed' for NORC co-CEO proposals awaiting human
-// validation). Kept as a constant so provisioning + the additive patch agree.
-export const TASK_STATUS_OPTIONS = ['Backlog', 'In Progress', 'Done', 'Failed', 'Proposed'] as const;
+// Task Status options (incl. 'Draft' for tasks humans are still writing and
+// 'Proposed' for NORC co-CEO proposals awaiting human validation). Kept as a
+// constant so provisioning + the additive patch agree.
+export const TASK_STATUS_OPTIONS = ['Draft', 'Backlog', 'In Progress', 'Done', 'Failed', 'Proposed'] as const;
+
+// Statuses NORC never acts on: empty (a half-drafted row — Notion's default for a
+// new task), 'Draft' (explicitly parked by a human), and 'Proposed' (a co-CEO
+// proposal awaiting validation). Tasks in these states are invisible to every
+// executor — the assignment webhook, the triage auto-route, and the scheduler
+// (one-shots AND recurring templates). Set Status to 'Backlog' to hand a task over.
+export function isInertTaskStatus(status: string | null | undefined): boolean {
+  const s = (status ?? '').trim();
+  return s === '' || s === 'Draft' || s === 'Proposed';
+}
 
 // --- Phase 1: base (non-relation) property schemas ------------------------
 
