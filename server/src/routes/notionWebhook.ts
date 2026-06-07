@@ -48,7 +48,7 @@ router.post('/', (req, res) => {
 
     const updated = db.select().from(notionIntegration).where(eq(notionIntegration.id, row.id)).all()[0]!;
 
-    emitLog('Notion webhook verification token received');
+    emitLog('Notion webhook verification token received', 'Notion');
     emitEvent({
       type: 'notion.verification_received',
       data: {
@@ -69,7 +69,7 @@ router.post('/', (req, res) => {
   const rawBody = (req as unknown as { rawBody?: Buffer }).rawBody;
   const signature = req.header('X-Notion-Signature');
   if (!integration || !verifyNotionSignature(rawBody, signature, integration.webhookVerifyToken)) {
-    emitLog(`webhook rejected: ${!integration ? 'no Notion integration configured' : 'invalid or missing signature'}`);
+    emitLog(`webhook rejected: ${!integration ? 'no Notion integration configured' : 'invalid or missing signature'}`, 'Notion');
     res.status(401).json({ error: 'invalid_signature' });
     return;
   }

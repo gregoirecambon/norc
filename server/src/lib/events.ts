@@ -72,6 +72,24 @@ export interface MentionDetectedEvent {
   data: { agentId: string; agentName: string; pageId: string; anchorKind: string };
 }
 
+export interface RunStartedEvent {
+  type: 'run.started';
+  data: {
+    id: string;
+    agentId: string;
+    agentName: string;
+    title: string | null;
+    anchorKind: string;
+    pageId: string;
+    createdAt: number;
+  };
+}
+
+export interface RunFinishedEvent {
+  type: 'run.finished';
+  data: { id: string; agentId: string; status: 'done' | 'failed' | 'timed_out'; completedAt: number };
+}
+
 export type NorcEvent =
   | AgentRegisteredEvent
   | AgentDeletedEvent
@@ -80,7 +98,9 @@ export type NorcEvent =
   | NotionIntegrationUpdatedEvent
   | NotionVerificationReceivedEvent
   | NotionWorkspaceUpdatedEvent
-  | MentionDetectedEvent;
+  | MentionDetectedEvent
+  | RunStartedEvent
+  | RunFinishedEvent;
 
 const listeners = new Set<(event: NorcEvent) => void>();
 

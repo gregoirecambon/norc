@@ -45,11 +45,11 @@ router.post('/', async (req, res) => {
     createdAt: now,
   }).run();
 
-  emitLog(`handshake started for agent "${row.name}" (id: ${handshakeId})`);
+  emitLog(`handshake started for agent "${row.name}" (id: ${handshakeId})`, row.name);
 
   sendHandshakeChallenge(agent, handshakeId, nonce, callbackUrl).catch(err => {
     const error = err instanceof Error ? err.message : 'Failed to send challenge';
-    emitLog(`handshake challenge failed for agent "${row.name}": ${error}`);
+    emitLog(`handshake challenge failed for agent "${row.name}": ${error}`, row.name);
     db.update(handshakes).set({ status: 'timed_out', error, completedAt: Date.now() })
       .where(eq(handshakes.id, handshakeId)).run();
     emitEvent({ type: 'handshake.updated', data: { handshakeId, agentId: id, status: 'timed_out', latencyMs: null, error } });
@@ -103,7 +103,8 @@ export function makeCompletionRouter(): ExpressRouter {
     db.update(agents).set({ status: 'connected', lastPingedAt: now, lastLatencyMs: latencyMs })
       .where(eq(agents.id, row.agentId)).run();
 
-    emitLog(`handshake completed by agent (id: ${hid}, latency: ${latencyMs}ms)`);
+    const agentName = db.select().from(agents).where(eq(agents.id, row.agentId)).all()[0]?.name;
+    emitLog(`handshake completed by agent (id: ${hid}, latency: ${latencyMs}ms)`, agentName ?? 'NORC');
     emitEvent({ type: 'handshake.updated', data: { handshakeId: hid, agentId: row.agentId, status: 'completed', latencyMs, error: null } });
 
     res.json({ ok: true, latencyMs });

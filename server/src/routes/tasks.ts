@@ -90,7 +90,7 @@ export function makeTasksRouter(): ExpressRouter {
     try {
       await setTaskStatus(c.apiKey, id, 'Backlog');
       await dispatchScheduledTask(c.integration, id, 'approved proposal', `approve:${id}:${Date.now()}`);
-      emitLog(`task ${id} approved → routed`);
+      emitLog(`task ${id} approved → routed`, 'Triage');
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'approve_failed', message: err instanceof Error ? err.message : 'failed' });
@@ -104,7 +104,7 @@ export function makeTasksRouter(): ExpressRouter {
     const id = (req.params as { id: string }).id;
     try {
       await archivePage(c.apiKey, id);
-      emitLog(`task ${id} dismissed (archived)`);
+      emitLog(`task ${id} dismissed (archived)`, 'Triage');
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'dismiss_failed', message: err instanceof Error ? err.message : 'failed' });

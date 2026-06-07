@@ -7,7 +7,8 @@
 import { randomUUID, randomBytes } from 'node:crypto';
 import { eq, lt, and, inArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { taskRuns } from '../db/schema.js';
+import { agents, taskRuns } from '../db/schema.js';
+import { emitEvent } from './events.js';
 
 export type RunStatus = 'in_flight' | 'done' | 'failed' | 'timed_out';
 
@@ -18,6 +19,8 @@ export interface NewRun {
   pageId: string;
   taskPageId: string | null;
   anchorKind: string;
+  /** Page/task title snapshot at dispatch time — display only (dashboard). */
+  title?: string | null;
   manageTaskStatus: boolean;
   /** The human who triggered this run — re-@mentioned if it later times out. */
   triggeringUserId?: string | null;
@@ -27,6 +30,7 @@ export interface NewRun {
 export function createRun(input: NewRun): { id: string; token: string } {
   const id = randomUUID();
   const token = randomBytes(24).toString('hex');
+  const createdAt = Date.now();
   db.insert(taskRuns).values({
     id,
     token,
@@ -34,12 +38,22 @@ export function createRun(input: NewRun): { id: string; token: string } {
     pageId: input.pageId,
     taskPageId: input.taskPageId,
     anchorKind: input.anchorKind,
+    title: input.title ?? null,
     triggeringUserId: input.triggeringUserId ?? null,
     manageTaskStatus: input.manageTaskStatus,
     status: 'in_flight',
     agentActed: false,
-    createdAt: Date.now(),
+    createdAt,
   }).run();
+  const agentName = db.select().from(agents).where(eq(agents.id, input.agentId)).all()[0]?.name ?? 'unknown';
+  emitEvent({
+    type: 'run.started',
+    data: {
+      id, agentId: input.agentId, agentName,
+      title: input.title ?? null, anchorKind: input.anchorKind,
+      pageId: input.pageId, createdAt,
+    },
+  });
   return { id, token };
 }
 
@@ -85,10 +99,16 @@ export function timedOutAgentIdsForPage(pageId: string): string[] {
 
 /** Finalize a run (terminal). No-op if already finalized. */
 export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>): void {
-  db.update(taskRuns)
-    .set({ status, completedAt: Date.now() })
+  const completedAt = Date.now();
+  const result = db.update(taskRuns)
+    .set({ status, completedAt })
     .where(and(eq(taskRuns.id, id), eq(taskRuns.status, 'in_flight')))
     .run();
+  // Emit only when a row actually transitioned — double-finalize stays silent.
+  if (result.changes > 0) {
+    const run = getRun(id);
+    if (run) emitEvent({ type: 'run.finished', data: { id, agentId: run.agentId, status, completedAt } });
+  }
 }
 
 /** Time out runs still in flight after maxAgeMs; returns the timed-out rows. */
@@ -98,9 +118,13 @@ export function sweepStaleRuns(maxAgeMs: number): TaskRun[] {
     .where(and(eq(taskRuns.status, 'in_flight'), lt(taskRuns.createdAt, cutoff)))
     .all();
   if (stale.length === 0) return [];
+  const completedAt = Date.now();
   db.update(taskRuns)
-    .set({ status: 'timed_out', completedAt: Date.now() })
+    .set({ status: 'timed_out', completedAt })
     .where(inArray(taskRuns.id, stale.map(r => r.id)))
     .run();
+  for (const r of stale) {
+    emitEvent({ type: 'run.finished', data: { id: r.id, agentId: r.agentId, status: 'timed_out', completedAt } });
+  }
   return stale;
 }

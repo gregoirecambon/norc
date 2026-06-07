@@ -26,6 +26,18 @@ function OperationsIcon() {
   );
 }
 
+function DashboardIcon() {
+  // 2x2 grid of rounded squares
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <rect x="2" y="2" width="4.5" height="4.5" rx="1.2" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="8.5" y="2" width="4.5" height="4.5" rx="1.2" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="2" y="8.5" width="4.5" height="4.5" rx="1.2" stroke="currentColor" strokeWidth="1.3"/>
+      <rect x="8.5" y="8.5" width="4.5" height="4.5" rx="1.2" stroke="currentColor" strokeWidth="1.3"/>
+    </svg>
+  );
+}
+
 function LogsIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
@@ -119,6 +131,7 @@ export default function Sidebar({ currentPage, onNavigate }: Props) {
         <NavItem id="operations" Icon={OperationsIcon} label="Operations" />
 
         <div style={{ ...sectionLabel, marginTop: 16 }}>Monitor</div>
+        <NavItem id="dashboard" Icon={DashboardIcon} label="Dashboard" />
         <NavItem id="logs" Icon={LogsIcon} label="Logs" />
 
         <div style={{ ...sectionLabel, marginTop: 16 }}>Configure</div>

@@ -476,7 +476,7 @@ export async function dispatchOpenclaw(
 
   try {
     const text = keypair
-      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message)
+      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName)
       : await dispatchViaHttp(wsUrl, authToken, ocAgentId, idKey, message);
     if (text && text.trim()) return { ok: true, supported: true, text: text.trim() };
     // Bare ACK — the agent will report back via the Agent API.
@@ -505,6 +505,7 @@ async function dispatchViaWebSocket(
   ocAgentId: string,
   idKey: string,
   message: string,
+  agentName: string,
 ): Promise<string> {
   const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
   const sessionKey = `agent:${ocAgentId}:norc:task:${idKey}`;
@@ -533,7 +534,7 @@ async function dispatchViaWebSocket(
     };
 
     const timer = setTimeout(() => {
-      emitLog(`openclaw: capture cap reached for session ${sessionKey}`);
+      emitLog(`openclaw: capture cap reached for session ${sessionKey}`, agentName);
       finish(latestAssistant || ackText);
     }, WS_CAPTURE_MS);
 
@@ -562,7 +563,7 @@ async function dispatchViaWebSocket(
 
       if (id === reqId) {
         const dump = rawDataToString(raw);
-        emitLog(`openclaw res frame: ${dump.length > 600 ? dump.slice(0, 600) + '…' : dump}`);
+        emitLog(`openclaw res frame: ${dump.length > 600 ? dump.slice(0, 600) + '…' : dump}`, agentName);
         if (frame['ok'] !== true) { fail(new Error(`agent method rejected: ${JSON.stringify(frame['error'])}`)); return; }
         // Some gateways answer synchronously in the ACK; honour that immediately.
         ackText = extractResultText(frame);
@@ -580,7 +581,7 @@ async function dispatchViaWebSocket(
 
       if (id === waitId) {
         const status = asRecord(frame['payload'])?.['status'];
-        emitLog(`openclaw agent.wait: status=${String(status)} session=${sessionKey}`);
+        emitLog(`openclaw agent.wait: status=${String(status)} session=${sessionKey}`, agentName);
         finish(latestAssistant || ackText);
         return;
       }

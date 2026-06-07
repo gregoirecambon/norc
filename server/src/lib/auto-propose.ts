@@ -83,14 +83,14 @@ export async function runAutoPropose(): Promise<void> {
   const integration = db.select().from(notionIntegration).all()[0] ?? null;
   if (!integration || integration.status !== 'active') return;
   const settings = getNorcSettings();
-  if (!settings) { emitLog('auto-propose skipped: settings unset'); return; }
+  if (!settings) { emitLog('auto-propose skipped: settings unset', 'Co-CEO'); return; }
   // Reuses the triage LLM credentials (independent of the orchestrator toggle).
   const configured = settings.orchestratorProvider === 'openai' ? !!settings.orchestratorBaseUrl : !!settings.orchestratorApiKey;
-  if (!configured) { emitLog('auto-propose skipped: triage LLM not configured'); return; }
+  if (!configured) { emitLog('auto-propose skipped: triage LLM not configured', 'Co-CEO'); return; }
 
   const apiKey = integration.apiKey;
   const tasksId = dbId('tasks');
-  if (!tasksId) { emitLog('auto-propose skipped: no Tasks DB'); return; }
+  if (!tasksId) { emitLog('auto-propose skipped: no Tasks DB', 'Co-CEO'); return; }
 
   const { context, existingTitles } = await gatherContext(apiKey);
   const existingLower = new Set(existingTitles.map(t => t.toLowerCase()));
@@ -103,7 +103,7 @@ export async function runAutoPropose(): Promise<void> {
       context, existingTitles, max: MAX_PROPOSALS,
     });
   } catch (err) {
-    emitLog(`auto-propose: LLM failed: ${err instanceof Error ? err.message : 'error'}`);
+    emitLog(`auto-propose: LLM failed: ${err instanceof Error ? err.message : 'error'}`, 'Co-CEO');
     return;
   }
 
@@ -118,11 +118,11 @@ export async function runAutoPropose(): Promise<void> {
       created++;
       existingLower.add(t.title.toLowerCase());
     } catch (err) {
-      emitLog(`auto-propose: failed to create "${t.title}": ${err instanceof Error ? err.message : 'error'}`);
+      emitLog(`auto-propose: failed to create "${t.title}": ${err instanceof Error ? err.message : 'error'}`, 'Co-CEO');
     }
   }
 
   emitLog(created > 0
     ? `auto-propose: created ${created} proposed task(s) for validation`
-    : 'auto-propose: no new proposals this cycle');
+    : 'auto-propose: no new proposals this cycle', 'Co-CEO');
 }

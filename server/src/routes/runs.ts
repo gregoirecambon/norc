@@ -32,6 +32,11 @@ function agentRefForRun(run: TaskRun): AgentRef | null {
   return { agentId: a.id, orgDbPageId: a.orgDbPageId ?? '', name: a.name, adapterType: a.adapterType };
 }
 
+/** Log tag for a run: the agent's display name (NORC if it was deleted mid-run). */
+function agentTag(run: TaskRun): string {
+  return agentRefForRun(run)?.name ?? 'NORC';
+}
+
 /** Re-read the agent's Org DB Context Level to gate higher-privilege pulls. */
 async function agentClearance(apiKey: string, run: TaskRun): Promise<ContextLevel> {
   const a = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
@@ -97,12 +102,12 @@ export function makeRunsRouter(): ExpressRouter {
       if (typeof discussionId === 'string' && discussionId) {
         recordCommentId((await postCommentReply(apiKey, discussionId, text)).commentId);
         markActed(run.id);
-        emitLog(`agent API: reply posted on discussion ${discussionId} (run ${run.id})`);
+        emitLog(`agent API: reply posted on discussion ${discussionId} (run ${run.id})`, agentTag(run));
       } else {
         const target = typeof pageId === 'string' && pageId ? pageId : run.pageId;
         await recordOurComment(apiKey, target, text);
         markActed(run.id);
-        emitLog(`agent API: comment posted on page ${target} (run ${run.id})`);
+        emitLog(`agent API: comment posted on page ${target} (run ${run.id})`, agentTag(run));
       }
       res.json({ ok: true });
     } catch (err) {
@@ -122,7 +127,7 @@ export function makeRunsRouter(): ExpressRouter {
     try {
       const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${pageId}`);
       const markdown = await readPageMarkdown(apiKey, pageId, 12_000, depth);
-      emitLog(`agent API: page ${pageId} read (run ${run.id}, depth ${depth})`);
+      emitLog(`agent API: page ${pageId} read (run ${run.id}, depth ${depth})`, agentTag(run));
       res.json({
         title: getAnyTitle(page['properties']),
         url: typeof page['url'] === 'string' ? page['url'] : null,
@@ -143,7 +148,7 @@ export function makeRunsRouter(): ExpressRouter {
     try {
       const anchor = await resolveAnchor(apiKey, run.pageId);
       const ctx = await assembleContext({ apiKey, anchor, agentRef });
-      emitLog(`agent API: context pulled (run ${run.id}, level ${ctx.contextLevel})`);
+      emitLog(`agent API: context pulled (run ${run.id}, level ${ctx.contextLevel})`, agentRef.name);
       res.json({
         contextLevel: ctx.contextLevel,
         anchorKind: anchor.kind,
@@ -173,7 +178,7 @@ export function makeRunsRouter(): ExpressRouter {
         title: getAnyTitle(p['properties']),
         url: typeof p['url'] === 'string' ? p['url'] : null,
       }));
-      emitLog(`agent API: search "${q.slice(0, 40)}" → ${results.length} (run ${run.id})`);
+      emitLog(`agent API: search "${q.slice(0, 40)}" → ${results.length} (run ${run.id})`, agentTag(run));
       res.json({ results });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
@@ -202,7 +207,7 @@ export function makeRunsRouter(): ExpressRouter {
         url: typeof p['url'] === 'string' ? p['url'] : null,
         properties: p['properties'],
       }));
-      emitLog(`agent API: query db ${databaseId} → ${results.length} (run ${run.id})`);
+      emitLog(`agent API: query db ${databaseId} → ${results.length} (run ${run.id})`, agentTag(run));
       res.json({ results });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
@@ -219,7 +224,7 @@ export function makeRunsRouter(): ExpressRouter {
       const blocks = markdownToBlocks(markdown);
       await appendBlocks(apiKey, target, blocks);
       markActed(run.id);
-      emitLog(`agent API: ${blocks.length} block(s) appended to page ${target} (run ${run.id})`);
+      emitLog(`agent API: ${blocks.length} block(s) appended to page ${target} (run ${run.id})`, agentTag(run));
       res.json({ ok: true, blocks: blocks.length });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
@@ -239,7 +244,7 @@ export function makeRunsRouter(): ExpressRouter {
       }
       if (typeof agentOutput === 'string') await setTaskFields(apiKey, run.taskPageId, { agentOutput });
       markActed(run.id);
-      emitLog(`agent API: task status/fields updated (run ${run.id})`);
+      emitLog(`agent API: task status/fields updated (run ${run.id})`, agentTag(run));
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
@@ -262,7 +267,7 @@ export function makeRunsRouter(): ExpressRouter {
     try {
       const { created } = await proposeTasks({ sourcePageId: run.pageId, proposerName: proposer, tasks: clean });
       markActed(run.id);
-      emitLog(`agent API: ${created.length} task(s) proposed (run ${run.id})`);
+      emitLog(`agent API: ${created.length} task(s) proposed (run ${run.id})`, proposer ?? 'NORC');
       res.json({ ok: true, created });
     } catch (err) {
       res.status(502).json({ error: 'propose_failed', message: err instanceof Error ? err.message : 'failed' });
@@ -288,7 +293,7 @@ export function makeRunsRouter(): ExpressRouter {
       if (agentRow?.orgDbPageId) await setAgentStatus(apiKey, agentRow.orgDbPageId, 'Available');
       markActed(run.id);
       finalizeRun(run.id, ok ? 'done' : 'failed');
-      emitLog(`agent API: run ${run.id} completed (${ok ? 'done' : 'failed'})`);
+      emitLog(`agent API: run ${run.id} completed (${ok ? 'done' : 'failed'})`, agentRow?.name ?? 'NORC');
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });

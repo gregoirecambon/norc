@@ -1,0 +1,1 @@
+ALTER TABLE `logs` ADD `tag` text DEFAULT 'NORC' NOT NULL;

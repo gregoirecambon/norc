@@ -4,12 +4,12 @@ import { db } from '../db/client.js';
 import { logs } from '../db/schema.js';
 
 // Logs are persisted to SQLite so they survive page refreshes and server
-// restarts. Retention is purely age-based: entries older than 24h are pruned,
+// restarts. Retention is purely age-based: entries older than 3 days are pruned,
 // everything newer is kept (and replayed to any client that (re)connects).
-const RETENTION_MS = 24 * 60 * 60 * 1_000;
+const RETENTION_MS = 3 * 24 * 60 * 60 * 1_000;
 const PRUNE_EVERY = 200; // amortize pruning across roughly every N writes
 
-interface LogEntry { ts: number; line: string }
+interface LogEntry { ts: number; tag: string; line: string }
 
 const listeners = new Set<(entry: LogEntry) => void>();
 const clearers = new Set<() => void>();
@@ -36,14 +36,18 @@ export function clearLogs(): void {
   }
 }
 
-export function emitLog(message: string) {
+/**
+ * Emit a log line. `tag` identifies the source: 'NORC' (system — heartbeat,
+ * webhooks, startup…), 'Triage', 'Schedule', 'Co-CEO', or an agent's name.
+ */
+export function emitLog(message: string, tag = 'NORC') {
   const ts = Date.now();
-  const line = `[norc ${new Date(ts).toISOString().slice(11, 19)}] ${message}`;
+  const line = `[${tag} ${new Date(ts).toISOString().slice(11, 19)}] ${message}`;
   process.stdout.write(line + '\n');
 
   // Persist (best-effort: logging must never throw, e.g. before migrations run).
   try {
-    db.insert(logs).values({ ts, line }).run();
+    db.insert(logs).values({ ts, tag, line }).run();
     if (++writesSincePrune >= PRUNE_EVERY) {
       writesSincePrune = 0;
       pruneOldLogs();
@@ -53,7 +57,7 @@ export function emitLog(message: string) {
   }
 
   for (const fn of listeners) {
-    try { fn({ ts, line }); } catch { /* ignore closed connections */ }
+    try { fn({ ts, tag, line }); } catch { /* ignore closed connections */ }
   }
 }
 
@@ -63,11 +67,12 @@ export function attachSseListener(res: Response) {
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
-  // Each SSE message is a JSON object { ts, line } so the client can compute
-  // accurate relative times (e.g. "5 min ago") for replayed history too.
+  // Each SSE message is a JSON object { ts, tag, line } so the client can
+  // compute accurate relative times and render the source tag for replayed
+  // history too.
   const send = (entry: LogEntry) => res.write(`data: ${JSON.stringify(entry)}\n\n`);
 
-  // Replay the last 24h from durable storage so a refresh/restart keeps history.
+  // Replay the retention window from durable storage so a refresh/restart keeps history.
   pruneOldLogs();
   try {
     const cutoff = Date.now() - RETENTION_MS;
@@ -75,7 +80,7 @@ export function attachSseListener(res: Response) {
       .where(gte(logs.ts, cutoff))
       .orderBy(asc(logs.id))
       .all();
-    for (const row of history) send({ ts: row.ts, line: row.line });
+    for (const row of history) send({ ts: row.ts, tag: row.tag, line: row.line });
   } catch {
     // no history available yet — stream live only
   }

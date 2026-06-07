@@ -65,7 +65,7 @@ async function spawnRecurringInstance(apiKey: string, tasksDbId: string, props: 
     });
     return pageId;
   } catch (err) {
-    emitLog(`scheduler: failed to spawn recurring instance: ${err instanceof Error ? err.message : 'error'}`);
+    emitLog(`scheduler: failed to spawn recurring instance: ${err instanceof Error ? err.message : 'error'}`, 'Schedule');
     return null;
   }
 }
@@ -85,7 +85,7 @@ export async function runScheduler(): Promise<void> {
       page_size: 50,
     });
   } catch (err) {
-    emitLog(`scheduler query failed: ${err instanceof Error ? err.message : 'error'}`);
+    emitLog(`scheduler query failed: ${err instanceof Error ? err.message : 'error'}`, 'Schedule');
     return;
   }
   const rows = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
@@ -106,15 +106,15 @@ export async function runScheduler(): Promise<void> {
 
     if (recurrence === 'None' || recurrence === '') {
       if (status !== 'Backlog') continue; // don't re-fire in-progress/done one-shots
-      emitLog(`scheduler: firing one-shot task ${taskId}`);
+      emitLog(`scheduler: firing one-shot task ${taskId}`, 'Schedule');
       await dispatchScheduledTask(integration, taskId, 'scheduled', occKey);
     } else {
-      emitLog(`scheduler: recurring template ${taskId} due (${recurrence}) — spawning instance`);
+      emitLog(`scheduler: recurring template ${taskId} due (${recurrence}) — spawning instance`, 'Schedule');
       const instanceId = await spawnRecurringInstance(apiKey, tasksDb.notionDatabaseId, props);
       if (instanceId) await dispatchScheduledTask(integration, instanceId, 'scheduled (recurring)', `${occKey}:inst`);
       const next = nextOccurrence(new Date(scheduledFor), recurrence, getNumber(props, 'Repeat Every (days)') ?? 0);
       try { await setTaskScheduledFor(apiKey, taskId, next ? next.toISOString() : null); }
-      catch (err) { emitLog(`scheduler: failed to advance template ${taskId}: ${err instanceof Error ? err.message : 'error'}`); }
+      catch (err) { emitLog(`scheduler: failed to advance template ${taskId}: ${err instanceof Error ? err.message : 'error'}`, 'Schedule'); }
     }
   }
 }

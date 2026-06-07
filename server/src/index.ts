@@ -16,6 +16,7 @@ import { agentsRouter } from './routes/agents.js';
 import { pingRouter } from './routes/ping.js';
 import { logsRouter } from './routes/logs.js';
 import { eventsRouter } from './routes/events.js';
+import { dashboardRouter } from './routes/dashboard.js';
 import { platformsRouter } from './routes/platforms.js';
 import { meRouter } from './routes/me.js';
 import { handshakesRouter, makeCompletionRouter } from './routes/handshakes.js';
@@ -43,14 +44,17 @@ app.use('/webhooks/notion', express.json({
 }));
 app.use(express.json());
 
-// Health
-app.get('/health', (_req, res) => {
+// Health — also aliased at /api/health so the UI can reach it through the
+// Vite dev proxy (which only forwards /api/*).
+const health = (_req: express.Request, res: express.Response) => {
   res.json({
     status: 'ok',
     dbPath: process.env['DATABASE_PATH'] ?? './norc.db',
     ts: new Date().toISOString(),
   });
-});
+};
+app.get('/health', health);
+app.get('/api/health', health);
 
 // Routes
 app.use('/api/agents', agentsRouter);
@@ -59,6 +63,7 @@ app.use('/api/agents/:id/handshake', handshakesRouter);
 app.use('/api/handshakes', makeCompletionRouter());
 app.use('/api/logs', logsRouter);
 app.use('/api/events', eventsRouter);
+app.use('/api/dashboard', dashboardRouter);
 app.use('/api/platforms', platformsRouter);
 app.use('/api/me', meRouter);
 app.use('/api/notion', notionRouter);
@@ -90,7 +95,7 @@ setInterval(() => {
   const timedOut = sweepStaleRuns(timeoutMs);
   for (const run of timedOut) {
     void escalateTimedOutRun(run).catch(err =>
-      emitLog(`escalation error for run ${run.id}: ${err instanceof Error ? err.message : 'unknown'}`));
+      emitLog(`escalation error for run ${run.id}: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage'));
   }
 }, 60_000);
 
@@ -98,7 +103,7 @@ setInterval(() => {
 // and dispatch them (gated by the scheduler toggle).
 setInterval(() => {
   if (!getNorcSettingsOrDefault().schedulerEnabled) return;
-  void runScheduler().catch(err => emitLog(`scheduler error: ${err instanceof Error ? err.message : 'unknown'}`));
+  void runScheduler().catch(err => emitLog(`scheduler error: ${err instanceof Error ? err.message : 'unknown'}`, 'Schedule'));
 }, 60_000);
 
 // Heartbeat — self-rescheduling so live settings changes (interval / enable)
@@ -120,7 +125,7 @@ async function autoProposeLoop(): Promise<void> {
   const settings = getNorcSettingsOrDefault();
   if (settings.autoProposeEnabled) {
     try { await runAutoPropose(); } catch (err) {
-      emitLog(`auto-propose error: ${err instanceof Error ? err.message : 'unknown'}`);
+      emitLog(`auto-propose error: ${err instanceof Error ? err.message : 'unknown'}`, 'Co-CEO');
     }
   }
   const intervalMs = Math.max(1, Math.min(24, settings.autoProposeIntervalHours)) * 3600_000;

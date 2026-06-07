@@ -165,7 +165,7 @@ async function deliverPageReply(
   if (wantsContent(opts.request)) {
     const blocks = markdownToBlocks(text);
     await safeWrite('append content', () => appendBlocks(apiKey, anchor.pageId, blocks));
-    emitLog(`"${agentName}" wrote ${blocks.length} block(s) into ${anchor.kind} page ${anchor.pageId}`);
+    emitLog(`"${agentName}" wrote ${blocks.length} block(s) into ${anchor.kind} page ${anchor.pageId}`, agentName);
     // Let the human know on the thread it was triggered from.
     if (opts.discussionId) {
       await safeWrite('reply note', () =>
@@ -189,13 +189,13 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
   const type = event.type ?? 'unknown';
   const entityId = event.entity?.id ?? '—';
 
-  emitLog(`webhook received: type=${type} entity=${entityId}`);
+  emitLog(`webhook received: type=${type} entity=${entityId}`, 'Notion');
   const rawJson = safeJson(raw);
-  if (rawJson) emitLog(`webhook payload: ${rawJson}`);
+  if (rawJson) emitLog(`webhook payload: ${rawJson}`, 'Notion');
 
   const integration = db.select().from(notionIntegration).all()[0] ?? null;
   if (!integration || integration.status !== 'active') {
-    emitLog('webhook ignored: Notion integration not active');
+    emitLog('webhook ignored: Notion integration not active', 'Notion');
     return;
   }
 
@@ -204,7 +204,7 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
     .map(a => a?.id)
     .filter((id): id is string => typeof id === 'string');
   if (integration.botUserId && authorIds.includes(integration.botUserId)) {
-    emitLog('webhook ignored: authored by NORC bot (loop guard)');
+    emitLog('webhook ignored: authored by NORC bot (loop guard)', 'Notion');
     return;
   }
 
@@ -217,7 +217,7 @@ export async function processWebhookEvent(raw: unknown): Promise<void> {
     } else if (event.type && PAGE_EVENT_TYPES.has(event.type)) {
       await handlePageEvent(integration, event, triggeringUserId);
     } else {
-      emitLog(`webhook ignored: "${type}" is not a trigger event type`);
+      emitLog(`webhook ignored: "${type}" is not a trigger event type`, 'Notion');
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'unknown error';
@@ -230,16 +230,16 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
   const apiKey = integration.apiKey;
   const commentId = event.entity?.id;
   if (!commentId) {
-    emitLog('webhook ignored: comment event carries no comment id');
+    emitLog('webhook ignored: comment event carries no comment id', 'Notion');
     return;
   }
   if (db.select().from(orchestratorComments).where(eq(orchestratorComments.commentId, commentId)).all()[0]) {
-    emitLog(`webhook ignored: comment ${commentId} was authored by NORC (loop guard)`);
+    emitLog(`webhook ignored: comment ${commentId} was authored by NORC (loop guard)`, 'Notion');
     return;
   }
   const triggerKey = `comment:${commentId}`;
   if (alreadyProcessed(triggerKey)) {
-    emitLog(`webhook ignored: comment ${commentId} already processed`);
+    emitLog(`webhook ignored: comment ${commentId} already processed`, 'Notion');
     return;
   }
   // A comment's parent may be the page (page-level thread) OR a block (an inline
@@ -251,7 +251,7 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
   const threadBlockId = parent?.id;
   const pageId = event.data?.page_id ?? (parent?.type === 'page' ? parent?.id : undefined);
   if (!threadBlockId || !pageId) {
-    emitLog(`webhook ignored: comment ${commentId} has no resolvable page/parent`);
+    emitLog(`webhook ignored: comment ${commentId} has no resolvable page/parent`, 'Notion');
     return;
   }
 
@@ -266,7 +266,7 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
       thread, discussionId: triggering?.discussionId ?? null, commentedText, dedupId: commentId,
       triggeringUserId: triggering?.authorId ?? triggeringUserId,
     });
-    if (!handled) emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`);
+    if (!handled) emitLog(`webhook discarded: no agent mentioned in comment on page ${pageId}`, 'Notion');
     return;
   }
 
@@ -325,23 +325,23 @@ async function maybeCreateTaskFromWork(
       if (!cls.task) return;
       title = cls.title?.trim() || request.slice(0, 80);
       kpis = cls.kpis?.trim() || undefined;
-    } catch (err) { emitLog(`task-from-work: classify failed: ${err instanceof Error ? err.message : 'unknown'}`); return; }
+    } catch (err) { emitLog(`task-from-work: classify failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage'); return; }
   } else {
     if (!wantsContent(request)) return;
     title = request.slice(0, 80);
   }
 
   const tasksDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
-  if (!tasksDb) { emitLog('task-from-work skipped: no tasks DB provisioned'); return; }
+  if (!tasksDb) { emitLog('task-from-work skipped: no tasks DB provisioned', 'Triage'); return; }
   const projectId = anchor.kind === 'project' ? anchor.pageId : null;
 
   let pageId = '';
   try {
     ({ pageId } = await createTaskPage(apiKey, tasksDb.notionDatabaseId, { title, kpis: kpis ?? '', projectId }));
-  } catch (err) { emitLog(`task-from-work: create failed: ${err instanceof Error ? err.message : 'unknown'}`); return; }
+  } catch (err) { emitLog(`task-from-work: create failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage'); return; }
   await safeWrite('task body', () => appendBlocks(apiKey, pageId, markdownToBlocks(request)));
   markProcessed(`triage:${pageId}`); // a creation webhook must not re-triage it
-  emitLog(`task-from-work: created "${title}" (${pageId}) from ${anchor.kind} ${anchor.pageId}`);
+  emitLog(`task-from-work: created "${title}" (${pageId}) from ${anchor.kind} ${anchor.pageId}`, 'Triage');
 
   // Tell the thread, with a real @link to the new task.
   await postAgentRich(apiKey, anchor.pageId, discussionId, [
@@ -352,7 +352,7 @@ async function maybeCreateTaskFromWork(
   try {
     const taskAnchor = await resolveAnchor(apiKey, pageId);
     await runTriage(integration, taskAnchor, { text: request, thread: [], triggeringUserId }, [], '');
-  } catch (err) { emitLog(`task-from-work: triage failed: ${err instanceof Error ? err.message : 'unknown'}`); }
+  } catch (err) { emitLog(`task-from-work: triage failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage'); }
 }
 
 /** page.* — mentions in property values / block content. On a Task = work. */
@@ -360,7 +360,7 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   const apiKey = integration.apiKey;
   const pageId = event.entity?.id;
   if (!pageId) {
-    emitLog('webhook ignored: page event carries no page id');
+    emitLog('webhook ignored: page event carries no page id', 'Notion');
     return;
   }
 
@@ -378,12 +378,12 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
       const future = ms > Date.now();
       if (schedulerOn) {
         // Single owner: the scheduler runs it (past-due is picked up within a poll).
-        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} — deferring to the scheduler`);
+        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} — deferring to the scheduler`, 'Schedule');
         return;
       }
       if (future) {
         // Can't honor a future schedule without the scheduler — defer + tell the human once.
-        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} but the scheduler is OFF — deferring`);
+        emitLog(`task ${pageId} is scheduled for ${new Date(ms).toISOString()} but the scheduler is OFF — deferring`, 'Schedule');
         const warnKey = `sched-off-warn:${pageId}`;
         if (!alreadyProcessed(warnKey)) {
           markProcessed(warnKey);
@@ -393,7 +393,7 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
         return;
       }
       // Past date + scheduler off → nothing will pick it up later; run now.
-      emitLog(`task ${pageId} has a past Scheduled For and the scheduler is off — running now`);
+      emitLog(`task ${pageId} has a past Scheduled For and the scheduler is off — running now`, 'Schedule');
     }
   }
 
@@ -485,7 +485,7 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
   if (alreadyProcessed(dedupKey)) return true; // already triaged — don't re-fire or re-log
   markProcessed(dedupKey);
 
-  if (db.select().from(agents).all().length === 0) { emitLog('triage skipped: no agents registered'); return false; }
+  if (db.select().from(agents).all().length === 0) { emitLog('triage skipped: no agents registered', 'Triage'); return false; }
 
   await runTriage(integration, anchor, {
     text: opts.text, thread: opts.thread, discussionId: opts.discussionId, commentedText: opts.commentedText,
@@ -537,7 +537,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   const agentRows = db.select().from(agents).all().filter(a => !excl.has(a.name.toLowerCase()));
   if (agentRows.length === 0) {
     await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.', true);
-    emitLog('triage: no remaining agents after exclusions');
+    emitLog('triage: no remaining agents after exclusions', 'Triage');
     return 'no-agents';
   }
 
@@ -557,7 +557,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     .map(c => c.plainText)
     .filter(t => t.trim().length > 0);
 
-  emitLog(`triage: NORC Triage Agent analyzing unassigned ${anchor.kind} ${anchor.pageId}${excludeNames.length ? ` (excluding: ${excludeNames.join(', ')})` : ''}`);
+  emitLog(`triage: NORC Triage Agent analyzing unassigned ${anchor.kind} ${anchor.pageId}${excludeNames.length ? ` (excluding: ${excludeNames.join(', ')})` : ''}`, 'Triage');
   let decision;
   try {
     decision = await triage({
@@ -570,7 +570,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       commentedText: ctx.commentedText, conversation, candidates,
     });
   } catch (err) {
-    emitLog(`triage error: ${err instanceof Error ? err.message : 'unknown'}`);
+    emitLog(`triage error: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage');
     await announce('I hit an error deciding who should take this — please assign someone manually.');
     return 'error';
   }
@@ -578,13 +578,13 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   if (decision.decision === 'ignore') {
     const msg = decision.message?.trim() || 'No one is assigned and no registered agent clearly fits this. Who should take it?';
     await announce(msg, true);
-    emitLog(`triage: no clear owner (${decision.message || 'asked'})`);
+    emitLog(`triage: no clear owner (${decision.message || 'asked'})`, 'Triage');
     return 'asked';
   }
 
   const routed = decision.agent ? matchAgentByName(decision.agent) : null;
   if (decision.decision === 'route' && routed && decision.confidence >= settings!.autoRouteThreshold) {
-    emitLog(`triage: auto-routing to "${routed.name}" (confidence ${decision.confidence.toFixed(2)})`);
+    emitLog(`triage: auto-routing to "${routed.name}" (confidence ${decision.confidence.toFixed(2)})`, 'Triage');
     const why = decision.message?.trim() || `No one was assigned, so I'm routing this.`;
     // Real @mention of the agent's Org DB page (clickable, not plain text).
     await postAgentRich(apiKey, anchor.pageId, ctx.discussionId, [
@@ -604,7 +604,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
 
   // Suggest (or "route" below threshold): ask the human to confirm — tag the human
   // and, when we resolved a candidate, @mention the agent's page too.
-  emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`);
+  emitLog(`triage: suggested ${decision.agent ?? 'none'} (confidence ${decision.confidence.toFixed(2)})`, 'Triage');
   if (routed) {
     const why = decision.message?.trim() || 'No one is assigned.';
     const segs: RichSeg[] = [];
@@ -640,7 +640,7 @@ export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
   const taskPageId = run.taskPageId;
   if (run.manageTaskStatus && taskPageId) await safeWrite('task backlog', () => setTaskStatus(apiKey, taskPageId, 'Backlog'));
 
-  emitLog(`run ${run.id} timed out — "${agentName}" didn't report back; escalating`);
+  emitLog(`run ${run.id} timed out — "${agentName}" didn't report back; escalating`, agentRow?.name ?? 'NORC');
   emitEvent({ type: 'mention.detected', data: { agentId: run.agentId, agentName, pageId: run.pageId, anchorKind: run.anchorKind } });
 
   let anchor: Anchor;
@@ -709,7 +709,7 @@ export async function proposeTasks(opts: {
     try {
       ({ pageId } = await createTaskPage(apiKey, tasksDb.notionDatabaseId, { title, kpis: t.kpis, projectId }));
     } catch (err) {
-      emitLog(`propose-tasks: failed to create "${title}": ${err instanceof Error ? err.message : 'error'}`);
+      emitLog(`propose-tasks: failed to create "${title}": ${err instanceof Error ? err.message : 'error'}`, 'Triage');
       continue;
     }
     // Put the description in the task body so the assigned agent sees it as content.
@@ -725,11 +725,11 @@ export async function proposeTasks(opts: {
         const anchor = await resolveAnchor(apiKey, pageId);
         disposition = await runTriage(integration, anchor, { text: t.description?.trim() || title, thread: [] }, [], '');
       } catch (err) {
-        emitLog(`propose-tasks: triage failed for "${title}": ${err instanceof Error ? err.message : 'error'}`);
+        emitLog(`propose-tasks: triage failed for "${title}": ${err instanceof Error ? err.message : 'error'}`, 'Triage');
       }
     }
     created.push({ id: pageId, title, disposition });
-    emitLog(`propose-tasks: created "${title}" (${pageId}) → ${disposition}`);
+    emitLog(`propose-tasks: created "${title}" (${pageId}) → ${disposition}`, 'Triage');
   }
 
   // Summarize on the source page so the human sees what the agent spun up.
@@ -752,7 +752,7 @@ export async function dispatchScheduledTask(integration: Integration, taskPageId
   const apiKey = integration.apiKey;
   let anchor: Anchor;
   try { anchor = await resolveAnchor(apiKey, taskPageId); } catch (err) {
-    emitLog(`scheduler: can't read task ${taskPageId}: ${err instanceof Error ? err.message : 'error'}`);
+    emitLog(`scheduler: can't read task ${taskPageId}: ${err instanceof Error ? err.message : 'error'}`, 'Schedule');
     return;
   }
   const props = (anchor.page as Record<string, unknown>)['properties'];
@@ -799,7 +799,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   const apiKey = integration.apiKey;
   const agentRow = db.select().from(agents).where(eq(agents.id, agentRef.agentId)).all()[0];
   if (!agentRow) {
-    emitLog(`dispatch skipped: agent "${agentRef.name}" no longer registered`);
+    emitLog(`dispatch skipped: agent "${agentRef.name}" no longer registered`, agentRef.name);
     return;
   }
   let config: Record<string, unknown>;
@@ -857,8 +857,8 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
       commentedText: opts.commentedText, pageRef,
       runBlock: runBlock('(preview)', 'EXAMPLE_RUN_TOKEN', anchor.pageId, opts.discussionId),
     });
-    emitLog(`prompt preview for "${agentRef.name}" (${adapterType}, ${system.length + prompt.length} chars) — dispatch not wired`);
-    emitLog(`prompt preview content >>> ${JSON.stringify({ system, prompt })}`);
+    emitLog(`prompt preview for "${agentRef.name}" (${adapterType}, ${system.length + prompt.length} chars) — dispatch not wired`, agentRef.name);
+    emitLog(`prompt preview content >>> ${JSON.stringify({ system, prompt })}`, agentRef.name);
     const preview =
       `🔍 **NORC prompt preview — @${agentRef.name}**\n` +
       `Dispatch for this adapter (${adapterType}) isn't wired yet, so nothing was sent. ` +
@@ -881,6 +881,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     pageId: anchor.pageId,
     taskPageId: anchor.kind === 'task' ? anchor.pageId : null,
     anchorKind: anchor.kind,
+    title: getAnyTitle((anchor.page as Record<string, unknown>)['properties']) || null,
     triggeringUserId: opts.triggeringUserId,
     manageTaskStatus: opts.manageTaskStatus,
   });
@@ -899,7 +900,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     await safeWrite('task assignee', () => setTaskAssignee(apiKey, anchor.pageId, [agentRef.orgDbPageId]));
   }
 
-  emitLog(`dispatching to "${agentRef.name}" (${adapterType}, level=${ctx.contextLevel}, via ${opts.how}, run ${runId}) on ${anchor.kind} page ${anchor.pageId}`);
+  emitLog(`dispatching to "${agentRef.name}" (${adapterType}, level=${ctx.contextLevel}, via ${opts.how}, run ${runId}) on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
   const result = await dispatch({ adapterType, config, system, prompt, agentName: agentRef.name, sessionId: anchor.pageId });
 
   if (!result.ok) {
@@ -909,7 +910,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     if (opts.manageTaskStatus) await safeWrite('task failed', () => setTaskStatus(apiKey, anchor.pageId, 'Failed'));
     await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
     finalizeRun(runId, 'failed');
-    emitLog(`dispatch failed for "${agentRef.name}": ${result.error}`);
+    emitLog(`dispatch failed for "${agentRef.name}": ${result.error}`, agentRef.name);
     return;
   }
 
@@ -917,7 +918,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   // Agent API. Leave the run in-flight (Status already In Progress, agent Busy);
   // the agent's /complete — or the timeout sweep — finalizes it.
   if (result.async) {
-    emitLog(`dispatched to "${agentRef.name}" (async) — awaiting Agent API callback on ${anchor.kind} page ${anchor.pageId} (run ${runId})`);
+    emitLog(`dispatched to "${agentRef.name}" (async) — awaiting Agent API callback on ${anchor.kind} page ${anchor.pageId} (run ${runId})`, agentRef.name);
     return;
   }
 
@@ -929,7 +930,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
       await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
       finalizeRun(runId, 'done');
     }
-    emitLog(`"${agentRef.name}" completed via Agent API on ${anchor.kind} page ${anchor.pageId}`);
+    emitLog(`"${agentRef.name}" completed via Agent API on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
     return;
   }
 
@@ -949,7 +950,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     }
     await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
     finalizeRun(runId, 'done');
-    emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`);
+    emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
     return;
   }
 
@@ -957,7 +958,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   await deliverPageReply(apiKey, anchor, opts, agentRef.name, text);
   await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
   finalizeRun(runId, 'done');
-  emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`);
+  emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
 }
 
 /**
@@ -982,13 +983,13 @@ async function handleBlockedReply(integration: Integration, anchor: Anchor, agen
       agentName: agentRef.name, reply, candidates: rosterCandidates([agentRef.name]),
     });
   } catch (err) {
-    emitLog(`outcome assessment failed: ${err instanceof Error ? err.message : 'unknown'}`);
+    emitLog(`outcome assessment failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage');
     return false;
   }
   if (assessment.outcome !== 'blocked') return false;
 
   const need = assessment.need?.trim();
-  emitLog(`"${agentRef.name}" is blocked${need ? ` (needs: ${need})` : ''} — re-routing`);
+  emitLog(`"${agentRef.name}" is blocked${need ? ` (needs: ${need})` : ''} — re-routing`, agentRef.name);
   // The attempt is over: free the agent, revert the task, close this run.
   await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
   await safeWrite('task backlog', () => setTaskStatus(apiKey, anchor.pageId, 'Backlog'));

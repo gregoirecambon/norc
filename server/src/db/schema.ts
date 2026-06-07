@@ -97,10 +97,12 @@ export const processedTriggers = sqliteTable('processed_triggers', {
 });
 
 // Durable log lines for the Logs feed — persisted so they survive page
-// refreshes and server restarts; pruned by age (24h retention), never on load.
+// refreshes and server restarts; pruned by age (3-day retention), never on load.
+// `tag` is the log source: 'NORC' (system), 'Triage', 'Schedule', 'Co-CEO', or an agent name.
 export const logs = sqliteTable('logs', {
   id:   integer('id').primaryKey({ autoIncrement: true }),
   ts:   integer('ts').notNull(),
+  tag:  text('tag').notNull().default('NORC'),
   line: text('line').notNull(),
 });
 
@@ -137,6 +139,7 @@ export const taskRuns = sqliteTable('task_runs', {
   pageId:           text('page_id').notNull(),        // the anchor page (conversation lives here)
   taskPageId:       text('task_page_id'),             // set when the anchor is a Task
   anchorKind:       text('anchor_kind').notNull(),    // 'task' | 'project' | 'page'
+  title:            text('title'),                    // page/task title snapshot at dispatch time (display only)
   triggeringUserId: text('triggering_user_id'),       // who kicked it off — @mentioned on timeout escalation
   manageTaskStatus: integer('manage_task_status', { mode: 'boolean' }).notNull().default(false),
   status:           text('status').notNull().default('in_flight'), // in_flight|done|failed|timed_out

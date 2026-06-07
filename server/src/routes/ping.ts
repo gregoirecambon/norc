@@ -50,7 +50,7 @@ router.post('/', async (req, res) => {
   }).run();
 
   const statusEmoji = result.ok ? 'OK' : 'FAIL';
-  emitLog(`agent ${row.name} ping ${statusEmoji} (${result.latencyMs}ms)${result.error ? ` — ${result.error}` : ''}`);
+  emitLog(`agent ${row.name} ping ${statusEmoji} (${result.latencyMs}ms)${result.error ? ` — ${result.error}` : ''}`, row.name);
 
   res.json({ ok: result.ok, latencyMs: result.latencyMs, agentId: id, testedAt: now, error: result.error });
 });

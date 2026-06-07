@@ -81,7 +81,7 @@ router.post('/test', async (req, res) => {
   const start = Date.now();
   const result = await testTriageConnection({ provider, apiKey, baseUrl, model });
   const latencyMs = Date.now() - start;
-  emitLog(`triage test (${provider}, ${model}): ${result.ok ? `OK (${latencyMs}ms)` : `FAILED — ${result.error}`}`);
+  emitLog(`triage test (${provider}, ${model}): ${result.ok ? `OK (${latencyMs}ms)` : `FAILED — ${result.error}`}`, 'Triage');
   res.json({ ok: result.ok, latencyMs, sample: result.text?.slice(0, 80), error: result.error });
 });
 
