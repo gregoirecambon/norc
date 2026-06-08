@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { getSettings, saveSettings, testTriageConnection, type NorcSettings } from '../../api/settings.js';
-import { provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields } from '../../api/notion.js';
+import { provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus } from '../../api/notion.js';
 import { inputStyle, labelStyle } from '../ui.js';
 
 const saveBtn = {
@@ -212,6 +212,29 @@ export function DependenciesPanel() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
       <button onClick={add} disabled={state === 'busy'} style={{ ...saveBtn, padding: '8px 14px', cursor: state === 'busy' ? 'default' : 'pointer' }}>
         {state === 'busy' ? 'Adding…' : 'Add dependency fields to Tasks DB'}
+      </button>
+      {msg && <div style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</div>}
+    </div>
+  );
+}
+
+export function BlockedStatusPanel() {
+  const [state, setState] = useState<'idle' | 'busy' | 'done' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+  const add = async () => {
+    setState('busy'); setMsg('');
+    try {
+      await provisionBlockedStatus();
+      setState('done');
+      setMsg("Tasks DB now has the 'Blocked' status — agents park work here when they need your input.");
+    } catch (err) {
+      setState('error'); setMsg(err instanceof Error ? err.message : 'Failed');
+    }
+  };
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, alignItems: 'flex-start' }}>
+      <button onClick={add} disabled={state === 'busy'} style={{ ...saveBtn, padding: '8px 14px', cursor: state === 'busy' ? 'default' : 'pointer' }}>
+        {state === 'busy' ? 'Adding…' : "Add 'Blocked' status to Tasks DB"}
       </button>
       {msg && <div style={{ fontSize: 12.5, color: state === 'error' ? 'var(--danger, #d33)' : 'var(--text-secondary)' }}>{msg}</div>}
     </div>

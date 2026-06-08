@@ -64,6 +64,9 @@ export interface AssembledContext {
   relatedBlocks: RelatedBlock[];
   /** The anchor page's actual written body (markdown-ish), not just properties. */
   bodyMarkdown: string;
+  /** The linked Project page's written body — only when the anchor is a task
+   * (when the anchor IS the project, its body is already in bodyMarkdown). */
+  projectBody: string;
   fingerprint: string;
 }
 
@@ -140,10 +143,11 @@ export async function assembleContext(args: {
     ? await resolveCompanyBlocks(apiKey, projectProps)
     : [];
 
-  // Deeper strategic relations — follow the project's other relations (Docs,
-  // Knowledge, Meetings, …) so a strategic agent sees the linked material, not
-  // just Company/Vision rows. Gated to `strategic` to keep narrower agents lean.
-  const relatedBlocks = contextLevel === 'strategic'
+  // Deeper relations — follow the project's other relations (Docs, Knowledge,
+  // Meetings, …) so the agent sees the linked material, not just the project's
+  // properties. Available from `project` clearance up: a project-level agent on a
+  // task needs the linked docs (e.g. an onboarding write-up) to do the work.
+  const relatedBlocks = contextLevel !== 'task'
     ? await resolveRelatedBlocks(apiKey, projectProps)
     : [];
 
@@ -154,8 +158,17 @@ export async function assembleContext(args: {
     bodyMarkdown = (await readPageMarkdown(apiKey, anchor.pageId, PAGE_BODY_MAX_CHARS)).trim();
   } catch { /* body is best-effort */ }
 
-  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown });
-  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown, fingerprint };
+  // The linked Project page's own body (task anchors). On a project anchor the
+  // body above already IS the project body, so only fetch when anchored on a task.
+  let projectBody = '';
+  if (contextLevel !== 'task' && projectPageId && anchor.kind === 'task') {
+    try {
+      projectBody = (await readPageMarkdown(apiKey, projectPageId, PAGE_BODY_MAX_CHARS)).trim();
+    } catch { /* project body is best-effort */ }
+  }
+
+  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown, projectBody });
+  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown, projectBody, fingerprint };
 }
 
 // Project relations handled elsewhere (Company → strategic layer) or irrelevant
@@ -294,6 +307,12 @@ export function buildPrompt(args: {
     push(projectSection(ctx.projectBlock), 3);
   } else if (ctx.projectBlock) {
     push(`[CONTEXT — level: ${ctx.contextLevel}]\n${projectSection(ctx.projectBlock)}`, 3);
+  }
+
+  // The linked project's actual written body (task anchors) — where the real
+  // material lives when the project row's properties are thin. Bulky → priority 5.
+  if (ctx.projectBody && ctx.projectBody.trim()) {
+    push(`[PROJECT CONTENT]\n${ctx.projectBody.trim()}`, 5);
   }
 
   if (ctx.taskBlock) {

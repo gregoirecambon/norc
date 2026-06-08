@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { PageHeader, Tabs, Section } from '../components/ui.js';
 import {
-  TriageAgentPanel, StrategicContextPanel, SchedulePanel, ProposalsPanel, HeartbeatPanel, DependenciesPanel,
+  TriageAgentPanel, StrategicContextPanel, SchedulePanel, ProposalsPanel, HeartbeatPanel, DependenciesPanel, BlockedStatusPanel,
 } from '../components/panels/ConfigPanels.js';
 import { ProposalsList, ScheduledTasksList } from '../components/panels/TaskViews.js';
 import { AgentHealth } from '../components/panels/AgentHealth.js';
@@ -53,6 +53,12 @@ export default function OperationsPage() {
             description="Adds a 'Depends On' relation (reverse: 'Blocks') and the 'Queued' status to your Tasks DB. A task with unmet dependencies waits and starts automatically when they're all Done; work beyond an agent's concurrent-run cap shows as Queued. Safe to re-run."
           >
             <DependenciesPanel />
+          </Section>
+          <Section
+            title="Blocked status"
+            description="Adds the 'Blocked' status to your Tasks DB. When an agent can't finish for lack of information, NORC parks the task as Blocked, @mentions you with what it needs, and never silently marks it Done. A Blocked task waits for you — it won't be re-dispatched until you hand it back (move it to Backlog or @mention an agent). Safe to re-run."
+          >
+            <BlockedStatusPanel />
           </Section>
           <Section title="Upcoming">
             <ScheduledTasksList />

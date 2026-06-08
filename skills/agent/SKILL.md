@@ -23,6 +23,10 @@ NORC sends a prompt with these sections (some may be absent):
 - **[STRATEGIC CONTEXT]** — company vision / values / strategy (only for
   `strategic`-clearance agents). Background to align your work; rarely the task.
 - **[CONTEXT — level: …]** — the project Objective / KPIs / Docs (when relevant).
+- **[PROJECT CONTENT]** — the linked project page's actual written body (where
+  the real material often lives when the project's properties are thin).
+- **[RELATED]** — short snippets of the project's linked docs / knowledge /
+  sub-pages. Fetch any of them in full with `GET <api_base>/page?pageId=<id>`.
 - **[TASK]** — the task name, status, success criteria, prior output.
 - **[COMMENTED-ON TEXT]** — the exact text a comment is attached to (inline
   comments) — i.e. what the human is reacting to.
@@ -64,7 +68,8 @@ curl -s <api_base>/page          # or <api_base>/page?pageId=<id> for another pa
                                  # ?depth=1..5 controls how deep nested blocks are read
 
 # Pull the structured context NORC assembled for this run (JSON: task, project,
-# company, related, body, contextLevel) — handy if you'd rather not parse the prompt
+# company, related, body, projectBody, contextLevel) — handy if you'd rather not
+# parse the prompt. `projectBody` is the linked project page's full written body.
 curl -s <api_base>/context
 
 # Append content into the page body (Markdown → Notion blocks)
@@ -78,6 +83,13 @@ curl -s -X POST <api_base>/status   -H 'Content-Type: application/json' \
 # Finish and free yourself (do this last)
 curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
   -d '{"status":"done","summary":"what I did"}'
+
+# Genuinely stuck — you need information only a human can give. Do NOT report
+# "done" with an "I couldn't find it" message; report BLOCKED instead. NORC sets
+# the task to Blocked, @mentions the owner with what you need, and never marks it
+# Done. Use this only after you've actually dug (see "Before you give up" below).
+curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
+  -d '{"status":"blocked","summary":"What I tried, and exactly what I need from a human to proceed"}'
 
 # Propose follow-up tasks → NORC creates them (Backlog) and triages each
 # (auto-routes to an agent when confident, else asks a human). Great for a
@@ -114,6 +126,14 @@ Decide the action by intent — especially on a non-task page:
 - **Asked a question / for feedback** → `/comment`. If `reply_discussion_id` is
   set, include it so the reply lands on the exact text; otherwise it's page-level.
 - **Finished a task** → `/status` and/or `/complete`.
+
+**Before you give up:** if the context looks thin, DIG before reporting blocked.
+Pull `GET <api_base>/context` (now includes `projectBody` + linked `related` docs),
+read the linked project page and any linked/child pages via
+`GET <api_base>/page?pageId=<id>`, and only then decide. Report `blocked` only when
+the missing information is something **only a human can supply** — not because the
+first prompt looked empty. NORC also auto-detects give-up replies, so being honest
+about a real block is always safe.
 
 **Always call `/complete` when you are done** so NORC marks the run finished and
 frees you.

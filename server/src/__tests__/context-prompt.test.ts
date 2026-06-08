@@ -63,6 +63,7 @@ describe('buildPrompt', () => {
     companyBlocks: [],
     relatedBlocks: [],
     bodyMarkdown: '',
+    projectBody: '',
     fingerprint: 'fp',
   };
 
@@ -101,7 +102,7 @@ describe('buildPrompt', () => {
   it('includes the page reference and commented-on text on a free page', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
       anchor: pageAnchor,
       priorComments: [], request: 'what do you think?', availableAgents: [],
       commentedText: 'The pricing should be $9/mo',
@@ -118,7 +119,7 @@ describe('buildPrompt', () => {
   it('omits first-visit note for a returning agent and omits page section otherwise', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
       anchor: pageAnchor, priorComments: [], request: 'hi', availableAgents: [],
       pageRef: { title: 'Pricing notes', url: null, firstVisit: false },
     });
@@ -132,7 +133,7 @@ describe('buildPrompt', () => {
       ctx: {
         contextLevel: 'strategic', systemPrompt: 'sp', taskBlock: null, projectBlock: null,
         companyBlocks: [{ name: 'North Star', type: 'Vision', content: 'Be the open Notion agent layer' }],
-        relatedBlocks: [], bodyMarkdown: '',
+        relatedBlocks: [], bodyMarkdown: '', projectBody: '',
         fingerprint: 'x',
       },
       anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
@@ -194,7 +195,7 @@ describe('buildPrompt', () => {
 
   it('omits task/conversation/agents sections when empty', () => {
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', fingerprint: 'x' },
+      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
       anchor: { kind: 'page', pageId: 'p', page: {}, parentDatabaseId: null } as Anchor,
       priorComments: [],
       request: 'hello',

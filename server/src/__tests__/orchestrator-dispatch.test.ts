@@ -81,19 +81,21 @@ vi.mock('../lib/notion-client.js', () => ({
 import { runMigrations, db } from '../db/client.js';
 import { agents, taskRuns, dispatchQueue, notionIntegration, notionDatabases, processedTriggers } from '../db/schema.js';
 import { eq, and, like } from 'drizzle-orm';
-import { requestAgentTurn, drainAgent, releaseDependents } from '../lib/orchestrator.js';
+import { requestAgentTurn, drainAgent, releaseDependents, finalizeAgentReport } from '../lib/orchestrator.js';
 import { runScheduler } from '../lib/scheduler.js';
 import { triage } from '../lib/orchestrator-agent.js';
 import { createRun, finalizeRun } from '../lib/runs.js';
 import { pendingCount, pendingItems } from '../lib/dispatch-queue.js';
 import { dispatch } from '../adapters/index.js';
-import { setTaskStatus } from '../lib/notion-writeback.js';
+import { setTaskStatus, postComment, setAgentStatus } from '../lib/notion-writeback.js';
 import { listThreadComments } from '../lib/notion-anchor.js';
 import { assembleContext } from '../lib/context-assembler.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 
 const dispatchMock = vi.mocked(dispatch);
 const setTaskStatusMock = vi.mocked(setTaskStatus);
+const postCommentMock = vi.mocked(postComment);
+const setAgentStatusMock = vi.mocked(setAgentStatus);
 const listThreadMock = vi.mocked(listThreadComments);
 const assembleMock = vi.mocked(assembleContext);
 
@@ -155,6 +157,8 @@ beforeEach(() => {
   dispatchMock.mockClear();
   dispatchMock.mockResolvedValue({ ok: true, supported: true, text: 'done by agent' });
   setTaskStatusMock.mockClear();
+  postCommentMock.mockClear();
+  setAgentStatusMock.mockClear();
   listThreadMock.mockClear();
   assembleMock.mockClear();
   addAgent('a1', 'alpha', 1);
@@ -358,6 +362,54 @@ describe('runScheduler — dependency hold', () => {
       .where(and(eq(processedTriggers.triggerKey, `schedule:sch-1:${due}`)))
       .all();
     expect(occ.length).toBe(1);
+  });
+});
+
+// ─── Async completion (Agent API /complete) ───────────────────────────────────
+
+describe('finalizeAgentReport', () => {
+  function inflightRun(pageId: string) {
+    const { id } = createRun({ agentId: 'a1', pageId, taskPageId: pageId, anchorKind: 'task', projectId: null, manageTaskStatus: true });
+    return db.select().from(taskRuns).where(eq(taskRuns.id, id)).all()[0]!;
+  }
+  const runStatus = (id: string) => db.select().from(taskRuns).where(eq(taskRuns.id, id)).all()[0]!.status;
+
+  it('done with a summary → posts it, marks the task Done, frees the agent, finalizes done', async () => {
+    setTaskAnchor('tb-done');
+    const run = inflightRun('tb-done');
+    await finalizeAgentReport(run, { status: 'done', summary: 'shipped the thing' });
+    expect(setTaskStatusMock).toHaveBeenCalledWith('k', 'tb-done', 'Done');
+    expect(postCommentMock.mock.calls.some(c => String(c[2]).includes('shipped the thing'))).toBe(true);
+    expect(setAgentStatusMock).toHaveBeenCalledWith('k', 'org-a1', 'Available');
+    expect(runStatus(run.id)).toBe('done');
+  });
+
+  it('done with NO summary → still posts a visible completion comment', async () => {
+    setTaskAnchor('tb-nosum');
+    const run = inflightRun('tb-nosum');
+    await finalizeAgentReport(run, { status: 'done' });
+    expect(setTaskStatusMock).toHaveBeenCalledWith('k', 'tb-nosum', 'Done');
+    expect(postCommentMock.mock.calls.some(c => String(c[2]).includes('completed this task'))).toBe(true);
+  });
+
+  it('blocked → parks the task as Blocked with the need, never marks it Done', async () => {
+    setTaskAnchor('tb-blocked');
+    const run = inflightRun('tb-blocked');
+    await finalizeAgentReport(run, { status: 'blocked', summary: 'need the onboarding doc' });
+    expect(setTaskStatusMock).toHaveBeenCalledWith('k', 'tb-blocked', 'Blocked');
+    expect(setTaskStatusMock).not.toHaveBeenCalledWith('k', 'tb-blocked', 'Done');
+    expect(postCommentMock.mock.calls.some(c =>
+      String(c[2]).includes('blocked') && String(c[2]).includes('need the onboarding doc'))).toBe(true);
+    expect(setAgentStatusMock).toHaveBeenCalledWith('k', 'org-a1', 'Available');
+    expect(runStatus(run.id)).toBe('done'); // run closed → agent freed
+  });
+
+  it('failed → marks the task Failed and finalizes failed', async () => {
+    setTaskAnchor('tb-failed');
+    const run = inflightRun('tb-failed');
+    await finalizeAgentReport(run, { status: 'failed', summary: 'broke' });
+    expect(setTaskStatusMock).toHaveBeenCalledWith('k', 'tb-failed', 'Failed');
+    expect(runStatus(run.id)).toBe('failed');
   });
 });
 

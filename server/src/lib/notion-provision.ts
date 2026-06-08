@@ -111,16 +111,19 @@ const dualRelation = (databaseId: string) => ({
 // 'Queued' for work waiting in an agent's dispatch queue, and 'Proposed' for
 // NORC co-CEO proposals awaiting human validation). Kept as a constant so
 // provisioning + the additive patch agree.
-export const TASK_STATUS_OPTIONS = ['Draft', 'Backlog', 'Queued', 'In Progress', 'Done', 'Failed', 'Proposed'] as const;
+// 'Blocked' parks a task an agent couldn't finish for lack of info — it waits on a
+// human and NORC never re-dispatches it (inert) until the human hands it back.
+export const TASK_STATUS_OPTIONS = ['Draft', 'Backlog', 'Queued', 'In Progress', 'Done', 'Failed', 'Proposed', 'Blocked'] as const;
 
 // Statuses NORC never acts on: empty (a half-drafted row — Notion's default for a
-// new task), 'Draft' (explicitly parked by a human), and 'Proposed' (a co-CEO
-// proposal awaiting validation). Tasks in these states are invisible to every
-// executor — the assignment webhook, the triage auto-route, and the scheduler
-// (one-shots AND recurring templates). Set Status to 'Backlog' to hand a task over.
+// new task), 'Draft' (explicitly parked by a human), 'Proposed' (a co-CEO proposal
+// awaiting validation), and 'Blocked' (an agent parked it pending human input).
+// Tasks in these states are invisible to every executor — the assignment webhook,
+// the triage auto-route, and the scheduler (one-shots AND recurring templates).
+// Set Status to 'Backlog' to hand a task over.
 export function isInertTaskStatus(status: string | null | undefined): boolean {
   const s = (status ?? '').trim();
-  return s === '' || s === 'Draft' || s === 'Proposed';
+  return s === '' || s === 'Draft' || s === 'Proposed' || s === 'Blocked';
 }
 
 // --- Phase 1: base (non-relation) property schemas ------------------------
@@ -239,6 +242,15 @@ export async function provisionSchedulingFields(apiKey: string, tasksDatabaseId:
     'Recurrence': sel('None', 'Daily', 'Weekdays', 'Weekly', 'Monthly'),
     'Repeat Every (days)': num(),
   });
+}
+
+/**
+ * Additively add the 'Blocked' Status option to an already-provisioned Tasks DB.
+ * Idempotent — updateDatabase is a PATCH and Notion merges select options by name,
+ * so existing options and rows are preserved.
+ */
+export async function provisionBlockedStatus(apiKey: string, tasksDatabaseId: string): Promise<void> {
+  await updateDatabase(apiKey, tasksDatabaseId, { 'Status': sel(...TASK_STATUS_OPTIONS) });
 }
 
 async function getDatabase(apiKey: string, databaseId: string): Promise<Record<string, unknown>> {

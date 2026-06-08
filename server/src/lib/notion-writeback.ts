@@ -182,7 +182,7 @@ export async function appendBlocks(apiKey: string, pageId: string, blocks: Recor
   }
 }
 
-export type TaskStatus = 'Backlog' | 'Queued' | 'In Progress' | 'Done' | 'Failed';
+export type TaskStatus = 'Backlog' | 'Queued' | 'In Progress' | 'Done' | 'Failed' | 'Blocked';
 
 /** Set a Task page's Status select. */
 export async function setTaskStatus(apiKey: string, taskPageId: string, status: TaskStatus): Promise<void> {

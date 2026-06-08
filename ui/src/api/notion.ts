@@ -75,6 +75,15 @@ export async function provisionDependencyFields(): Promise<{ ok: boolean }> {
   return res.json() as Promise<{ ok: boolean }>;
 }
 
+export async function provisionBlockedStatus(): Promise<{ ok: boolean }> {
+  const res = await fetch('/api/notion/provision/blocked-status', { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
+    throw new Error(body.message ?? body.error ?? `${res.status}`);
+  }
+  return res.json() as Promise<{ ok: boolean }>;
+}
+
 export async function saveNotionKey(apiKey: string): Promise<NotionIntegration> {
   const res = await fetch('/api/notion/key', {
     method: 'POST',

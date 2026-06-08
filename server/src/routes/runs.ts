@@ -8,9 +8,9 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { notionIntegration, agents, orchestratorComments } from '../db/schema.js';
 import { emitLog } from '../lib/logger.js';
-import { getActiveRunByToken, markActed, finalizeRun, type TaskRun } from '../lib/runs.js';
+import { getActiveRunByToken, markActed, type TaskRun } from '../lib/runs.js';
 import {
-  postComment, postCommentReply, appendBlocks, setTaskStatus, setTaskFields, setAgentStatus,
+  postComment, postCommentReply, appendBlocks, setTaskStatus, setTaskFields,
   type TaskStatus,
 } from '../lib/notion-writeback.js';
 import { markdownToBlocks } from '../lib/notion-blocks-md.js';
@@ -18,7 +18,7 @@ import { readPageMarkdown, resolveAnchor } from '../lib/notion-anchor.js';
 import { getAnyTitle, getSelect } from '../lib/notion-props.js';
 import { notionGet, notionPost, notionQuery } from '../lib/notion-client.js';
 import { assembleContext, type ContextLevel } from '../lib/context-assembler.js';
-import { proposeTasks, releaseDependents } from '../lib/orchestrator.js';
+import { proposeTasks, releaseDependents, finalizeAgentReport } from '../lib/orchestrator.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 
 /** Open Notion search/query is opt-in (off by default) and strategic-only. */
@@ -169,6 +169,7 @@ export function makeRunsRouter(): ExpressRouter {
         company: ctx.companyBlocks,
         related: ctx.relatedBlocks,
         body: ctx.bodyMarkdown,
+        projectBody: ctx.projectBody,
       });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
@@ -314,27 +315,16 @@ export function makeRunsRouter(): ExpressRouter {
     }
   });
 
-  // POST /api/runs/:token/complete  { status: 'done'|'failed', summary? }
+  // POST /api/runs/:token/complete  { status: 'done'|'failed'|'blocked', summary? }
+  // Delegates to the shared orchestrator finalizer, which ALWAYS posts a visible
+  // comment, drives task status, and parks give-up / blocked reports for a human
+  // (so a "can't do it" report never silently flips the task to Done).
   r.post('/:token/complete', async (req, res) => {
-    const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
+    const { run } = req as unknown as { run: TaskRun; apiKey: string };
     const { status, summary } = req.body as { status?: string; summary?: string };
-    const ok = status !== 'failed';
+    markActed(run.id);
     try {
-      if (typeof summary === 'string' && summary.trim()) {
-        await recordOurComment(apiKey, run.pageId, summary.trim());
-      }
-      if (run.manageTaskStatus && run.taskPageId) {
-        await setTaskStatus(apiKey, run.taskPageId, ok ? 'Done' : 'Failed');
-        if (typeof summary === 'string' && summary.trim()) {
-          await setTaskFields(apiKey, run.taskPageId, { agentOutput: summary.trim() });
-        }
-        if (ok) releaseAfterDone(run.taskPageId);
-      }
-      const agentRow = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
-      if (agentRow?.orgDbPageId) await setAgentStatus(apiKey, agentRow.orgDbPageId, 'Available');
-      markActed(run.id);
-      finalizeRun(run.id, ok ? 'done' : 'failed');
-      emitLog(`agent API: run ${run.id} completed (${ok ? 'done' : 'failed'})`, agentRow?.name ?? 'NORC');
+      await finalizeAgentReport(run, { status, summary });
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });

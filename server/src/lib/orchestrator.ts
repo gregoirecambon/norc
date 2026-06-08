@@ -782,6 +782,103 @@ export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
 }
 
 /**
+ * Park a task an agent couldn't finish for lack of human input: free the agent,
+ * set the task to 'Blocked' (inert — NORC won't re-dispatch it), and @mention the
+ * human with what's needed so they can unblock it. Closes this run (the attempt is
+ * over); the human hands it back by mentioning an agent or moving Status to Backlog.
+ */
+async function parkTaskBlocked(args: {
+  apiKey: string;
+  anchor: Anchor;
+  agentName: string;
+  agentOrgDbPageId?: string | null;
+  runId: string;
+  manageTaskStatus: boolean;
+  need: string;
+  triggeringUserId?: string | null;
+}): Promise<void> {
+  const { apiKey, anchor, agentName, agentOrgDbPageId, runId, manageTaskStatus, need, triggeringUserId } = args;
+  if (agentOrgDbPageId) await safeWrite('agent available', () => setAgentStatus(apiKey, agentOrgDbPageId, 'Available'));
+  if (manageTaskStatus) await safeWrite('task blocked', () => setTaskStatus(apiKey, anchor.pageId, 'Blocked'));
+  const who = triggeringUserId ?? pageCreatedById(anchor.page as Record<string, unknown>);
+  const detail = need.trim() ? `\n\n_Needs:_ ${need.trim()}` : '';
+  await safeWrite('blocked notice', () => postAgentComment(apiKey, anchor.pageId,
+    `🚧 **@${agentName}** is blocked and needs your input before this can continue.${detail}`, who));
+  finalizeRun(runId, 'done');
+  emitLog(`"${agentName}" parked ${anchor.kind} ${anchor.pageId} as Blocked — pinged human`, agentName);
+}
+
+/**
+ * The async (Agent API) completion path — an openclaw agent reported back via
+ * POST /runs/:token/complete. Mirrors the sync completion in runAgentTurn: it
+ * ALWAYS leaves a visible Notion comment, drives task status, and — parity with
+ * the sync handleBlockedReply — catches give-up / blocked reports and parks the
+ * task for a human instead of silently marking it Done.
+ */
+export async function finalizeAgentReport(run: TaskRun, report: { status?: string; summary?: string }): Promise<void> {
+  const integration = db.select().from(notionIntegration).all()[0] ?? null;
+  if (!integration || integration.status !== 'active') return;
+  const apiKey = integration.apiKey;
+
+  const agentRow = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
+  const agentName = agentRow?.name ?? 'NORC';
+  const orgDbPageId = agentRow?.orgDbPageId ?? null;
+  const manageTaskStatus = run.manageTaskStatus && !!run.taskPageId;
+  const summary = typeof report.summary === 'string' ? report.summary.trim() : '';
+  const reported: 'done' | 'failed' | 'blocked' =
+    report.status === 'failed' ? 'failed' : report.status === 'blocked' ? 'blocked' : 'done';
+
+  // Resolve the anchor so we can @mention the right human if we park it.
+  let anchor: Anchor | null = null;
+  try { anchor = await resolveAnchor(apiKey, run.pageId); } catch { /* park falls back below */ }
+
+  // A "done" report can really be a give-up. When triage is configured, assess it
+  // (parity with the sync path) and treat a blocked verdict as a block.
+  let outcome: 'done' | 'failed' | 'blocked' = reported;
+  let need = summary;
+  if (reported === 'done' && manageTaskStatus && anchor) {
+    const settings = getNorcSettings();
+    if (triageConfigured(settings) && summary) {
+      try {
+        const assessment = await assessOutcome({
+          provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+          apiKey: settings!.orchestratorApiKey ?? '', baseUrl: settings!.orchestratorBaseUrl, model: settings!.orchestratorModel,
+          task: getAnyTitle((anchor.page as Record<string, unknown>)['properties']),
+          agentName, reply: summary, candidates: rosterCandidates([agentName]),
+        });
+        if (assessment.outcome === 'blocked') { outcome = 'blocked'; need = assessment.need?.trim() || summary; }
+      } catch (err) {
+        emitLog(`outcome assessment failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage');
+      }
+    }
+  }
+
+  if (outcome === 'blocked' && anchor) {
+    await parkTaskBlocked({
+      apiKey, anchor, agentName, agentOrgDbPageId: orgDbPageId, runId: run.id,
+      manageTaskStatus, need, triggeringUserId: run.triggeringUserId,
+    });
+    return;
+  }
+
+  // Done / failed: always leave a visible comment, then drive status + free agent.
+  const ok = outcome === 'done';
+  const body = summary
+    ? `**@${agentName}**\n\n${summary}`
+    : (ok ? `✅ **@${agentName}** completed this task.` : `⚠️ **@${agentName}** reported it couldn't complete this task.`);
+  await safeWrite('completion comment', () => postAgentComment(apiKey, run.pageId, body));
+
+  if (manageTaskStatus && run.taskPageId) {
+    await safeWrite('task status', () => setTaskStatus(apiKey, run.taskPageId!, ok ? 'Done' : 'Failed'));
+    if (summary) await safeWrite('agent output', () => setTaskFields(apiKey, run.taskPageId!, { agentOutput: summary }));
+    if (ok) void releaseDependents(integration, run.taskPageId).catch(() => {});
+  }
+  if (orgDbPageId) await safeWrite('agent available', () => setAgentStatus(apiKey, orgDbPageId, 'Available'));
+  finalizeRun(run.id, ok ? 'done' : 'failed');
+  emitLog(`agent API: run ${run.id} completed (${ok ? 'done' : 'failed'})`, agentName);
+}
+
+/**
  * A task just completed — release any task that "Depends On" it and is now
  * fully unblocked. Hooked everywhere a task transitions to Done (NORC's sync
  * path, the Agent API /complete and /status routes, and manual human flips via
@@ -1426,6 +1523,10 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     await safeWrite('task in-progress', () => setTaskStatus(apiKey, anchor.pageId, 'In Progress'));
     // Reflect the assignment natively so the task shows who's on it.
     await safeWrite('task assignee', () => setTaskAssignee(apiKey, anchor.pageId, [agentRef.orgDbPageId]));
+    // Tell the human, in Notion, that NORC handed this off — so the dispatch and
+    // its context level are visible (not just in the internal log).
+    await safeWrite('dispatch notice', () => postAgentComment(apiKey, anchor.pageId,
+      `🛰️ **NORC** dispatched this to **@${agentRef.name}** (context: ${ctx.contextLevel}). Working on it…`));
   }
 
   // Chat-lane turns get their own session so a parallel conversation never

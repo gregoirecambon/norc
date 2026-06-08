@@ -46,9 +46,10 @@ describe('isInertTaskStatus', () => {
     expect(isInertTaskStatus(undefined)).toBe(true);
   });
 
-  it('Draft and Proposed are inert (parked by a human / awaiting validation)', () => {
+  it('Draft, Proposed and Blocked are inert (parked / awaiting human)', () => {
     expect(isInertTaskStatus('Draft')).toBe(true);
     expect(isInertTaskStatus('Proposed')).toBe(true);
+    expect(isInertTaskStatus('Blocked')).toBe(true);
   });
 
   it('active lifecycle statuses are not inert', () => {
@@ -64,7 +65,7 @@ describe('isInertTaskStatus', () => {
 
   it('every inert status is a provisioned select option (except empty)', () => {
     const opts = new Set<string>(TASK_STATUS_OPTIONS);
-    for (const s of ['Draft', 'Proposed']) expect(opts.has(s)).toBe(true);
+    for (const s of ['Draft', 'Proposed', 'Blocked']) expect(opts.has(s)).toBe(true);
   });
 
   it("'Queued' is a provisioned select option", () => {

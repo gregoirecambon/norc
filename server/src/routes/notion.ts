@@ -8,7 +8,7 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
-import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields } from '../lib/notion-provision.js';
+import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus } from '../lib/notion-provision.js';
 
 const router: ExpressRouter = Router();
 
@@ -259,6 +259,30 @@ router.post('/provision/dependencies', async (_req, res) => {
     return;
   }
   emitLog('Tasks DB dependency fields provisioned (Depends On / Blocks relation + Queued status)');
+  res.status(200).json({ ok: true });
+});
+
+// POST /api/notion/provision/blocked-status — additively add the 'Blocked' Status
+// option to the Tasks DB (an agent parks work here when it needs human input).
+// Idempotent — safe to re-run.
+router.post('/provision/blocked-status', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the workspace first.' });
+    return;
+  }
+  const tasks = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
+  if (!tasks) {
+    res.status(400).json({ error: 'no_tasks_db', message: 'No Tasks database recorded.' });
+    return;
+  }
+  try {
+    await provisionBlockedStatus(integration.apiKey, tasks.notionDatabaseId);
+  } catch (err) {
+    res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
+    return;
+  }
+  emitLog('Tasks DB Blocked status provisioned');
   res.status(200).json({ ok: true });
 });
 
