@@ -1,7 +1,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { WebSocketServer, type WebSocket as WsType } from 'ws';
 import type { AddressInfo } from 'node:net';
-import { dispatchOpenclaw, generateWsKeypair } from '../adapters/openclaw.js';
+import { dispatchOpenclaw, probeOpenclawRun, generateWsKeypair } from '../adapters/openclaw.js';
 
 // A fake OpenClaw gateway. Modes:
 //  - 'result':  agent res carries result.text (sync answer)
@@ -78,6 +78,24 @@ describe('dispatchOpenclaw (WebSocket)', () => {
     expect(res.ok).toBe(true);
     expect(res.text).toBe('captured reply');
     expect(res.async).toBeUndefined();
+    expect(res.openclawRunId).toBe('run-1'); // surfaced for later liveness probing
+  });
+
+  it('surfaces the OpenClaw run handle on the async path (stall → no reply captured)', async () => {
+    gateway = await startFakeGateway('stall');
+    const res = await dispatchOpenclaw(
+      { url: gateway.url, ...keypairConfig() }, 'emilien', 'SYS', 'do the thing', 'page-1',
+      { captureMs: 500 },
+    );
+    expect(res.async).toBe(true);
+    expect(res.openclawRunId).toBe('run-1');
+  });
+
+  it('has no run handle on a bare ACK (no runId)', async () => {
+    gateway = await startFakeGateway('ack');
+    const res = await dispatchOpenclaw({ url: gateway.url, ...keypairConfig() }, 'emilien', 'SYS', 'do the thing', 'page-1');
+    expect(res.async).toBe(true);
+    expect(res.openclawRunId).toBeNull();
   });
 
   it('healthcheck dispatches use the stable healthcheck session and honour captureMs', async () => {
@@ -107,5 +125,70 @@ describe('dispatchOpenclaw (config guards)', () => {
     expect(res.ok).toBe(false);
     expect(res.supported).toBe(true);
     expect(res.error).toContain('authToken');
+  });
+});
+
+// A fake gateway that answers a standalone agent.wait probe with a chosen status
+// (null = never answers, simulating a still-blocking run).
+function startProbeGateway(status: string | null): Promise<{ url: string; close: () => void }> {
+  return new Promise(resolve => {
+    const wss = new WebSocketServer({ port: 0 }, () => {
+      const port = (wss.address() as AddressInfo).port;
+      resolve({ url: `ws://127.0.0.1:${port}`, close: () => wss.close() });
+    });
+    wss.on('connection', (ws: WsType) => {
+      ws.send(JSON.stringify({ type: 'event', event: 'connect.challenge', payload: { nonce: 'nonce-1' } }));
+      ws.on('message', raw => {
+        const frame = JSON.parse(raw.toString());
+        if (frame.method === 'connect') {
+          ws.send(JSON.stringify({ type: 'res', id: frame.id, ok: true }));
+        } else if (frame.method === 'agent.wait') {
+          if (status === null) return; // never answers — the probe's own ceiling fires
+          ws.send(JSON.stringify({ type: 'res', id: frame.id, ok: true, payload: { runId: frame.params.runId, status } }));
+        }
+      });
+    });
+  });
+}
+
+describe('probeOpenclawRun (confirm-before-kill)', () => {
+  let gw: { url: string; close: () => void } | null = null;
+  afterEach(() => { gw?.close(); gw = null; delete process.env['NORC_OPENCLAW_PROBE_MS']; delete process.env['NORC_PROBE']; });
+
+  it('reports DEAD on a terminal status (run finished without reporting back)', async () => {
+    gw = await startProbeGateway('ok');
+    const res = await probeOpenclawRun({ url: gw.url, ...keypairConfig() }, 'run-1');
+    expect(res.alive).toBe(false);
+    expect(res.status).toBe('ok');
+  });
+
+  it('reports ALIVE on a non-terminal status (still running)', async () => {
+    gw = await startProbeGateway('running');
+    const res = await probeOpenclawRun({ url: gw.url, ...keypairConfig() }, 'run-1');
+    expect(res.alive).toBe(true);
+  });
+
+  it('fails open (ALIVE) when the gateway never answers (blocking run)', async () => {
+    process.env['NORC_OPENCLAW_PROBE_MS'] = '150'; // ceiling ~190ms, keeps the test fast
+    gw = await startProbeGateway(null);
+    const res = await probeOpenclawRun({ url: gw.url, ...keypairConfig() }, 'run-1');
+    expect(res.alive).toBe(true);
+  });
+
+  it('fails open (ALIVE) when the gateway is unreachable', async () => {
+    const res = await probeOpenclawRun({ url: 'ws://127.0.0.1:1', ...keypairConfig() }, 'run-1');
+    expect(res.alive).toBe(true);
+  });
+
+  it('fails open (ALIVE) when no WS keypair is configured (cannot probe)', async () => {
+    const res = await probeOpenclawRun({ url: 'ws://127.0.0.1:1' }, 'run-1');
+    expect(res.alive).toBe(true);
+  });
+
+  it('NORC_PROBE=0 disables probing (reports dead → caller uses pure idle-timeout)', async () => {
+    process.env['NORC_PROBE'] = '0';
+    gw = await startProbeGateway('running');
+    const res = await probeOpenclawRun({ url: gw.url, ...keypairConfig() }, 'run-1');
+    expect(res.alive).toBe(false);
   });
 });

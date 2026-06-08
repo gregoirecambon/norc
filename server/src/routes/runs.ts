@@ -8,7 +8,7 @@ import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { notionIntegration, agents, orchestratorComments } from '../db/schema.js';
 import { emitLog } from '../lib/logger.js';
-import { getActiveRunByToken, markActed, type TaskRun } from '../lib/runs.js';
+import { getActiveRunByToken, markActed, touchRun, type TaskRun } from '../lib/runs.js';
 import {
   postComment, postCommentReply, appendBlocks, setTaskStatus, setTaskFields,
   type TaskStatus,
@@ -104,6 +104,12 @@ export function makeRunsRouter(): ExpressRouter {
     if (!run) { res.status(404).json({ error: 'invalid_or_expired_token' }); return; }
     const apiKey = activeApiKey();
     if (!apiKey) { res.status(503).json({ error: 'notion_not_active' }); return; }
+    // Proof of life: any authenticated Agent-API call (read OR write) means the
+    // agent is alive and working — bump the run's liveness clock so the timeout
+    // sweep measures silence, not age. This covers the read endpoints
+    // (context/page/resource/assist) that don't markActed but are the strongest
+    // signal the agent is mid-task.
+    touchRun(run.id);
     (req as unknown as { run: TaskRun; apiKey: string }).run = run;
     (req as unknown as { run: TaskRun; apiKey: string }).apiKey = apiKey;
     next();

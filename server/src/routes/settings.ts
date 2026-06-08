@@ -18,6 +18,7 @@ function safe(s: NorcSettings) {
     orchestratorSystemPrompt: s.orchestratorSystemPrompt,
     autoRouteThreshold: s.autoRouteThreshold,
     runTimeoutSec: s.runTimeoutSec,
+    runHardCapSec: s.runHardCapSec,
     heartbeatEnabled: s.heartbeatEnabled,
     heartbeatIntervalSec: s.heartbeatIntervalSec,
     deepPingEnabled: s.deepPingEnabled,
@@ -56,6 +57,7 @@ router.post('/', (req, res) => {
   if ('orchestratorSystemPrompt' in b) patch['orchestratorSystemPrompt'] = typeof b['orchestratorSystemPrompt'] === 'string' ? b['orchestratorSystemPrompt'] : null;
   if (typeof b['autoRouteThreshold'] === 'number') patch['autoRouteThreshold'] = Math.max(0, Math.min(1, b['autoRouteThreshold']));
   if (typeof b['runTimeoutSec'] === 'number' && b['runTimeoutSec'] >= 60) patch['runTimeoutSec'] = Math.floor(b['runTimeoutSec']);
+  if (typeof b['runHardCapSec'] === 'number' && b['runHardCapSec'] >= 60) patch['runHardCapSec'] = Math.floor(b['runHardCapSec']);
   if (typeof b['heartbeatEnabled'] === 'boolean') patch['heartbeatEnabled'] = b['heartbeatEnabled'];
   if (typeof b['heartbeatIntervalSec'] === 'number' && b['heartbeatIntervalSec'] >= 10) patch['heartbeatIntervalSec'] = Math.floor(b['heartbeatIntervalSec']);
   if (typeof b['deepPingEnabled'] === 'boolean') patch['deepPingEnabled'] = b['deepPingEnabled'];

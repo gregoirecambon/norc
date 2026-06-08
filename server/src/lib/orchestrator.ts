@@ -30,7 +30,7 @@ import { getAnyTitle, getRelationIds, getDate, getSelect } from './notion-props.
 import { isInertTaskStatus } from './notion-provision.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
-import { createRun, getRun, finalizeRun, hasPriorRunOnPage, timedOutAgentIdsForPage, activeRunCount, hasRunConflict, type TaskRun } from './runs.js';
+import { createRun, getRun, finalizeRun, setOpenclawRunId, hasPriorRunOnPage, timedOutAgentIdsForPage, activeRunCount, hasRunConflict, type TaskRun } from './runs.js';
 import { enqueueTurn, nextEligible, claimAndCheck, dropItem, dropPendingForAgentPage, agentsWithPending, pendingCount, type QueuedTurn, type DispatchQueueRow } from './dispatch-queue.js';
 import { unmetDependencies, detectDependencyCycle, getDependsOnIds } from './task-deps.js';
 import { notionQuery } from './notion-client.js';
@@ -1552,6 +1552,9 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
   // Agent API. Leave the run in-flight (Status already In Progress, agent Busy);
   // the agent's /complete — or the timeout sweep — finalizes it.
   if (result.async) {
+    // Persist the OpenClaw run handle so the timeout sweep can probe liveness
+    // (agent.wait) before escalating — confirm-before-kill.
+    if (result.openclawRunId) setOpenclawRunId(runId, result.openclawRunId);
     emitLog(`dispatched to "${agentRef.name}" (async) — awaiting Agent API callback on ${anchor.kind} page ${anchor.pageId} (run ${runId})`, agentRef.name);
     return;
   }

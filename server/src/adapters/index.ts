@@ -29,6 +29,9 @@ export interface DispatchResult {
   async?: boolean;
   text?: string;
   error?: string;
+  /** OpenClaw-side run handle (when known) — persisted so the timeout sweep can
+   * probe the run's liveness (agent.wait) before escalating. */
+  openclawRunId?: string | null;
 }
 
 export interface DispatchArgs {

@@ -501,12 +501,14 @@ export async function dispatchOpenclaw(
     : `agent:${ocAgentId}:norc:task:${idKey}`;
 
   try {
-    const text = keypair
+    // The WS path can surface the OpenClaw run handle (for later liveness probing);
+    // the HTTP path is synchronous request/response with no run handle.
+    const { text, openclawRunId } = keypair
       ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName, sessionKey, captureMs, authToken)
-      : await dispatchViaHttp(wsUrl, authToken, ocAgentId, message, sessionKey, captureMs);
-    if (text && text.trim()) return { ok: true, supported: true, text: text.trim() };
+      : { text: await dispatchViaHttp(wsUrl, authToken, ocAgentId, message, sessionKey, captureMs), openclawRunId: null };
+    if (text && text.trim()) return { ok: true, supported: true, text: text.trim(), openclawRunId };
     // Bare ACK — the agent will report back via the Agent API.
-    return { ok: true, supported: true, async: true };
+    return { ok: true, supported: true, async: true, openclawRunId };
   } catch (err) {
     return { ok: false, supported: true, error: err instanceof Error ? err.message : 'OpenClaw dispatch failed' };
   }
@@ -535,23 +537,26 @@ async function dispatchViaWebSocket(
   sessionKey: string,
   captureMs: number,
   authToken: string | null,
-): Promise<string> {
+): Promise<{ text: string; openclawRunId: string | null }> {
   const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES, authToken);
   const subId = randomUUID();
   const reqId = randomUUID();
   const waitId = randomUUID();
 
-  return await new Promise<string>((resolve, reject) => {
+  return await new Promise<{ text: string; openclawRunId: string | null }>((resolve, reject) => {
     let settled = false;
     let latestAssistant = '';
     let ackText = '';
+    // The OpenClaw-side run handle from the agent ACK — surfaced so the caller can
+    // persist it for later liveness probing (agent.wait), even on the async path.
+    let capturedRunId: string | null = null;
 
     const finish = (text: string) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
       try { ws.close(); } catch { /* */ }
-      resolve(text);
+      resolve({ text, openclawRunId: capturedRunId });
     };
     const fail = (err: Error) => {
       if (settled) return;
@@ -599,6 +604,7 @@ async function dispatchViaWebSocket(
         // Otherwise wait for the run to complete, capturing session messages.
         const runId = asRecord(frame['payload'])?.['runId'];
         if (typeof runId === 'string' && runId) {
+          capturedRunId = runId;
           ws.send(JSON.stringify({ type: 'req', id: waitId, method: 'agent.wait', params: { runId, timeoutMs: captureMs } }));
         } else {
           // Bare ACK with no run handle — nothing to capture; treat as async.
@@ -658,6 +664,80 @@ async function dispatchViaHttp(
     throw new Error(`OpenClaw HTTP ${response.status}: ${text.slice(0, 200)}`);
   }
   return extractChatCompletionText(await response.json().catch(() => null));
+}
+
+// ─── Liveness probe ─────────────────────────────────────────────────────────────
+
+// agent.wait statuses that mean the run is NO LONGER executing (terminal). ONLY
+// these mark a run dead; every other / unknown / absent status — and any transport
+// failure — is treated as ALIVE (fail-open), because falsely killing a working
+// agent is the exact bug this probe exists to prevent. Confirmed tokens: 'accepted'
+// (ACK, still running) and 'ok' (terminal success) per the fake gateway in
+// openclaw-dispatch.test.ts:42. The rest are defensive synonyms.
+const TERMINAL_WAIT_STATUSES = new Set([
+  'ok', 'done', 'complete', 'completed', 'success', 'succeeded',
+  'error', 'failed', 'failure', 'cancelled', 'canceled',
+  'not_found', 'unknown', 'expired',
+]);
+
+/**
+ * Ask an OpenClaw gateway whether a dispatched run is still executing, by
+ * re-issuing agent.wait against its run handle. The timeout sweep uses this to
+ * confirm-before-kill: a still-running agent gets its deadline extended instead of
+ * escalated. FAIL-OPEN — any ambiguity (unknown/absent status, no answer in time,
+ * unreachable gateway, no WS keypair) returns alive:true so a probe never
+ * false-kills. NORC_PROBE=0 disables probing (returns alive:false → caller falls
+ * back to pure idle-timeout).
+ */
+export async function probeOpenclawRun(
+  config: Record<string, unknown>,
+  ocRunId: string,
+): Promise<{ alive: boolean; status?: string }> {
+  if (process.env['NORC_PROBE'] === '0' || process.env['NORC_PROBE'] === 'false') return { alive: false };
+  const wsUrl = typeof config['url'] === 'string' ? config['url'].trim() : '';
+  const keypair = readKeypairFromConfig(config);
+  // No URL or no WS keypair → can't probe; fail-open (the hard cap still bounds it).
+  if (!wsUrl || !keypair) return { alive: true };
+  const authToken = typeof config['authToken'] === 'string' ? config['authToken'] : null;
+  // How long agent.wait may block before we give up and assume still-running
+  // (fail-open). Read per-call so tests can shorten it; production default 8s.
+  const probeWaitMs = Number(process.env['NORC_OPENCLAW_PROBE_MS']) || 8000;
+
+  let ws: WebSocket;
+  try {
+    ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES, authToken);
+  } catch {
+    return { alive: true }; // unreachable → fail-open
+  }
+
+  const waitId = randomUUID();
+  return await new Promise<{ alive: boolean; status?: string }>(resolve => {
+    let settled = false;
+    const done = (r: { alive: boolean; status?: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { ws.close(); } catch { /* */ }
+      resolve(r);
+    };
+    // Our own ceiling, above the agent.wait timeout, so a blocking gateway can't
+    // hang the sweep. No terminal answer in time ⇒ still running ⇒ alive.
+    const timer = setTimeout(() => done({ alive: true }), Math.round(probeWaitMs * 1.25));
+
+    ws.on('error', () => done({ alive: true }));
+    ws.on('close', () => done({ alive: true }));
+    ws.on('message', raw => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+      const frame = asRecord(parsed);
+      if (!frame || frame['type'] !== 'res' || frame['id'] !== waitId) return;
+      const status = asRecord(frame['payload'])?.['status'];
+      const s = typeof status === 'string' ? status.toLowerCase() : '';
+      done({ alive: !TERMINAL_WAIT_STATUSES.has(s), status: s || undefined });
+    });
+
+    ws.send(JSON.stringify({ type: 'req', id: waitId, method: 'agent.wait', params: { runId: ocRunId, timeoutMs: probeWaitMs } }));
+  });
 }
 
 // ─── Ping ─────────────────────────────────────────────────────────────────────

@@ -48,6 +48,7 @@ export function TriageAgentPanel() {
         orchestratorSystemPrompt: s.orchestratorSystemPrompt,
         autoRouteThreshold: s.autoRouteThreshold,
         runTimeoutSec: s.runTimeoutSec,
+        runHardCapSec: s.runHardCapSec,
         ...(apiKey.trim() ? { orchestratorApiKey: apiKey.trim() } : {}),
       };
       const next = await saveSettings(patch);
@@ -100,9 +101,15 @@ export function TriageAgentPanel() {
       </div>
 
       <div>
-        <label style={labelStyle}>Response timeout (seconds, min 60) — if a routed agent doesn't report back in this time, NORC frees it, tells the team in Notion, and re-routes to another agent.</label>
+        <label style={labelStyle}>Idle timeout (seconds, min 60) — NORC escalates only after a routed agent has been silent (no API activity) this long. For OpenClaw agents it first probes whether the agent is still working and, if so, extends instead of killing.</label>
         <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={60} value={s.runTimeoutSec}
           onChange={e => setS({ ...s, runTimeoutSec: parseInt(e.target.value || '300', 10) })} />
+      </div>
+
+      <div>
+        <label style={labelStyle}>Hard cap (seconds, min 60) — absolute maximum a run may stay in flight before it's force-timed-out regardless of activity (runaway backstop). Raise it if your agents legitimately run longer.</label>
+        <input style={{ ...inputStyle, maxWidth: 140 }} type="number" min={60} value={s.runHardCapSec}
+          onChange={e => setS({ ...s, runHardCapSec: parseInt(e.target.value || '1800', 10) })} />
       </div>
 
       <div>

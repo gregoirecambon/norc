@@ -23,6 +23,7 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   deepPingIntervalSec: 600,
   failureNotifyThreshold: 2,
   runTimeoutSec: 300,
+  runHardCapSec: 1800,
   schedulerEnabled: false,
   autoProposeEnabled: false,
   autoProposeIntervalHours: 12,

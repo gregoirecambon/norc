@@ -9,6 +9,7 @@ export interface NorcSettings {
   orchestratorSystemPrompt: string | null;
   autoRouteThreshold: number;
   runTimeoutSec: number;
+  runHardCapSec: number;
   heartbeatEnabled: boolean;
   heartbeatIntervalSec: number;
   deepPingEnabled: boolean;
@@ -36,6 +37,7 @@ export interface NorcSettingsPatch {
   orchestratorSystemPrompt?: string | null;
   autoRouteThreshold?: number;
   runTimeoutSec?: number;
+  runHardCapSec?: number;
   heartbeatEnabled?: boolean;
   heartbeatIntervalSec?: number;
   deepPingEnabled?: boolean;

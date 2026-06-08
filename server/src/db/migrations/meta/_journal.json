@@ -169,6 +169,13 @@
       "when": 1782700000000,
       "tag": "0023_queue_priority",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1782800000000,
+      "tag": "0024_run_liveness",
+      "breakpoints": true
     }
   ]
 }

@@ -136,7 +136,8 @@ export const norcSettings = sqliteTable('norc_settings', {
   deepPingEnabled:          integer('deep_ping_enabled', { mode: 'boolean' }).notNull().default(true),  // real test prompt through each agent's AI
   deepPingIntervalSec:      integer('deep_ping_interval_sec').notNull().default(600),                   // min 60
   failureNotifyThreshold:   integer('failure_notify_threshold').notNull().default(2),                   // tag Owner after N consecutive failures
-  runTimeoutSec:            integer('run_timeout_sec').notNull().default(300),  // dispatch → escalate if no callback
+  runTimeoutSec:            integer('run_timeout_sec').notNull().default(300),  // idle/silence window (was: absolute age): escalate after the agent is silent this long
+  runHardCapSec:            integer('run_hard_cap_sec').notNull().default(1800), // absolute ceiling: force-timeout a run regardless of activity (runaway backstop)
   // Proactive automations.
   schedulerEnabled:         integer('scheduler_enabled', { mode: 'boolean' }).notNull().default(false),       // scheduled/recurring task poller
   autoProposeEnabled:       integer('auto_propose_enabled', { mode: 'boolean' }).notNull().default(false),    // recurring co-CEO task proposals
@@ -214,6 +215,13 @@ export const taskRuns = sqliteTable('task_runs', {
   manageTaskStatus: integer('manage_task_status', { mode: 'boolean' }).notNull().default(false),
   status:           text('status').notNull().default('in_flight'), // in_flight|done|failed|timed_out
   agentActed:       integer('agent_acted', { mode: 'boolean' }).notNull().default(false),
+  // Liveness: bumped on every Agent-API call (proof of life). The timeout sweep
+  // measures SILENCE from here, not age from createdAt, so a working-but-slow
+  // agent isn't false-killed. NULL on legacy rows → coalesced to createdAt.
+  lastProgressAt:   integer('last_progress_at'),
+  // OpenClaw-side run handle, persisted on async dispatch so the timeout sweep can
+  // probe "are you still executing?" (agent.wait) before escalating.
+  openclawRunId:    text('openclaw_run_id'),
   createdAt:        integer('created_at').notNull(),
   completedAt:      integer('completed_at'),
 });

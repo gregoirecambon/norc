@@ -5,7 +5,7 @@
 // work came from. Mirrors the handshake nonce + timeout-sweep pattern.
 
 import { randomUUID, randomBytes } from 'node:crypto';
-import { eq, lt, and, inArray } from 'drizzle-orm';
+import { eq, and } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { agents, taskRuns } from '../db/schema.js';
 import { emitEvent } from './events.js';
@@ -49,6 +49,7 @@ export function createRun(input: NewRun): { id: string; token: string } {
     manageTaskStatus: input.manageTaskStatus,
     status: 'in_flight',
     agentActed: false,
+    lastProgressAt: createdAt,
     createdAt,
   }).run();
   const agentName = db.select().from(agents).where(eq(agents.id, input.agentId)).all()[0]?.name ?? 'unknown';
@@ -73,6 +74,24 @@ export function getActiveRunByToken(token: string): TaskRun | null {
 /** Mark that the agent has performed at least one API action on this run. */
 export function markActed(id: string): void {
   db.update(taskRuns).set({ agentActed: true }).where(eq(taskRuns.id, id)).run();
+}
+
+/**
+ * Bump a run's liveness clock — proof the agent is still working. Called on every
+ * Agent-API call (the strongest, push-based proof of life). The timeout sweep
+ * measures silence from here. Guarded to in_flight so a just-finalized run can't
+ * be resurrected by a late in-flight request racing the finalizer.
+ */
+export function touchRun(id: string): void {
+  db.update(taskRuns).set({ lastProgressAt: Date.now() })
+    .where(and(eq(taskRuns.id, id), eq(taskRuns.status, 'in_flight'))).run();
+}
+
+/** Persist the OpenClaw-side run handle so the timeout sweep can probe "are you
+ * still executing?" before escalating. Guarded to in_flight. */
+export function setOpenclawRunId(id: string, openclawRunId: string): void {
+  db.update(taskRuns).set({ openclawRunId })
+    .where(and(eq(taskRuns.id, id), eq(taskRuns.status, 'in_flight'))).run();
 }
 
 export function getRun(id: string): TaskRun | null {
@@ -124,8 +143,10 @@ export function timedOutAgentIdsForPage(pageId: string): string[] {
   return [...new Set(rows.map(r => r.agentId))];
 }
 
-/** Finalize a run (terminal). No-op if already finalized. */
-export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>): void {
+/** Finalize a run (terminal). No-op if already finalized. Returns true iff this
+ * call actually transitioned the run (so callers can gate follow-up work — e.g.
+ * the timeout sweep won't escalate a run that completed during a liveness probe). */
+export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>): boolean {
   const completedAt = Date.now();
   const result = db.update(taskRuns)
     .set({ status, completedAt })
@@ -135,23 +156,30 @@ export function finalizeRun(id: string, status: Exclude<RunStatus, 'in_flight'>)
   if (result.changes > 0) {
     const run = getRun(id);
     if (run) emitEvent({ type: 'run.finished', data: { id, agentId: run.agentId, status, completedAt } });
+    return true;
   }
+  return false;
 }
 
-/** Time out runs still in flight after maxAgeMs; returns the timed-out rows. */
-export function sweepStaleRuns(maxAgeMs: number): TaskRun[] {
-  const cutoff = Date.now() - maxAgeMs;
-  const stale = db.select().from(taskRuns)
-    .where(and(eq(taskRuns.status, 'in_flight'), lt(taskRuns.createdAt, cutoff)))
-    .all();
-  if (stale.length === 0) return [];
-  const completedAt = Date.now();
-  db.update(taskRuns)
-    .set({ status: 'timed_out', completedAt })
-    .where(inArray(taskRuns.id, stale.map(r => r.id)))
-    .run();
-  for (const r of stale) {
-    emitEvent({ type: 'run.finished', data: { id: r.id, agentId: r.agentId, status: 'timed_out', completedAt } });
+export type TimeoutReason = 'idle' | 'hardcap';
+
+/**
+ * In-flight runs that have crossed a timeout boundary, classified — WITHOUT
+ * flipping any status (the caller decides: an 'idle' candidate may still be alive
+ * and get extended after a liveness probe; a 'hardcap' candidate is always killed).
+ *   - 'hardcap': older than hardCapMs since dispatch → runaway backstop, no reprieve.
+ *   - 'idle':    silent (no Agent-API activity) for idleMs → candidate for a probe.
+ * lastProgressAt is NULL on legacy rows → treated as createdAt. In-flight runs are
+ * capacity-gated (few), so an in-JS classify is cheaper than a coalesce query.
+ */
+export function findTimeoutCandidates(idleMs: number, hardCapMs: number): { run: TaskRun; reason: TimeoutReason }[] {
+  const now = Date.now();
+  const inFlight = db.select().from(taskRuns).where(eq(taskRuns.status, 'in_flight')).all();
+  const out: { run: TaskRun; reason: TimeoutReason }[] = [];
+  for (const run of inFlight) {
+    if (now - run.createdAt >= hardCapMs) { out.push({ run, reason: 'hardcap' }); continue; }
+    const lastProgress = run.lastProgressAt ?? run.createdAt;
+    if (now - lastProgress >= idleMs) out.push({ run, reason: 'idle' });
   }
-  return stale;
+  return out;
 }

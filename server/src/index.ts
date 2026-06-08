@@ -8,7 +8,7 @@ import cors from 'cors';
 import { lt, eq } from 'drizzle-orm';
 import { runMigrations } from './db/client.js';
 import { db } from './db/client.js';
-import { handshakes } from './db/schema.js';
+import { handshakes, agents } from './db/schema.js';
 import { ensureActiveToken } from './lib/tokens.js';
 import { emitLog } from './lib/logger.js';
 import { emitEvent, onEvent } from './lib/events.js';
@@ -31,7 +31,8 @@ import { teamRouter } from './routes/team.js';
 import { versionRouter } from './routes/version.js';
 import { apiAuthGuard, pruneExpiredSessions } from './lib/user-auth.js';
 import { startVersionLoop } from './lib/version-check.js';
-import { sweepStaleRuns, getRun } from './lib/runs.js';
+import { findTimeoutCandidates, finalizeRun, touchRun, getRun, type TaskRun } from './lib/runs.js';
+import { probeOpenclawRun } from './adapters/openclaw.js';
 import { runHeartbeat, runDeepHeartbeat } from './lib/heartbeat.js';
 import { runScheduler } from './lib/scheduler.js';
 import { runAutoPropose } from './lib/auto-propose.js';
@@ -104,16 +105,20 @@ setInterval(() => {
   }
 }, 15_000);
 
-// Time out agent runs left in flight (an async agent that never reported back),
-// then escalate each: free the agent, tell the team in Notion, and (if triage is
-// on) re-route to a different agent. Timeout is configurable (default 5 min).
-// The same pass drains every agent with queued work — the missed-event backstop
-// behind the run.finished listener below.
+// Time out agent runs left in flight — but a "real" timeout, not a wall-clock
+// guess. A run is a candidate when it's been SILENT (no Agent-API activity) past
+// the idle window, or has blown the absolute hard cap. Idle OpenClaw candidates
+// are PROBED first (agent.wait): if the agent is still executing its deadline is
+// extended, not killed — the fix for false-killing a working-but-slow agent. Only
+// genuinely silent/dead or hard-capped runs are escalated (free the agent, tell
+// the team, re-route). The same pass drains every agent with queued work — the
+// missed-event backstop behind the run.finished listener below.
 setInterval(() => {
-  const timeoutMs = Math.max(60, getNorcSettingsOrDefault().runTimeoutSec) * 1000;
-  const timedOut = sweepStaleRuns(timeoutMs);
-  for (const run of timedOut) {
-    void escalateTimedOutRun(run).catch(err =>
+  const s = getNorcSettingsOrDefault();
+  const idleMs = Math.max(60, s.runTimeoutSec) * 1000;
+  const hardCapMs = Math.max(idleMs, s.runHardCapSec * 1000); // cap can't undercut the idle window
+  for (const { run, reason } of findTimeoutCandidates(idleMs, hardCapMs)) {
+    void handleTimeoutCandidate(run, reason).catch(err =>
       emitLog(`escalation error for run ${run.id}: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage'));
   }
   for (const agentId of agentsWithPending()) {
@@ -121,6 +126,29 @@ setInterval(() => {
       emitLog(`queue drain error for agent ${agentId}: ${err instanceof Error ? err.message : 'unknown'}`));
   }
 }, 60_000);
+
+// Resolve one timeout candidate. Idle OpenClaw runs with a known run handle get a
+// confirm-before-kill liveness probe; everything else (hard-capped, non-openclaw,
+// or no run handle) is timed out directly. Escalation is gated on finalizeRun
+// actually transitioning the run, so a run that completed during the ~8s probe
+// window is never spuriously escalated.
+async function handleTimeoutCandidate(run: TaskRun, reason: 'idle' | 'hardcap'): Promise<void> {
+  const agentRow = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
+
+  if (reason === 'idle' && agentRow?.adapterType === 'openclaw' && run.openclawRunId) {
+    let config: Record<string, unknown> = {};
+    try { config = JSON.parse(agentRow.adapterConfig) as Record<string, unknown>; } catch { /* malformed config → fail-open below */ }
+    const probe = await probeOpenclawRun(config, run.openclawRunId);
+    if (probe.alive) {
+      touchRun(run.id);
+      const silentSec = Math.round((Date.now() - (run.lastProgressAt ?? run.createdAt)) / 1000);
+      emitLog(`run ${run.id} silent ${silentSec}s but "${agentRow.name}" still working${probe.status ? ` (${probe.status})` : ''} — extended`, agentRow.name);
+      return;
+    }
+  }
+
+  if (finalizeRun(run.id, 'timed_out')) await escalateTimedOutRun(run);
+}
 
 // Every finalized run frees capacity — drain that agent's queue. On a timeout,
 // first drop pending items on the same page: escalation re-routes that work to
