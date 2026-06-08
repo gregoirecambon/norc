@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { getTitle, getRichText, getSelect, getRelationIds } from '../lib/notion-props.js';
-import { buildPrompt, type AssembledContext } from '../lib/context-assembler.js';
+import { buildPrompt, matchResourcesByName, type AssembledContext } from '../lib/context-assembler.js';
 import { wantsContent } from '../lib/orchestrator.js';
-import type { Anchor } from '../lib/notion-anchor.js';
+import type { Anchor, ResourceRef } from '../lib/notion-anchor.js';
 
 describe('wantsContent', () => {
   it('detects content-production requests (en + fr)', () => {
@@ -62,6 +62,8 @@ describe('buildPrompt', () => {
     projectBlock: { name: 'Auth', objective: 'Ship SSO', kpis: 'p95 < 200ms', docs: '' },
     companyBlocks: [],
     relatedBlocks: [],
+    projectResources: [],
+    inlinedResources: [],
     bodyMarkdown: '',
     projectBody: '',
     fingerprint: 'fp',
@@ -102,7 +104,7 @@ describe('buildPrompt', () => {
   it('includes the page reference and commented-on text on a free page', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], projectResources: [], inlinedResources: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
       anchor: pageAnchor,
       priorComments: [], request: 'what do you think?', availableAgents: [],
       commentedText: 'The pricing should be $9/mo',
@@ -119,7 +121,7 @@ describe('buildPrompt', () => {
   it('omits first-visit note for a returning agent and omits page section otherwise', () => {
     const pageAnchor = { kind: 'page', pageId: 'p1', page: {}, parentDatabaseId: null } as Anchor;
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
+      ctx: { contextLevel: 'project', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], projectResources: [], inlinedResources: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
       anchor: pageAnchor, priorComments: [], request: 'hi', availableAgents: [],
       pageRef: { title: 'Pricing notes', url: null, firstVisit: false },
     });
@@ -133,7 +135,7 @@ describe('buildPrompt', () => {
       ctx: {
         contextLevel: 'strategic', systemPrompt: 'sp', taskBlock: null, projectBlock: null,
         companyBlocks: [{ name: 'North Star', type: 'Vision', content: 'Be the open Notion agent layer' }],
-        relatedBlocks: [], bodyMarkdown: '', projectBody: '',
+        relatedBlocks: [], projectResources: [], inlinedResources: [], bodyMarkdown: '', projectBody: '',
         fingerprint: 'x',
       },
       anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
@@ -161,14 +163,52 @@ describe('buildPrompt', () => {
     expect(prompt).toContain('- Alice: first take please');
   });
 
-  it('renders [RELATED] rows for strategic agents', () => {
+  it('renders [RELATED] rows with fetchable pageIds for strategic agents', () => {
     const { prompt } = buildPrompt({
-      ctx: { ...ctx, contextLevel: 'strategic', relatedBlocks: [{ relation: 'Meetings', name: 'Q3 Planning', summary: 'decided to ship SSO' }] },
+      ctx: { ...ctx, contextLevel: 'strategic', relatedBlocks: [{ relation: 'Meetings', name: 'Q3 Planning', summary: 'decided to ship SSO', id: 'rel-1' }] },
       anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
     });
     expect(prompt).toContain('[RELATED]');
     expect(prompt).toContain('(Meetings) Q3 Planning');
+    expect(prompt).toContain('pageId: rel-1');
     expect(prompt).toContain('decided to ship SSO');
+  });
+
+  it('renders [PROJECT RESOURCES] with pageIds, and omits the section when empty', () => {
+    const withRes = buildPrompt({
+      ctx: { ...ctx, projectResources: [
+        { id: 'onb-1', title: 'ONBOARDING', kind: 'page' },
+        { id: 'db-1', title: 'Specs', kind: 'database' },
+      ] },
+      anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
+    });
+    expect(withRes.prompt).toContain('[PROJECT RESOURCES]');
+    expect(withRes.prompt).toContain('ONBOARDING — pageId: onb-1');
+    expect(withRes.prompt).toContain('Specs 🗄 — pageId: db-1');
+
+    const noRes = buildPrompt({ ctx, anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [] });
+    expect(noRes.prompt).not.toContain('[PROJECT RESOURCES]');
+  });
+
+  it('inlines a [RESOURCE: …] block with its body when present', () => {
+    const { prompt } = buildPrompt({
+      ctx: { ...ctx, inlinedResources: [{ title: 'ONBOARDING', pageId: 'onb-1', markdown: '1. Welcome\n2. Goals' }] },
+      anchor: taskAnchor, priorComments: [], request: 'describe the onboarding', availableAgents: [],
+    });
+    expect(prompt).toContain('[RESOURCE: ONBOARDING]');
+    expect(prompt).toContain('pageId: onb-1');
+    expect(prompt).toContain('1. Welcome');
+  });
+
+  it('keeps [PROJECT RESOURCES] (high priority) even when bodies overflow the budget', () => {
+    const { prompt } = buildPrompt({
+      ctx: { ...ctx, bodyMarkdown: 'x'.repeat(60_000), projectResources: [{ id: 'onb-1', title: 'ONBOARDING', kind: 'page' }] },
+      anchor: taskAnchor, priorComments: [], request: 'go', availableAgents: [],
+      runBlock: 'run_id: r1\napi_base: https://norc/api/runs/tok',
+    });
+    expect(prompt).toContain('[PROJECT RESOURCES]');
+    expect(prompt).toContain('pageId: onb-1');
+    expect(prompt).toContain('…(truncated for length)');
   });
 
   it('keeps [REQUEST] and [NORC RUN] even when low-priority context overflows the budget', () => {
@@ -195,7 +235,7 @@ describe('buildPrompt', () => {
 
   it('omits task/conversation/agents sections when empty', () => {
     const { prompt } = buildPrompt({
-      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
+      ctx: { contextLevel: 'task', systemPrompt: 'sp', taskBlock: null, projectBlock: null, companyBlocks: [], relatedBlocks: [], projectResources: [], inlinedResources: [], bodyMarkdown: '', projectBody: '', fingerprint: 'x' },
       anchor: { kind: 'page', pageId: 'p', page: {}, parentDatabaseId: null } as Anchor,
       priorComments: [],
       request: 'hello',
@@ -205,5 +245,43 @@ describe('buildPrompt', () => {
     expect(prompt).not.toContain('[CONVERSATION SO FAR]');
     expect(prompt).not.toContain('[AVAILABLE AGENTS]');
     expect(prompt).toContain('[REQUEST]\nhello');
+  });
+});
+
+describe('matchResourcesByName', () => {
+  const refs: ResourceRef[] = [
+    { id: 'onb-1', title: 'Onboarding', kind: 'page' },
+    { id: 'spec-1', title: 'Spec', kind: 'page' },
+    { id: 'design-1', title: 'Design Doc', kind: 'page' },
+    { id: 'db-1', title: 'Tasks', kind: 'database' },
+  ];
+
+  it('matches a resource the request names (case/punctuation-insensitive)', () => {
+    const m = matchResourcesByName('please describe the ONBOARDING, how many steps?', refs);
+    expect(m.map(r => r.id)).toEqual(['onb-1']);
+  });
+
+  it('matches a morphological variant ("the onboard" → Onboarding)', () => {
+    const m = matchResourcesByName('how many steps did the onboard contain?', refs);
+    expect(m.map(r => r.id)).toEqual(['onb-1']);
+  });
+
+  it('matches against the task name portion of the haystack too', () => {
+    const m = matchResourcesByName('Review Design Doc  —  the request body', refs);
+    expect(m.map(r => r.id)).toContain('design-1');
+  });
+
+  it('returns nothing when no resource is named', () => {
+    expect(matchResourcesByName('ship the login flow', refs)).toEqual([]);
+  });
+
+  it('never matches databases (no readable body to inline)', () => {
+    expect(matchResourcesByName('update the Tasks board', refs).map(r => r.id)).not.toContain('db-1');
+  });
+
+  it('caps the number of matches', () => {
+    const many: ResourceRef[] = Array.from({ length: 6 }, (_, i) => ({ id: `p${i}`, title: `Topic${i}`, kind: 'page' as const }));
+    const hay = many.map(r => r.title).join(' ');
+    expect(matchResourcesByName(hay, many, 3).length).toBe(3);
   });
 });

@@ -25,8 +25,14 @@ NORC sends a prompt with these sections (some may be absent):
 - **[CONTEXT — level: …]** — the project Objective / KPIs / Docs (when relevant).
 - **[PROJECT CONTENT]** — the linked project page's actual written body (where
   the real material often lives when the project's properties are thin).
+- **[PROJECT RESOURCES]** — the project's sub-pages / sub-databases, each with its
+  `pageId`. Pull any in full with `GET <api_base>/page?pageId=<id>` — this is how
+  you open a doc the prompt only *names* (e.g. an ONBOARDING sub-page).
+- **[RESOURCE: <title>]** — a sub-page NORC pre-fetched for you because the request
+  named it; its body is already inline (fetch deeper with `?pageId=…&depth=5`).
 - **[RELATED]** — short snippets of the project's linked docs / knowledge /
-  sub-pages. Fetch any of them in full with `GET <api_base>/page?pageId=<id>`.
+  sub-pages, each with its `pageId`. Fetch any in full with
+  `GET <api_base>/page?pageId=<id>`.
 - **[TASK]** — the task name, status, success criteria, prior output.
 - **[COMMENTED-ON TEXT]** — the exact text a comment is attached to (inline
   comments) — i.e. what the human is reacting to.
@@ -67,9 +73,21 @@ curl -s -X POST <api_base>/comment  -H 'Content-Type: application/json' \
 curl -s <api_base>/page          # or <api_base>/page?pageId=<id> for another page
                                  # ?depth=1..5 controls how deep nested blocks are read
 
+# Find a project resource by NAME — when the prompt mentions a doc but you don't
+# have (or lost) its pageId, or a /page fetch failed. Project-scoped; works for
+# every agent. Returns {found:true,title,pageId,url,markdown}, or
+# {found:false,available:[{title,pageId}…]} so you can pick.
+curl -s '<api_base>/resource?name=Onboarding'
+
+# Still stuck? Ask NORC. It searches the WHOLE connected workspace with its own
+# access and answers from what it finds → {answer, sources:[{title,pageId,url}]}.
+curl -s -X POST <api_base>/assist -H 'Content-Type: application/json' \
+  -d '{"question":"How many steps is the onboarding and what are they?"}'
+
 # Pull the structured context NORC assembled for this run (JSON: task, project,
-# company, related, body, projectBody, contextLevel) — handy if you'd rather not
-# parse the prompt. `projectBody` is the linked project page's full written body.
+# company, related, projectResources, body, projectBody, contextLevel) — handy if
+# you'd rather not parse the prompt. `projectResources` lists every sub-page's
+# pageId; `projectBody` is the linked project page's full written body.
 curl -s <api_base>/context
 
 # Append content into the page body (Markdown → Notion blocks)
@@ -128,12 +146,19 @@ Decide the action by intent — especially on a non-task page:
 - **Finished a task** → `/status` and/or `/complete`.
 
 **Before you give up:** if the context looks thin, DIG before reporting blocked.
-Pull `GET <api_base>/context` (now includes `projectBody` + linked `related` docs),
-read the linked project page and any linked/child pages via
-`GET <api_base>/page?pageId=<id>`, and only then decide. Report `blocked` only when
-the missing information is something **only a human can supply** — not because the
-first prompt looked empty. NORC also auto-detects give-up replies, so being honest
-about a real block is always safe.
+Work the resource ladder in order — you can almost always get the material yourself:
+
+1. Read any sub-page listed in `[PROJECT RESOURCES]` / `[RELATED]` by its `pageId`:
+   `GET <api_base>/page?pageId=<id>` (`?depth=1..5` for nested content).
+2. Know the doc by name but not its id (or a fetch failed)?
+   `GET <api_base>/resource?name=<title>` — NORC finds it within the project.
+3. Still can't get it? `POST <api_base>/assist {"question":"…"}` — NORC searches the
+   whole connected workspace and answers from what it finds.
+
+Report `blocked` only after that ladder comes up empty AND the missing information
+is something **only a human can supply** (e.g. a private repo, an unconnected page,
+a decision) — not because the first prompt looked thin. NORC also auto-detects
+give-up replies, so being honest about a real block is always safe.
 
 **Always call `/complete` when you are done** so NORC marks the run finished and
 frees you.

@@ -14,17 +14,23 @@ import {
   type TaskStatus,
 } from '../lib/notion-writeback.js';
 import { markdownToBlocks } from '../lib/notion-blocks-md.js';
-import { readPageMarkdown, resolveAnchor } from '../lib/notion-anchor.js';
-import { getAnyTitle, getSelect } from '../lib/notion-props.js';
+import { readPageMarkdown, resolveAnchor, listChildResources, normalizeId } from '../lib/notion-anchor.js';
+import { getAnyTitle, getSelect, getRelationIds } from '../lib/notion-props.js';
 import { notionGet, notionPost, notionQuery } from '../lib/notion-client.js';
-import { assembleContext, type ContextLevel } from '../lib/context-assembler.js';
+import { assembleContext, collectProjectRelationRefs, type ContextLevel } from '../lib/context-assembler.js';
 import { proposeTasks, releaseDependents, finalizeAgentReport } from '../lib/orchestrator.js';
+import { titleSimilarity, normalizedTitle } from '../lib/task-similarity.js';
+import { getNorcSettings } from '../lib/norc-settings.js';
+import { assist, type AssistSource } from '../lib/orchestrator-agent.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 
 /** Open Notion search/query is opt-in (off by default) and strategic-only. */
 function openSearchEnabled(): boolean {
   return process.env['NORC_OPEN_SEARCH'] === '1' || process.env['NORC_OPEN_SEARCH'] === 'true';
 }
+
+/** Cap on the /resource candidate set (child pages + linked docs) — bounds API calls. */
+const MAX_RESOURCE_CANDIDATES = 25;
 
 function agentRefForRun(run: TaskRun): AgentRef | null {
   const a = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
@@ -168,9 +174,128 @@ export function makeRunsRouter(): ExpressRouter {
         project: ctx.projectBlock,
         company: ctx.companyBlocks,
         related: ctx.relatedBlocks,
+        projectResources: ctx.projectResources,
         body: ctx.bodyMarkdown,
         projectBody: ctx.projectBody,
       });
+    } catch (err) {
+      res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // GET /api/runs/:token/resource?name=  → find a project resource by name and
+  // return its full body. PROJECT-SCOPED (the anchor + project child pages + the
+  // project's linked docs) and available to ALL clearances — NORC resolving a
+  // named doc on the agent's behalf, the addressable counterpart to [PROJECT
+  // RESOURCES]. Returns { found:false, available:[…] } so the agent can pick.
+  r.get('/:token/resource', async (req, res) => {
+    const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
+    const q = typeof req.query['name'] === 'string' && req.query['name']
+      ? req.query['name'] as string
+      : (typeof req.query['query'] === 'string' ? req.query['query'] as string : '');
+    if (!q.trim()) { res.status(400).json({ error: 'name_required' }); return; }
+    try {
+      const anchor = await resolveAnchor(apiKey, run.pageId);
+      let projectPageId: string | null = null;
+      let projectProps: unknown = anchor.kind === 'project'
+        ? (anchor.page as Record<string, unknown>)['properties'] : null;
+      if (anchor.kind === 'project') projectPageId = anchor.pageId;
+      else if (anchor.kind === 'task') {
+        projectPageId = getRelationIds((anchor.page as Record<string, unknown>)['properties'], 'Project')[0] ?? null;
+      }
+
+      // Project-scoped candidate set, deduped by normalized id.
+      const seen = new Set<string>();
+      const candidates: { id: string; title: string; kind: 'page' | 'database' }[] = [];
+      const add = (id: string, title: string, kind: 'page' | 'database') => {
+        const key = normalizeId(id);
+        if (!id || seen.has(key)) return;
+        seen.add(key); candidates.push({ id, title, kind });
+      };
+      for (const c of await listChildResources(apiKey, anchor.pageId)) add(c.id, c.title, c.kind);
+      if (projectPageId && anchor.kind === 'task') {
+        try {
+          const projPage = await notionGet<Record<string, unknown>>(apiKey, `/pages/${projectPageId}`);
+          projectProps = projPage['properties'];
+        } catch { /* relation walk just yields nothing */ }
+        for (const c of await listChildResources(apiKey, projectPageId)) add(c.id, c.title, c.kind);
+      }
+      for (const c of await collectProjectRelationRefs(apiKey, projectProps, MAX_RESOURCE_CANDIDATES)) add(c.id, c.title, c.kind);
+
+      // Fuzzy-match against page candidates (databases have no readable body).
+      const qNorm = normalizedTitle(q);
+      const scored = candidates
+        .filter(c => c.kind === 'page')
+        .map(c => ({ c, score: qNorm && normalizedTitle(c.title) === qNorm ? 1 : titleSimilarity(q, c.title) }))
+        .sort((a, b) => b.score - a.score);
+      const top = scored[0];
+      const ambiguous = !!top && !!scored[1] && scored[1].score >= 0.45 && top.score - scored[1].score < 0.1;
+      if (top && top.score >= 0.45 && !ambiguous) {
+        const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${top.c.id}`);
+        const markdown = await readPageMarkdown(apiKey, top.c.id, 12_000, 3);
+        emitLog(`agent API: resource "${q.slice(0, 40)}" → hit ${top.c.id} (run ${run.id})`, agentTag(run));
+        res.json({
+          found: true,
+          title: getAnyTitle(page['properties']) || top.c.title,
+          pageId: top.c.id,
+          url: typeof page['url'] === 'string' ? page['url'] : null,
+          markdown,
+        });
+        return;
+      }
+      emitLog(`agent API: resource "${q.slice(0, 40)}" → miss (${candidates.length} in scope) (run ${run.id})`, agentTag(run));
+      res.json({ found: false, available: candidates.map(c => ({ title: c.title || '(untitled)', pageId: c.id })) });
+    } catch (err) {
+      res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // POST /api/runs/:token/assist  { question }
+  // The "ask the NORC agent" escalation when /resource can't find a doc in project
+  // scope. NORC searches the WHOLE connected workspace with its own key and answers
+  // via its configured LLM (the triage model). Internal: no Notion comment, no
+  // second dispatch. Mediated (returns an answer + named sources, not raw dumps).
+  // Kill-switch: NORC_ASSIST=0.
+  r.post('/:token/assist', async (req, res) => {
+    const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
+    if (process.env['NORC_ASSIST'] === '0' || process.env['NORC_ASSIST'] === 'false') {
+      res.status(403).json({ error: 'assist_disabled', message: 'NORC assist is disabled (NORC_ASSIST=0).' });
+      return;
+    }
+    const question = typeof (req.body as { question?: unknown })?.question === 'string'
+      ? (req.body as { question: string }).question.trim() : '';
+    if (!question) { res.status(400).json({ error: 'question_required' }); return; }
+    try {
+      const body = await notionPost<Record<string, unknown>>(apiKey, '/search', { query: question, page_size: 8 });
+      const raw = Array.isArray(body['results']) ? body['results'] as Record<string, unknown>[] : [];
+      const hits = raw
+        .map(p => ({ id: String(p['id'] ?? ''), title: getAnyTitle(p['properties']), url: typeof p['url'] === 'string' ? p['url'] as string : null }))
+        .filter(h => h.id)
+        .slice(0, 5);
+      const sources: AssistSource[] = [];
+      for (const h of hits.slice(0, 3)) {
+        let bodyMd = '';
+        try { bodyMd = await readPageMarkdown(apiKey, h.id, 4000, 2); } catch { /* skip unreadable */ }
+        sources.push({ title: h.title, pageId: h.id, url: h.url, body: bodyMd });
+      }
+
+      const settings = getNorcSettings();
+      const llmReady = !!settings && (settings.orchestratorProvider === 'openai'
+        ? !!settings.orchestratorBaseUrl : !!settings.orchestratorApiKey);
+      let answer: string | null = null;
+      if (llmReady && sources.length) {
+        const out = await assist({
+          provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+          apiKey: settings!.orchestratorApiKey ?? '',
+          baseUrl: settings!.orchestratorBaseUrl,
+          model: settings!.orchestratorModel,
+          question,
+          sources,
+        });
+        answer = out.answer || null;
+      }
+      emitLog(`agent API: assist "${question.slice(0, 40)}" → ${sources.length} source(s) (run ${run.id})`, agentTag(run));
+      res.json({ answer, sources: hits.map(h => ({ title: h.title || '(untitled)', pageId: h.id, url: h.url })) });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
     }

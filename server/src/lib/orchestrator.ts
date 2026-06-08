@@ -1440,7 +1440,7 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     data: { agentId: agentRef.agentId, agentName: agentRef.name, pageId: anchor.pageId, anchorKind: anchor.kind },
   });
 
-  const ctx = await assembleContext({ apiKey, anchor, agentRef });
+  const ctx = await assembleContext({ apiKey, anchor, agentRef, request: opts.request });
 
   // Exclude NORC's own comments from the conversation. The botUserId check is the
   // primary guard, but it can be unset; orchestrator_comments is the source of

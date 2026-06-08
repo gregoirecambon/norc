@@ -323,6 +323,42 @@ export function parseAssessment(text: string): AssessResult {
   return { outcome, ...(need ? { need } : {}), ...(message ? { message } : {}) };
 }
 
+// ─── Resource assist: NORC answers a stuck agent's lookup from workspace pages ───
+
+export interface AssistSource { title: string; pageId: string; url?: string | null; body: string }
+
+export interface AssistInput extends LLMConfig {
+  question: string;
+  sources: AssistSource[];
+}
+
+const ASSIST_SYSTEM =
+  'You are NORC, the orchestrator for a Notion workspace, helping another AI agent that got stuck finding a ' +
+  'resource. You are given the agent\'s question plus the full text of the most relevant workspace pages. ' +
+  'Answer the question directly and concisely from those pages, citing each page by its title. If the pages ' +
+  'do not contain the answer, say so plainly — never invent.';
+
+/**
+ * Answer a stuck agent's resource question from candidate workspace pages.
+ * Returns '' when the LLM is unavailable/unparseable so the caller can fall back
+ * to handing the agent the raw candidate list.
+ */
+export async function assist(input: AssistInput): Promise<{ answer: string }> {
+  const sources = input.sources.length
+    ? input.sources.map((s, i) => `### Source ${i + 1}: ${s.title || '(untitled)'} (pageId: ${s.pageId})\n${s.body.slice(0, 4000)}`).join('\n\n')
+    : '(no candidate pages found)';
+  const prompt = [
+    `An agent asks: ${input.question}`,
+    ``,
+    `Relevant workspace pages:`,
+    sources,
+    ``,
+    `Answer the question from these pages, citing page titles. If they don't contain the answer, say so.`,
+  ].join('\n');
+  const res = await callTriageLLM(input, ASSIST_SYSTEM, prompt);
+  return { answer: res.ok && res.text ? res.text.trim() : '' };
+}
+
 /**
  * Call an OpenAI-compatible chat/completions endpoint (OpenAI, or a LiteLLM
  * proxy). The base URL is the proxy root or an `…/v1` URL; see openaiEndpoint.

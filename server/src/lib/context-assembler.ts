@@ -15,7 +15,8 @@ import { db } from '../db/client.js';
 import { notionDatabases } from '../db/schema.js';
 import { notionGet, notionQuery } from './notion-client.js';
 import { getTitle, getRichText, getSelect, getRelationIds, getAnyTitle } from './notion-props.js';
-import { readPageMarkdown, type Anchor } from './notion-anchor.js';
+import { readPageMarkdown, listChildResources, normalizeId, type Anchor, type ResourceRef } from './notion-anchor.js';
+import { tokenize, titleSimilarity } from './task-similarity.js';
 import type { AgentRef } from './notion-mentions.js';
 
 // How much written content to inject. The anchor page's own body is the richest
@@ -24,6 +25,11 @@ import type { AgentRef } from './notion-mentions.js';
 const PAGE_BODY_MAX_CHARS = 4000;
 const RELATED_SUMMARY_MAX_CHARS = 600;
 const MAX_RELATED_ROWS = 8;
+const MAX_PROJECT_RESOURCES = 25;
+// A resource the request explicitly names is pre-fetched and inlined — bounded so
+// a few named docs can't blow the budget on their own.
+const INLINE_RESOURCE_MAX_CHARS = 2500;
+const MAX_INLINED_RESOURCES = 3;
 const MAX_CONTEXT_CHARS = Number(process.env['NORC_MAX_CONTEXT_CHARS']) || 24000;
 
 export type ContextLevel = 'task' | 'project' | 'strategic';
@@ -53,6 +59,15 @@ export interface RelatedBlock {
   relation: string;
   name: string;
   summary: string;
+  /** The linked page's id, so the agent can fetch it in full via /page. */
+  id: string;
+}
+
+/** A resource named in the request, pre-fetched so the agent needs no round-trip. */
+export interface InlinedResource {
+  title: string;
+  pageId: string;
+  markdown: string;
 }
 
 export interface AssembledContext {
@@ -62,6 +77,11 @@ export interface AssembledContext {
   projectBlock: ProjectBlock | null;
   companyBlocks: CompanyBlock[];
   relatedBlocks: RelatedBlock[];
+  /** Sub-pages/databases under the anchor + project page, each with its id, so the
+   * agent can pull any of them in full via /page?pageId=<id>. */
+  projectResources: ResourceRef[];
+  /** Sub-pages the request explicitly named, pre-fetched and inlined. */
+  inlinedResources: InlinedResource[];
   /** The anchor page's actual written body (markdown-ish), not just properties. */
   bodyMarkdown: string;
   /** The linked Project page's written body — only when the anchor is a task
@@ -83,8 +103,11 @@ export async function assembleContext(args: {
   apiKey: string;
   anchor: Anchor;
   agentRef: AgentRef;
+  /** The triggering request/ask, used to eagerly inline any resource it names.
+   * Omitted on request-agnostic callers (e.g. the /context endpoint). */
+  request?: string;
 }): Promise<AssembledContext> {
-  const { apiKey, anchor, agentRef } = args;
+  const { apiKey, anchor, agentRef, request } = args;
 
   // Agent persona + clearance from its Org DB page.
   let systemPrompt = DEFAULT_SYSTEM_PROMPT;
@@ -167,23 +190,100 @@ export async function assembleContext(args: {
     } catch { /* project body is best-effort */ }
   }
 
-  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown, projectBody });
-  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, bodyMarkdown, projectBody, fingerprint };
+  // Sub-pages / sub-databases the agent can pull in full — the anchor's own
+  // children always, the project's children when clearance reaches the project
+  // layer. Surfacing their ids is what lets an agent fetch a named doc (the
+  // prompt previously listed sub-page TITLES with no addressable id).
+  let projectResources: ResourceRef[] = [];
+  try {
+    const anchorNorm = normalizeId(anchor.pageId);
+    const projectNorm = projectPageId ? normalizeId(projectPageId) : '';
+    const seen = new Set<string>();
+    const collected: ResourceRef[] = [];
+    const pushAll = (refs: ResourceRef[]) => {
+      for (const r of refs) {
+        const key = normalizeId(r.id);
+        if (key === anchorNorm || key === projectNorm || seen.has(key)) continue;
+        seen.add(key);
+        collected.push(r);
+      }
+    };
+    pushAll(await listChildResources(apiKey, anchor.pageId));
+    if (contextLevel !== 'task' && projectPageId && anchor.kind === 'task') {
+      pushAll(await listChildResources(apiKey, projectPageId));
+    }
+    projectResources = collected.slice(0, MAX_PROJECT_RESOURCES);
+  } catch { /* resources are best-effort */ }
+
+  // Eagerly inline any resource the request explicitly names — so a "describe the
+  // ONBOARDING doc" task arrives with that doc's body already in the prompt.
+  const inlinedResources: InlinedResource[] = [];
+  if (request && projectResources.length > 0) {
+    const matches = matchResourcesByName(`${taskBlock?.name ?? ''} ${request}`, projectResources, MAX_INLINED_RESOURCES);
+    const fetched = new Set<string>([normalizeId(anchor.pageId)]);
+    if (projectPageId) fetched.add(normalizeId(projectPageId));
+    for (const ref of matches) {
+      const key = normalizeId(ref.id);
+      if (fetched.has(key)) continue; // already inlined as a body above
+      fetched.add(key);
+      try {
+        const md = (await readPageMarkdown(apiKey, ref.id, INLINE_RESOURCE_MAX_CHARS, 2)).trim();
+        if (md) inlinedResources.push({ title: ref.title || '(untitled)', pageId: ref.id, markdown: md });
+      } catch { /* best-effort */ }
+    }
+  }
+
+  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody });
+  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody, fingerprint };
+}
+
+/**
+ * Resources whose title the request/task explicitly names (case- and
+ * punctuation-insensitive), best first, capped. Databases are excluded — there's
+ * no readable body to inline. PURE.
+ */
+export function matchResourcesByName(haystack: string, refs: ResourceRef[], max = MAX_INLINED_RESOURCES): ResourceRef[] {
+  const hayTokens = tokenize(haystack);
+  if (hayTokens.length === 0) return [];
+  const haySet = new Set(hayTokens);
+  // A title token "hits" the request if it appears verbatim, or shares a 4+ char
+  // prefix with a request token — so "onboard" in the ask matches an "Onboarding"
+  // sub-page (token-exact matching would miss the morphological variant).
+  const tokenHit = (t: string) =>
+    haySet.has(t) || (t.length >= 4 && hayTokens.some(h => h.length >= 4 && (h.startsWith(t) || t.startsWith(h))));
+  const scored: { ref: ResourceRef; score: number }[] = [];
+  for (const ref of refs) {
+    if (ref.kind !== 'page') continue;
+    const titleTokens = tokenize(ref.title);
+    if (titleTokens.length === 0) continue;
+    const hits = titleTokens.filter(tokenHit).length;
+    if (hits === 0) continue;
+    const allPresent = hits === titleTokens.length;
+    const sim = titleSimilarity(ref.title, haystack);
+    if (allPresent || sim >= 0.6) scored.push({ ref, score: allPresent ? 1 : Math.max(sim, hits / titleTokens.length) });
+  }
+  return scored.sort((a, b) => b.score - a.score).slice(0, max).map(s => s.ref);
 }
 
 // Project relations handled elsewhere (Company → strategic layer) or irrelevant
 // as context (Agents → the roster, not material).
 const SKIP_RELATIONS = new Set(['Company', 'Agents']);
 
+/** A linked doc reached through a project relation (carries the relation name). */
+export interface RelationRef extends ResourceRef {
+  relation: string;
+}
+
 /**
- * Walk the project's relation properties (other than Company/Agents) and pull a
- * short body snippet of each linked row — meeting notes, docs, knowledge, etc.
- * Best-effort and capped (per relation and overall) so deep graphs stay bounded.
+ * Walk the project's relation properties (other than Company/Agents) and return
+ * the linked rows as refs (id + title + relation name), capped per relation and
+ * overall. Best-effort. Shared by related-block assembly and the /resource
+ * resolver so SKIP_RELATIONS stays a single source of truth.
  */
-async function resolveRelatedBlocks(apiKey: string, projectProps: unknown): Promise<RelatedBlock[]> {
+export async function collectProjectRelationRefs(apiKey: string, projectProps: unknown, cap = MAX_RELATED_ROWS): Promise<RelationRef[]> {
   if (!projectProps || typeof projectProps !== 'object') return [];
   const props = projectProps as Record<string, unknown>;
-  const out: RelatedBlock[] = [];
+  const out: RelationRef[] = [];
 
   for (const [propName, val] of Object.entries(props)) {
     if (SKIP_RELATIONS.has(propName)) continue;
@@ -192,12 +292,27 @@ async function resolveRelatedBlocks(apiKey: string, projectProps: unknown): Prom
     for (const id of ids.slice(0, 3)) {
       try {
         const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${id}`);
-        const name = getAnyTitle(page['properties']);
-        const summary = (await readPageMarkdown(apiKey, id, RELATED_SUMMARY_MAX_CHARS, 1)).trim();
-        out.push({ relation: propName, name, summary });
-        if (out.length >= MAX_RELATED_ROWS) return out;
+        out.push({ id, title: getAnyTitle(page['properties']), kind: 'page', relation: propName });
+        if (out.length >= cap) return out;
       } catch { /* skip unreadable row */ }
     }
+  }
+  return out;
+}
+
+/**
+ * The project's linked docs/knowledge/meetings as related blocks — each with a
+ * short body snippet. Best-effort and capped so deep graphs stay bounded.
+ */
+async function resolveRelatedBlocks(apiKey: string, projectProps: unknown): Promise<RelatedBlock[]> {
+  const refs = await collectProjectRelationRefs(apiKey, projectProps, MAX_RELATED_ROWS);
+  const out: RelatedBlock[] = [];
+  for (const ref of refs) {
+    let summary = '';
+    try {
+      summary = (await readPageMarkdown(apiKey, ref.id, RELATED_SUMMARY_MAX_CHARS, 1)).trim();
+    } catch { /* summary is best-effort; still surface the ref so it's fetchable */ }
+    out.push({ relation: ref.relation, name: ref.title, summary, id: ref.id });
   }
   return out;
 }
@@ -315,6 +430,28 @@ export function buildPrompt(args: {
     push(`[PROJECT CONTENT]\n${ctx.projectBody.trim()}`, 5);
   }
 
+  // Addressable sub-pages/databases — small but high-value (the ids that make a
+  // named doc fetchable), so a high keep-priority even under budget pressure.
+  if (ctx.projectResources && ctx.projectResources.length > 0) {
+    const rows = ctx.projectResources
+      .map(r => `- ${r.title || '(untitled)'}${r.kind === 'database' ? ' 🗄' : ''} — pageId: ${r.id}`)
+      .join('\n');
+    push(
+      `[PROJECT RESOURCES]\nSub-pages and databases under this project. Fetch any in full with ` +
+      `GET <api_base>/page?pageId=<id> (or GET <api_base>/resource?name=<title> to have NORC find it):\n${rows}`,
+      2,
+    );
+  }
+
+  // Resources the request named, pre-fetched — explicitly asked for, so above the
+  // generic bodies (5) but below the task/request themselves.
+  for (const r of ctx.inlinedResources ?? []) {
+    push(
+      `[RESOURCE: ${r.title}]\n(pageId: ${r.pageId} — fetch deeper via GET <api_base>/page?pageId=${r.pageId}&depth=5)\n${r.markdown}`,
+      4,
+    );
+  }
+
   if (ctx.taskBlock) {
     const t = ctx.taskBlock;
     const lines = [
@@ -336,7 +473,7 @@ export function buildPrompt(args: {
   // Linked rows (docs, meetings, knowledge) for strategic agents — lowest priority.
   if (ctx.relatedBlocks && ctx.relatedBlocks.length > 0) {
     const rows = ctx.relatedBlocks
-      .map(r => `- (${r.relation}) ${r.name || '(untitled)'}${r.summary ? `\n  ${r.summary.replace(/\n/g, '\n  ')}` : ''}`)
+      .map(r => `- (${r.relation}) ${r.name || '(untitled)'}${r.id ? ` — pageId: ${r.id}` : ''}${r.summary ? `\n  ${r.summary.replace(/\n/g, '\n  ')}` : ''}`)
       .join('\n');
     push(`[RELATED]\n${rows}`, 6);
   }

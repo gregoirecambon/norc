@@ -29,8 +29,15 @@ export interface ThreadComment {
   createdTime: string | null;
 }
 
+/** A sub-page or sub-database an agent can pull in full (id IS the page id). */
+export interface ResourceRef {
+  id: string;
+  title: string;
+  kind: 'page' | 'database';
+}
+
 /** dashless lowercase, so dashed/undashed Notion ids compare equal. */
-function normalizeId(id: string): string {
+export function normalizeId(id: string): string {
   return id.replace(/-/g, '').toLowerCase();
 }
 
@@ -201,6 +208,73 @@ async function walkBlockChildren(
         if (id) {
           await walkBlockChildren(apiKey, id, depth + 1, maxDepth, maxChars, lines, budget);
           if (budget.hit) return;
+        }
+      }
+    }
+    cursor = res['has_more'] === true && typeof res['next_cursor'] === 'string' ? res['next_cursor'] : undefined;
+  } while (cursor);
+}
+
+/**
+ * Scan a page's block subtree for child_page / child_database blocks — the
+ * sub-pages and sub-databases an agent can pull in full. Descends layout blocks
+ * (columns, toggles, synced blocks, lists) to `maxDepth` but never into the child
+ * pages/databases themselves. Deduped by id, capped at `cap`, best-effort: a
+ * partial/unreadable subtree yields what was found rather than throwing.
+ */
+export async function listChildResources(
+  apiKey: string,
+  pageId: string,
+  maxDepth = 2,
+  cap = 25,
+): Promise<ResourceRef[]> {
+  const out: ResourceRef[] = [];
+  const seen = new Set<string>();
+  await walkForResources(apiKey, pageId, 0, maxDepth, cap, out, seen);
+  return out;
+}
+
+async function walkForResources(
+  apiKey: string,
+  blockId: string,
+  depth: number,
+  maxDepth: number,
+  cap: number,
+  out: ResourceRef[],
+  seen: Set<string>,
+): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const qs = new URLSearchParams({ page_size: '100' });
+    if (cursor) qs.set('start_cursor', cursor);
+    let res: Record<string, unknown>;
+    try {
+      res = await notionGet<Record<string, unknown>>(apiKey, `/blocks/${blockId}/children?${qs.toString()}`);
+    } catch {
+      return; // unreadable subtree → keep what we already collected
+    }
+    const results = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
+    for (const block of results) {
+      const type = block['type'];
+      if (typeof type !== 'string') continue;
+      if (type === 'child_page' || type === 'child_database') {
+        const id = String(block['id'] ?? '');
+        const key = normalizeId(id);
+        if (id && !seen.has(key)) {
+          seen.add(key);
+          const body = block[type] as Record<string, unknown> | undefined;
+          const title = typeof body?.['title'] === 'string' ? body['title'] as string : '';
+          out.push({ id, title, kind: type === 'child_page' ? 'page' : 'database' });
+          if (out.length >= cap) return;
+        }
+        continue; // never recurse into a child page/database
+      }
+      // Descend layout blocks (columns, toggles, synced blocks, lists, …).
+      if (depth < maxDepth && block['has_children'] === true) {
+        const id = String(block['id'] ?? '');
+        if (id) {
+          await walkForResources(apiKey, id, depth + 1, maxDepth, cap, out, seen);
+          if (out.length >= cap) return;
         }
       }
     }
