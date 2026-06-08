@@ -8,10 +8,12 @@ import { fileURLToPath } from 'node:url';
 
 export const NORC_SKILL_VERSION = 8;
 
+// Vendored inside the server package (server/skills/…) so it ships in the Docker
+// image — the build context is ./server, so a repo-root path wouldn't be present.
+// '../../skills/…' resolves the same from src/lib (dev) and dist/lib (built).
 const SKILL_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
-  '../../..',
-  'skills/agent/SKILL.md',
+  '../../skills/agent/SKILL.md',
 );
 
 /** Read the skill markdown, templated with the live NORC URL + version. */

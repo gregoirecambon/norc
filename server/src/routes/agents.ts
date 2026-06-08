@@ -39,10 +39,11 @@ async function syncAgentBestEffort(agent: { id: string; name: string; adapterTyp
   }
 }
 
+// Vendored inside the server package (server/skills/…) so it ships in the Docker
+// image. '../../skills/…' resolves the same from src/routes (dev) and dist/routes.
 const SKILL_PATH = path.join(
   path.dirname(fileURLToPath(import.meta.url)),
-  '../../..',
-  'skills/connect/SKILL.md',
+  '../../skills/connect/SKILL.md',
 );
 
 const SECRET_FIELDS = new Set(['apiKey', 'authToken', 'token', 'password', 'secret', 'wsPrivateKey', 'wsPublicKey']);

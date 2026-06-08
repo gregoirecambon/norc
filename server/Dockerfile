@@ -15,6 +15,9 @@ RUN npm install -g pnpm
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --prod --frozen-lockfile 2>/dev/null || pnpm install --prod
 COPY --from=builder /app/dist ./dist
+# The agent/connect skill markdown served at /api/skill & /api/agents/invite.
+# Resolved at runtime as ../../skills from dist/lib & dist/routes (→ /app/skills).
+COPY skills ./skills
 RUN mkdir -p /data
 ENV DATABASE_PATH=/data/norc.db
 EXPOSE 3001
