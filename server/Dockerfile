@@ -1,6 +1,6 @@
 FROM node:22-alpine AS builder
 WORKDIR /app
-RUN npm install -g pnpm
+RUN npm install -g pnpm@9
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --frozen-lockfile 2>/dev/null || pnpm install
 COPY src ./src
@@ -11,7 +11,7 @@ RUN cp -r src/db/migrations dist/db/migrations
 
 FROM node:22-alpine
 WORKDIR /app
-RUN npm install -g pnpm
+RUN npm install -g pnpm@9
 COPY package.json pnpm-lock.yaml* ./
 RUN pnpm install --prod --frozen-lockfile 2>/dev/null || pnpm install --prod
 COPY --from=builder /app/dist ./dist
