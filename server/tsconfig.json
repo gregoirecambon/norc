@@ -16,5 +16,9 @@
     "rootDir": "src",
     "declaration": true
   },
-  "include": ["src"]
+  "include": ["src"],
+  // Tests are run by vitest (its own toolchain), never compiled into dist — and
+  // vitest is a workspace-root devDep absent from the server image, so compiling
+  // them here breaks the Docker build. Exclude them from tsc.
+  "exclude": ["src/**/*.test.ts", "src/__tests__"]
 }
