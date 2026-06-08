@@ -152,12 +152,19 @@ export function generateWsKeypair(): WsKeypair {
 
 // Builds the OpenClaw v3 device-auth signature payload.
 // Scopes are joined with comma; empty string for no scopes.
+//
+// The `token` field MUST equal whatever we send in `connect.params.auth.token`:
+// the gateway reconstructs this exact payload with `token = connectParams.auth.token ?? ''`
+// (resolveSignatureToken → buildDeviceAuthPayloadV3) before verifying the signature.
+// On a gateway in `authMode=token`, signing with an empty token while sending a real
+// `auth.token` (or vice-versa) makes the signature mismatch. Empty string = no token.
 function buildDeviceSignaturePayload(params: {
   deviceId: string;
   role: 'operator' | 'node';
   scopes: string[];
   signedAtMs: number;
   nonce: string;
+  token: string;
 }): string {
   const clientId = params.role === 'node' ? 'node-host' : 'gateway-client';
   const clientMode = params.role === 'node' ? 'node' : 'backend';
@@ -169,7 +176,7 @@ function buildDeviceSignaturePayload(params: {
     params.role,
     params.scopes.join(','),
     String(params.signedAtMs),
-    '',               // token (none for device-identity auth)
+    params.token,     // must match connect.params.auth.token (gateway folds it into the signed payload)
     params.nonce,
     process.platform, // platform
     '',               // deviceFamily
@@ -185,6 +192,7 @@ async function connectWithDeviceIdentity(
   keypair: WsKeypair,
   role: 'operator' | 'node',
   scopes: string[],
+  authToken: string | null = null,
   timeoutMs = 12_000,
 ): Promise<WebSocket> {
   const clientId = role === 'node' ? 'node-host' : 'gateway-client';
@@ -219,7 +227,7 @@ async function connectWithDeviceIdentity(
           return;
         }
         const signedAtMs = Date.now();
-        const payload = buildDeviceSignaturePayload({ deviceId: keypair.deviceId, role, scopes, signedAtMs, nonce });
+        const payload = buildDeviceSignaturePayload({ deviceId: keypair.deviceId, role, scopes, signedAtMs, nonce, token: authToken ?? '' });
         const signature = cryptoSign(null, Buffer.from(payload, 'utf8'), keypair.privateKeyPem).toString('base64url');
 
         ws.send(JSON.stringify({
@@ -233,6 +241,10 @@ async function connectWithDeviceIdentity(
             role,
             scopes,
             device: { id: keypair.deviceId, publicKey: keypair.publicKeyB64, signedAt: signedAtMs, nonce, signature },
+            // On a token-mode gateway the device signature alone is rejected with
+            // `token_missing` — the shared token must ride in auth.token too (and is
+            // bound into the signature above). Omitted entirely when no token is set.
+            ...(authToken ? { auth: { token: authToken } } : {}),
           },
         }));
         return;
@@ -275,13 +287,14 @@ export async function initiateWsPairing(
 
   const keypair = readKeypairFromConfig(config);
   if (!keypair) return { status: 'failed', error: 'No keypair found — generate one first' };
+  const authToken = typeof config['authToken'] === 'string' ? config['authToken'] : null;
 
   // Connect as operator with operator.write scope.
   // On first connect (not yet approved): OpenClaw creates a pairing request and rejects → pending.
   // After admin approval in Control UI: connection succeeds → paired.
   const OPERATOR_SCOPES = ['operator.write', 'operator.read'];
   try {
-    const ws = await connectWithDeviceIdentity(url, keypair, 'operator', OPERATOR_SCOPES);
+    const ws = await connectWithDeviceIdentity(url, keypair, 'operator', OPERATOR_SCOPES, authToken);
     ws.close();
     return { status: 'paired' };
   } catch (err) {
@@ -333,7 +346,7 @@ export async function sendOpenclawChallenge(
   const message = `Norc handshake test. Make a POST request to ${callbackUrl} with JSON body {"nonce":"${nonce}"}. Use bash or any available tool.${tokenReminder}`;
 
   if (keypair) {
-    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, handshakeId, message, 'handshake');
+    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, handshakeId, message, 'handshake', authToken);
   } else {
     await sendChallengeViaHttp(wsUrl, authToken, ocAgentId, handshakeId, message, 'handshake');
   }
@@ -359,7 +372,7 @@ export async function sendOpenclawMessage(
     : agentName;
   const idKey = `${sessionKind}-${Date.now()}`;
   if (keypair) {
-    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, sessionKind);
+    await sendChallengeViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, sessionKind, authToken);
   } else {
     await sendChallengeViaHttp(wsUrl, authToken, ocAgentId, idKey, message, sessionKind);
   }
@@ -374,8 +387,9 @@ async function sendChallengeViaWebSocket(
   idKey: string,
   message: string,
   sessionKind: string,
+  authToken: string | null,
 ): Promise<void> {
-  const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
+  const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES, authToken);
 
   const reqId = randomUUID();
   await new Promise<void>((resolve, reject) => {
@@ -488,7 +502,7 @@ export async function dispatchOpenclaw(
 
   try {
     const text = keypair
-      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName, sessionKey, captureMs)
+      ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName, sessionKey, captureMs, authToken)
       : await dispatchViaHttp(wsUrl, authToken, ocAgentId, message, sessionKey, captureMs);
     if (text && text.trim()) return { ok: true, supported: true, text: text.trim() };
     // Bare ACK — the agent will report back via the Agent API.
@@ -520,8 +534,9 @@ async function dispatchViaWebSocket(
   agentName: string,
   sessionKey: string,
   captureMs: number,
+  authToken: string | null,
 ): Promise<string> {
-  const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES);
+  const ws = await connectWithDeviceIdentity(wsUrl, keypair, 'operator', OPERATOR_SCOPES, authToken);
   const subId = randomUUID();
   const reqId = randomUUID();
   const waitId = randomUUID();
