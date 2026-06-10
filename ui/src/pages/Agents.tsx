@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { listAgents, syncAgentToNotion, type AgentRow } from '../api/agents.js';
-import { getNotionConfig } from '../api/notion.js';
+import { getNotionConfig, listOrgMembers, type OrgMemberRow } from '../api/notion.js';
 import { AgentTable } from '../components/AgentTable.js';
 import { AddAgentModal } from '../components/AddAgentModal.js';
 import { parseSse } from '../lib/sse.js';
@@ -19,6 +19,7 @@ export default function AgentsPage() {
   const [provisioned, setProvisioned] = useState(false);
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
+  const [orgMembers, setOrgMembers] = useState<OrgMemberRow[]>([]);
 
   useEffect(() => {
     listAgents()
@@ -28,6 +29,9 @@ export default function AgentsPage() {
     getNotionConfig()
       .then(cfg => setProvisioned(cfg.integration?.workspaceStatus === 'provisioned'))
       .catch(() => setProvisioned(false));
+    listOrgMembers()
+      .then(setOrgMembers)
+      .catch(() => setOrgMembers([]));
   }, []);
 
   useEffect(() => {
@@ -270,6 +274,36 @@ export default function AgentsPage() {
                 onConfigUpdated={handleConfigUpdated}
                 onSynced={handleSynced}
               />
+            </div>
+          </>
+        )}
+
+        {/* Org roster — NORC itself + the human team from the Notion Org DB (read-only) */}
+        {orgMembers.length > 0 && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.6px', margin: '32px 0 10px' }}>
+              Org roster
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(196px, 1fr))', gap: 12 }}>
+              {orgMembers.map(m => (
+                <div key={m.pageId} style={cardStyle}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 8, gap: 6 }}>
+                    <span style={{ fontWeight: 600, fontSize: 14, color: 'var(--text-primary)', lineHeight: 1.3 }}>
+                      {m.type === 'orchestrator' ? '🧭 ' : ''}{m.name || '(unnamed)'}
+                    </span>
+                    <span style={{
+                      padding: '2px 8px', borderRadius: 4,
+                      background: m.type === 'orchestrator' ? 'var(--tint-lavender)' : 'var(--surface1)',
+                      color: m.type === 'orchestrator' ? 'var(--tint-lavender-text)' : 'var(--text-dim)',
+                      fontSize: 11, fontWeight: 600, flexShrink: 0,
+                    }}>
+                      {m.type === 'orchestrator' ? 'Orchestrator' : 'Human'}
+                    </span>
+                  </div>
+                  {m.specialty && <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 2 }}>{m.specialty}</div>}
+                  {m.status && <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>{m.status}</div>}
+                </div>
+              ))}
             </div>
           </>
         )}

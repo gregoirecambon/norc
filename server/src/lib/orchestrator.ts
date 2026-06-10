@@ -40,6 +40,15 @@ import { notionQuery } from './notion-client.js';
 import { getNorcSettings } from './norc-settings.js';
 import { triage, assessOutcome, classifyTaskWorthy, type TriageCandidate, type TaskWorthy } from './orchestrator-agent.js';
 import { enrichCandidates, buildTaskContext } from './triage-context.js';
+import { resolveOrgMembers, listHumans, type OrgMember } from './org-members.js';
+import { norcDecide, type NorcAction, type NorcDecision, type NorcOpenTask } from './norc-agent.js';
+import { getNorcOrgPageId } from './norc-identity.js';
+import {
+  createPendingChange, attachProposalComment, findPendingByDiscussion, resolveChange,
+  applySelfChange, parseApprovalReply, renderSelfChangeDiff, describeCurrentValue, describeProposedValue,
+  type PendingSelfChange,
+} from './self-changes.js';
+import { agentNamesByOrgPage } from './notion-mentions.js';
 import {
   postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning,
   postCommentRich, postCommentReplyRich, type RichSeg, appendBlocks,
@@ -116,6 +125,65 @@ async function safeWrite(label: string, fn: () => Promise<unknown>): Promise<voi
   } catch (err) {
     emitLog(`write-back error (${label}): ${err instanceof Error ? err.message : 'unknown'}`);
   }
+}
+
+/** Notion ids: dashed and dashless forms compare equal after normalization. */
+function normId(id: string): string {
+  return id.replace(/-/g, '').toLowerCase();
+}
+
+/** Is this page id NORC's own Org DB page (Type = Orchestrator)? */
+function isNorcPageId(id: string): boolean {
+  const norc = getNorcOrgPageId();
+  return !!norc && normId(norc) === normId(id);
+}
+
+/**
+ * Org DB HUMANS referenced by a task's "Assigned To" relation. Registered
+ * agents are filtered out locally (no Notion call); the rest resolve through
+ * the TTL-cached Org DB lookup. A human assignee means: never dispatch.
+ */
+async function humanAssignees(apiKey: string, props: unknown): Promise<OrgMember[]> {
+  const assignedIds = getRelationIds(props, 'Assigned To');
+  if (assignedIds.length === 0) return [];
+  const agentOrgIds = new Set(
+    db.select().from(agents).all()
+      .map(a => (a.orgDbPageId ? normId(a.orgDbPageId) : ''))
+      .filter(Boolean),
+  );
+  const lookup = assignedIds.filter(id => !agentOrgIds.has(normId(id)));
+  if (lookup.length === 0) return [];
+  const members = await resolveOrgMembers(apiKey, lookup);
+  return members.filter(m => m.type === 'human');
+}
+
+/**
+ * Tell a human assignee about their task: one rich comment, with a real @user
+ * mention when the member's Org DB page has an Owner (that's what produces a
+ * Notion notification). No run is minted, no status is written, and no timeout
+ * applies — the human closes the loop by setting Status to Done, which the
+ * webhook turns into a dependency release.
+ */
+async function notifyHumanAssignee(
+  integration: Integration,
+  anchor: Anchor,
+  human: OrgMember,
+  dedupKey: string,
+  opts: { intro?: string } = {},
+): Promise<void> {
+  if (alreadyProcessed(dedupKey)) return;
+  markProcessed(dedupKey);
+  const owner = human.ownerUserIds[0] ?? null;
+  const segs: RichSeg[] = [];
+  if (owner) segs.push({ userId: owner }, ' ');
+  segs.push(
+    `📋 **NORC**\n${opts.intro ?? 'This task is assigned to'} `,
+    { pageId: human.pageId },
+    `. I'll track it — set Status to **Done** when finished and I'll release anything that depends on it.`,
+  );
+  if (!owner) segs.push(`\n_(Set "Owner" on their Org DB page so I can notify them directly.)_`);
+  await safeWrite('human assignee note', () => postAgentRich(integration.apiKey, anchor.pageId, null, segs));
+  emitLog(`task ${anchor.pageId} is assigned to human "${human.name || human.pageId}" — notified, no agent dispatched`, 'NORC', anchor.pageId);
 }
 
 /** Record a NORC-authored comment id so we don't re-trigger on our own comment. */
@@ -265,8 +333,22 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
 
   const thread = await listThreadComments(apiKey, threadBlockId);
   const triggering = thread.find(c => c.id === commentId);
-  const matched = matchAgents(extractMentionedPageIds(triggering?.richText ?? []));
-  if (matched.length === 0) {
+
+  // A reply inside a pending self-change's proposal thread is a VERDICT
+  // (approve/reject), never a trigger — checked before any mention matching.
+  if (triggering?.discussionId) {
+    const pendingChange = findPendingByDiscussion(triggering.discussionId);
+    if (pendingChange) {
+      markProcessed(triggerKey);
+      await handleSelfChangeVerdict(integration, pendingChange, triggering);
+      return;
+    }
+  }
+
+  const mentionIds = extractMentionedPageIds(triggering?.richText ?? []);
+  const norcMentioned = mentionIds.some(isNorcPageId);
+  const matched = matchAgents(mentionIds);
+  if (matched.length === 0 && !norcMentioned) {
     const anchor = await resolveAnchor(apiKey, pageId);
     const commentedText = parent?.type === 'block' ? await readBlockText(apiKey, threadBlockId) : '';
     const handled = await triageUnhandled(integration, anchor, {
@@ -281,13 +363,25 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
   const anchor = await resolveAnchor(apiKey, pageId);
   markProcessed(triggerKey);
   const onText = parent?.type === 'block' ? ' (on text)' : '';
-  emitLog(`mention detected in comment on ${anchor.kind} page ${pageId}${onText}: ${matched.map(a => a.name).join(', ')}`, 'NORC', pageId);
+  emitLog(`mention detected in comment on ${anchor.kind} page ${pageId}${onText}: ${[...(norcMentioned ? ['NORC'] : []), ...matched.map(a => a.name)].join(', ')}`, 'NORC', pageId);
 
   // For an inline comment, fetch the text it's anchored to so the agent knows
   // exactly what the human is reacting to.
   const commentedText = parent?.type === 'block' ? await readBlockText(apiKey, threadBlockId) : '';
 
   const request = (triggering?.plainText ?? '').trim() || 'Please respond.';
+
+  // @NORC → the orchestrator's own internal turn (no adapter dispatch). Other
+  // agents mentioned in the same comment still get their turns below.
+  if (norcMentioned) {
+    await handleNorcTurn(integration, anchor, {
+      request, thread,
+      discussionId: triggering?.discussionId ?? null,
+      commentedText,
+      triggeringUserId: triggering?.authorId ?? triggeringUserId,
+    });
+    if (matched.length === 0) return;
+  }
 
   // Chat or work? Real WORK on a non-task surface becomes a tracked task that
   // goes through the capacity gate (queued when the agent is busy); pure chat
@@ -472,7 +566,30 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   ];
 
   const matched = matchAgents(candidateIds);
+  // Human assignees never get a dispatch — notify each once (idempotent per
+  // (page, member)) and track via the Done webhook. They also make the event
+  // "handled": a human's task must not fall through to triage.
+  const humans = anchor.kind === 'task' ? await humanAssignees(apiKey, properties) : [];
+  for (const human of humans) {
+    await notifyHumanAssignee(integration, anchor, human, `page:${pageId}:human:${normId(human.pageId)}`);
+  }
+
+  // NORC referenced (e.g. the task is assigned to NORC's Org DB page) → its own
+  // internal turn, never an adapter dispatch. Idempotent per page.
+  const norcReferenced = candidateIds.some(isNorcPageId);
+  if (norcReferenced && !alreadyProcessed(`page:${pageId}:norc`)) {
+    markProcessed(`page:${pageId}:norc`);
+    const thread = await listThreadComments(apiKey, pageId);
+    await handleNorcTurn(integration, anchor, {
+      request: anchor.kind === 'task'
+        ? 'You (NORC) were assigned this task. Decide how to handle it: answer it yourself, route it to the right agent or human, triage it, or update its status.'
+        : `You (NORC) were referenced on this ${anchor.kind}. Respond and act as needed.`,
+      thread, triggeringUserId,
+    });
+  }
+
   if (matched.length === 0) {
+    if (humans.length > 0 || norcReferenced) return; // handled above — no triage
     const thread = await listThreadComments(apiKey, pageId);
     const handled = await triageUnhandled(integration, anchor, { text: '', thread, dedupId: pageId, triggeringUserId });
     if (!handled) emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`, 'NORC', pageId);
@@ -591,13 +708,25 @@ async function triageUnhandled(integration: Integration, anchor: Anchor, opts: T
       emitLog(`triage skipped: task ${anchor.pageId} waits on ${unmet.length} dependenc${unmet.length === 1 ? 'y' : 'ies'}`, 'Triage', anchor.pageId);
       return true;
     }
+    // A task assigned to a HUMAN is theirs — the co-CEO must not route an agent
+    // onto it (comments there are the human's conversation). Deliberate hold;
+    // reassigning to an agent dispatches normally.
+    const humans = await humanAssignees(integration.apiKey, (anchor.page as Record<string, unknown>)['properties']);
+    if (humans.length > 0) {
+      emitLog(`triage skipped: task ${anchor.pageId} is assigned to human ${humans.map(h => h.name || h.pageId).join(', ')}`, 'Triage', anchor.pageId);
+      return true;
+    }
   }
 
   const dedupKey = `triage:${opts.dedupId}`;
   if (alreadyProcessed(dedupKey)) return true; // already triaged — don't re-fire or re-log
   markProcessed(dedupKey);
 
-  if (db.select().from(agents).all().length === 0) { emitLog('triage skipped: no agents registered', 'Triage'); return false; }
+  if (db.select().from(agents).all().length === 0
+    && (await listHumans(integration.apiKey).catch(() => [] as OrgMember[])).length === 0) {
+    emitLog('triage skipped: no agents or humans registered', 'Triage');
+    return false;
+  }
 
   await runTriage(integration, anchor, {
     text: opts.text, thread: opts.thread, discussionId: opts.discussionId, commentedText: opts.commentedText,
@@ -645,8 +774,11 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     else await safeWrite('triage comment', () => postAgentComment(apiKey, anchor.pageId, full, who));
   };
 
-  const candidates = rosterCandidates(excludeNames);
-  if (candidates.length === 0) {
+  const agentCandidates = rosterCandidates(excludeNames);
+  // Humans join the roster as LAST-RESORT, suggest-only candidates (excluded
+  // agents are timed-out agents — humans never time out, so no exclusions).
+  const humanMembers = await listHumans(apiKey).catch(() => [] as OrgMember[]);
+  if (agentCandidates.length === 0 && humanMembers.length === 0) {
     await announce('No remaining agents to try — please assign someone manually, or tell me to investigate.', true);
     emitLog('triage: no remaining agents after exclusions', 'Triage');
     return 'no-agents';
@@ -662,7 +794,17 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   // Evidence for the decision: each candidate's Org DB profile (properties +
   // bio) and the anchor's body/KPIs/project objective. Best-effort — a failed
   // read falls back to the registration-metadata roster.
-  const enriched = await enrichCandidates(apiKey, candidates);
+  const enriched = await enrichCandidates(apiKey, agentCandidates);
+  const candidates: TriageCandidate[] = [
+    ...enriched,
+    ...humanMembers.map(h => ({
+      kind: 'human' as const,
+      name: h.name || '(unnamed)',
+      specialty: h.specialty,
+      capabilities: h.capabilities,
+      ...(h.description ? { description: h.description } : {}),
+    })),
+  ];
   const taskContext = await buildTaskContext(apiKey, anchor).catch(() => undefined);
   const retriageNote = excludeNames.length
     ? `This is a RE-TRIAGE: ${excludeNames.map(n => `@${n}`).join(', ')} already timed out on this exact work and ${excludeNames.length === 1 ? 'is' : 'are'} excluded from the roster. Route only to a different agent with cited evidence; otherwise ignore and ask the human.`
@@ -677,7 +819,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       model: settings!.orchestratorModel,
       systemPrompt: settings!.orchestratorSystemPrompt ?? undefined,
       kind: anchor.kind, title, text: ctx.text,
-      commentedText: ctx.commentedText, conversation, candidates: enriched,
+      commentedText: ctx.commentedText, conversation, candidates,
       taskContext, retriageNote,
     });
   } catch (err) {
@@ -722,6 +864,22 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     if (ctx.triggeringUserId) segs.push({ userId: ctx.triggeringUserId }, ' ');
     segs.push(`🧭 **NORC Triage Agent**\n${prefix}${why} I think `, { pageId: routed.orgDbPageId }, ` could handle this — reply "@${routed.name} go" to assign.`);
     await postAgentRich(apiKey, anchor.pageId, ctx.discussionId, segs);
+    return 'suggested';
+  }
+  // A human pick is ALWAYS a suggestion (parseDecision downgrades any "route"
+  // on a human): propose the assignment, notify their Owner, never dispatch.
+  const suggestedHuman = decision.agent
+    ? humanMembers.find(h => (h.name || '').toLowerCase() === decision.agent!.replace(/^@/, '').trim().toLowerCase()) ?? null
+    : null;
+  if (suggestedHuman) {
+    const why = decision.message?.trim() || 'No AI agent covers this.';
+    const segs: RichSeg[] = [];
+    if (ctx.triggeringUserId) segs.push({ userId: ctx.triggeringUserId }, ' ');
+    segs.push(`🧭 **NORC Triage Agent**\n${prefix}${why} I suggest `, { pageId: suggestedHuman.pageId }, ` takes it — add them to "Assigned To" to confirm.`);
+    const ownerId = suggestedHuman.ownerUserIds[0] ?? null;
+    if (ownerId && ownerId !== ctx.triggeringUserId) segs.push(' cc ', { userId: ownerId });
+    await postAgentRich(apiKey, anchor.pageId, ctx.discussionId, segs);
+    emitLog(`triage: suggested human "${suggestedHuman.name || suggestedHuman.pageId}" (confidence ${decision.confidence.toFixed(2)})`, 'Triage');
     return 'suggested';
   }
   await announce(decision.message?.trim() || 'No one is assigned and no registered agent clearly fits. Who should take this?', true);
@@ -942,7 +1100,9 @@ export async function releaseDependents(integration: Integration, completedTaskP
     let anchor: Anchor;
     try { anchor = await resolveAnchor(apiKey, depTaskId); } catch { continue; }
     const assigned = matchAgents(getRelationIds(props, 'Assigned To'));
-    emitLog(`dependencies met for task ${depTaskId} — releasing${assigned.length ? ` to ${assigned.map(a => a.name).join(', ')}` : ' via triage'}`, 'Triage', depTaskId);
+    const humans = await humanAssignees(apiKey, props);
+    const to = [...assigned.map(a => a.name), ...humans.map(h => `${h.name || h.pageId} (human)`)];
+    emitLog(`dependencies met for task ${depTaskId} — releasing${to.length ? ` to ${to.join(', ')}` : ' via triage'}`, 'Triage', depTaskId);
     if (assigned.length > 0) {
       for (const agent of assigned) {
         markProcessed(`page:${depTaskId}:${agent.agentId}`); // handled here — later edits must not double-fire
@@ -952,7 +1112,13 @@ export async function releaseDependents(integration: Integration, completedTaskP
           manageTaskStatus: true, how: 'dependency release',
         });
       }
-    } else {
+    }
+    for (const human of humans) {
+      await notifyHumanAssignee(integration, anchor, human,
+        `dep-release-human:${depTaskId}:${normId(human.pageId)}`,
+        { intro: 'A task this one depends on is complete — this task is now unblocked. Over to' });
+    }
+    if (assigned.length === 0 && humans.length === 0) {
       // runTriage directly (not triageUnhandled): propose-tasks pre-consumes
       // the `triage:<id>` key at creation, which would short-circuit the hold→release path.
       await runTriage(integration, anchor, { text: getAnyTitle(props), thread: [] }, [],
@@ -1067,13 +1233,20 @@ export async function dispatchScheduledTask(integration: Integration, taskPageId
   }
   const props = (anchor.page as Record<string, unknown>)['properties'];
   const matched = matchAgents(getRelationIds(props, 'Assigned To'));
+  const humans = await humanAssignees(apiKey, props);
   if (matched.length) {
     const request = 'This scheduled task is now due. Complete it using the context above and report your result.';
     for (const agent of matched) {
       await requestAgentTurn(integration, anchor, agent, { thread: [], request, manageTaskStatus: true, how });
     }
-    return;
   }
+  // The dedup key carries the occurrence, so a recurring task re-notifies each time it's due.
+  for (const human of humans) {
+    await notifyHumanAssignee(integration, anchor, human,
+      `sched-human:${occurrenceKey}:${normId(human.pageId)}`,
+      { intro: 'This scheduled task is now due. Over to' });
+  }
+  if (matched.length || humans.length) return;
   // No assignee → triage assigns/asks.
   await triageUnhandled(integration, anchor, { text: getAnyTitle(props), thread: [], dedupId: occurrenceKey });
 }
@@ -1648,4 +1821,259 @@ async function handleBlockedReply(integration: Integration, anchor: Anchor, agen
   const thread = await listThreadComments(apiKey, anchor.pageId).catch(() => [] as ThreadComment[]);
   await runTriage(integration, anchor, { text: need ?? '', thread }, [agentRef.name], prefix);
   return true;
+}
+
+// ─── The NORC agent: the orchestrator as a first-class, mentionable team member ───
+
+interface NorcTurnOpts {
+  request: string;
+  thread: ThreadComment[];
+  discussionId?: string | null;
+  commentedText?: string;
+  triggeringUserId?: string | null;
+}
+
+/** Open work for the NORC snapshot — one bounded Tasks DB query. */
+async function listOpenTasks(apiKey: string): Promise<NorcOpenTask[]> {
+  const tasksDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
+  if (!tasksDb) return [];
+  try {
+    const res = await notionQuery<Record<string, unknown>>(apiKey, tasksDb.notionDatabaseId, {
+      filter: { or: ['Backlog', 'Queued', 'In Progress', 'Blocked'].map(s => ({ property: 'Status', select: { equals: s } })) },
+      page_size: 30,
+    });
+    const results = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
+    const agentNames = agentNamesByOrgPage();
+    return results.flatMap(row => {
+      const id = typeof row['id'] === 'string' ? row['id'] : '';
+      if (!id) return [];
+      const props = row['properties'];
+      const assignee = getRelationIds(props, 'Assigned To')
+        .map(rid => agentNames.get(normId(rid)))
+        .filter((n): n is string => !!n)
+        .join(', ');
+      return [{
+        id,
+        title: getAnyTitle(props) || '(untitled)',
+        status: getSelect(props, 'Status') ?? '',
+        ...(assignee ? { assignee } : {}),
+      }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Run a NORC turn: someone @mentioned NORC (or assigned it a task). One LLM
+ * call decides { reply, actions[] }; each whitelisted action executes here with
+ * its outcome reported back in the same comment. NEVER an adapter dispatch and
+ * never a taskRuns row — NORC is internal.
+ */
+async function handleNorcTurn(integration: Integration, anchor: Anchor, opts: NorcTurnOpts): Promise<void> {
+  const apiKey = integration.apiKey;
+  const settings = getNorcSettings();
+  const say = async (text: string) => {
+    if (opts.discussionId) await safeWrite('norc reply', () => postAgentReply(apiKey, opts.discussionId!, text));
+    else await safeWrite('norc comment', () => postAgentComment(apiKey, anchor.pageId, text));
+  };
+  if (!triageConfigured(settings)) {
+    await say(`🧭 **NORC**\nMy orchestrator LLM isn't configured, so I can only watch. Enable it in **Operations → Orchestrator** and mention me again.`);
+    return;
+  }
+  emitLog(`NORC turn on ${anchor.kind} page ${anchor.pageId}: "${opts.request.slice(0, 120)}"`, 'NORC', anchor.pageId);
+
+  // Workspace snapshot: live roster, humans, open work, load, own settings.
+  const agentCandidates = await enrichCandidates(apiKey, rosterCandidates([]));
+  const humanMembers = await listHumans(apiKey).catch(() => [] as OrgMember[]);
+  const openTasks = await listOpenTasks(apiKey);
+  const allAgents = db.select().from(agents).all();
+  const conversation = opts.thread
+    .filter(c => c.authorId !== integration.botUserId)
+    .map(c => c.plainText)
+    .filter(t => t.trim().length > 0);
+
+  let decision: NorcDecision;
+  try {
+    decision = await norcDecide({
+      provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+      apiKey: settings!.orchestratorApiKey ?? '',
+      baseUrl: settings!.orchestratorBaseUrl,
+      model: settings!.orchestratorModel,
+      systemPrompt: settings!.orchestratorSystemPrompt ?? undefined,
+      request: opts.request,
+      conversation,
+      anchorKind: anchor.kind,
+      anchorTitle: getAnyTitle((anchor.page as Record<string, unknown>)['properties']),
+      workspace: {
+        agents: agentCandidates,
+        humans: humanMembers.map(h => ({ name: h.name, specialty: h.specialty })),
+        openTasks,
+        activeRuns: allAgents.reduce((n, a) => n + activeRunCount(a.id), 0),
+        queuedTurns: allAgents.reduce((n, a) => n + pendingCount(a.id), 0),
+        settings: {
+          autoRouteThreshold: settings!.autoRouteThreshold,
+          autoProposeEnabled: settings!.autoProposeEnabled,
+          autoProposeIntervalHours: settings!.autoProposeIntervalHours,
+          orchestratorSystemPrompt: settings!.orchestratorSystemPrompt,
+        },
+      },
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    emitLog(`NORC turn error: ${msg}`, 'NORC', anchor.pageId);
+    await say(`🧭 **NORC**\nI hit an error working on this (${msg}) — please try again.`);
+    return;
+  }
+
+  // Execute actions sequentially; each failure becomes a visible ⚠️ line
+  // instead of killing the turn.
+  const resultLines: string[] = [];
+  for (const action of decision.actions) {
+    try {
+      const line = await executeNorcAction(integration, anchor, action, opts);
+      if (line) resultLines.push(line);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'unknown';
+      emitLog(`NORC action ${action.type} failed: ${msg}`, 'NORC', anchor.pageId);
+      resultLines.push(`⚠️ ${action.type} failed: ${msg}`);
+    }
+  }
+
+  await say(`🧭 **NORC**\n${decision.reply}${resultLines.length ? `\n\n${resultLines.join('\n')}` : ''}`);
+  emitLog(`NORC turn done on ${anchor.pageId} — ${decision.actions.length} action(s)`, 'NORC', anchor.pageId);
+}
+
+/** Execute one whitelisted NORC action; returns the ✅ line for the reply. */
+async function executeNorcAction(integration: Integration, anchor: Anchor, action: NorcAction, opts: NorcTurnOpts): Promise<string> {
+  const apiKey = integration.apiKey;
+  switch (action.type) {
+    case 'assign_task': {
+      const taskAnchor = await resolveAnchor(apiKey, action.taskPageId);
+      if (taskAnchor.kind !== 'task') throw new Error('that page is not a task');
+      const title = getAnyTitle((taskAnchor.page as Record<string, unknown>)['properties']) || action.taskPageId;
+      const status = getSelect((taskAnchor.page as Record<string, unknown>)['properties'], 'Status') ?? '';
+      if (status === 'Done' || status === 'Failed') throw new Error(`"${title}" is already ${status}`);
+      const agent = matchAgentByName(action.assignee);
+      if (agent) {
+        markProcessed(`page:${taskAnchor.pageId}:${agent.agentId}`); // handled here — the property webhook must not double-fire
+        await safeWrite('task assignee', () => setTaskAssignee(apiKey, taskAnchor.pageId, [agent.orgDbPageId]));
+        await requestAgentTurn(integration, taskAnchor, agent, {
+          thread: [],
+          request: 'NORC assigned you this task. Complete it using the context above and report your result.',
+          triggeringUserId: opts.triggeringUserId,
+          manageTaskStatus: true, how: 'norc-agent action',
+        });
+        return `✅ assigned "${title}" to @${agent.name} and dispatched it`;
+      }
+      const humans = await listHumans(apiKey).catch(() => [] as OrgMember[]);
+      const wanted = action.assignee.replace(/^@/, '').trim().toLowerCase();
+      const human = humans.find(h => (h.name || '').toLowerCase() === wanted);
+      if (!human) throw new Error(`no agent or human named "${action.assignee}"`);
+      await setTaskAssignee(apiKey, taskAnchor.pageId, [human.pageId]);
+      await notifyHumanAssignee(integration, taskAnchor, human, `page:${taskAnchor.pageId}:human:${normId(human.pageId)}`);
+      return `✅ assigned "${title}" to ${human.name} (human) and notified them`;
+    }
+    case 'triage_task': {
+      const taskAnchor = await resolveAnchor(apiKey, action.taskPageId);
+      const title = getAnyTitle((taskAnchor.page as Record<string, unknown>)['properties']);
+      const outcome = await runTriage(integration, taskAnchor,
+        { text: title, thread: [], triggeringUserId: opts.triggeringUserId }, [],
+        'NORC was asked to triage this.');
+      return `🧭 triage of "${title || action.taskPageId}" → ${outcome}`;
+    }
+    case 'set_task_status': {
+      await setTaskStatus(apiKey, action.taskPageId, action.status);
+      if (action.status === 'Done') void releaseDependents(integration, action.taskPageId).catch(() => {});
+      return `✅ set the task's status to ${action.status}`;
+    }
+    case 'propose_tasks': {
+      const { created } = await proposeTasks({ sourcePageId: anchor.pageId, proposerName: 'NORC', tasks: action.tasks });
+      return `✅ created ${created.length} task(s)`;
+    }
+    case 'nudge_agent': {
+      const agent = matchAgentByName(action.agentName);
+      if (!agent) throw new Error(`no agent named "${action.agentName}"`);
+      // A real chat-lane dispatch — a mere @mention comment would be swallowed
+      // by NORC's own comment loop guard.
+      await requestAgentTurn(integration, anchor, agent, {
+        thread: [], request: `NORC: ${action.message}`,
+        triggeringUserId: opts.triggeringUserId,
+        lane: 'chat', manageTaskStatus: false, how: 'norc nudge',
+      });
+      return `✅ nudged @${agent.name}`;
+    }
+    case 'propose_self_change':
+      return proposeSelfChange(integration, anchor, action, opts);
+  }
+}
+
+/** Post the before→after proposal and park the change until a human verdict. */
+async function proposeSelfChange(
+  integration: Integration,
+  anchor: Anchor,
+  action: Extract<NorcAction, { type: 'propose_self_change' }>,
+  opts: NorcTurnOpts,
+): Promise<string> {
+  const apiKey = integration.apiKey;
+  const diff = renderSelfChangeDiff(action.kind, describeCurrentValue(action.kind), describeProposedValue(action.kind, action.payload));
+  const change = createPendingChange({
+    kind: action.kind, payload: action.payload, diffText: diff,
+    pageId: anchor.pageId, proposedByUserId: opts.triggeringUserId ?? null,
+  });
+  const text = [
+    `🧭 **NORC — proposed change to my own configuration**`,
+    ...(action.rationale ? [`_${action.rationale}_`] : []),
+    '```',
+    diff,
+    '```',
+    `Reply **approve** in this thread to apply, or **reject** to discard. Expires in 7 days.`,
+  ].join('\n');
+
+  const posted = opts.discussionId
+    ? await postCommentReply(apiKey, opts.discussionId, text)
+    : await postComment(apiKey, anchor.pageId, text);
+  recordOurComment(posted.commentId);
+
+  // The verdict reply is matched by discussion id. Prefer the created comment's
+  // own discussion; fall back to re-listing the page's threads if Notion didn't
+  // return one on create.
+  let discussionId = posted.discussionId ?? opts.discussionId ?? null;
+  if (!discussionId) {
+    const thread = await listThreadComments(apiKey, anchor.pageId).catch(() => [] as ThreadComment[]);
+    discussionId = thread.find(c => c.id === posted.commentId)?.discussionId ?? null;
+  }
+  attachProposalComment(change.id, posted.commentId, discussionId);
+  emitLog(`NORC proposed a self-change (${action.kind}) — awaiting approval`, 'NORC', anchor.pageId);
+  return `📝 proposed a \`${action.kind}\` change — awaiting your **approve**/**reject** in the thread`;
+}
+
+/** A reply landed in a pending self-change's thread: read it as a verdict. */
+async function handleSelfChangeVerdict(integration: Integration, pending: PendingSelfChange, triggering: ThreadComment): Promise<void> {
+  const apiKey = integration.apiKey;
+  const discussionId = pending.discussionId ?? triggering.discussionId;
+  const reply = (text: string) => safeWrite('self-change verdict reply', () =>
+    discussionId ? postAgentReply(apiKey, discussionId, text) : postAgentComment(apiKey, pending.pageId, text));
+
+  const verdict = parseApprovalReply(triggering.plainText);
+  if (verdict === 'unclear') {
+    await reply(`🧭 **NORC**\nI couldn't read that as a verdict — reply exactly **approve** or **reject** for the pending \`${pending.kind}\` change.`);
+    return;
+  }
+  if (verdict === 'reject') {
+    resolveChange(pending.id, 'rejected', triggering.authorId ?? null);
+    emitLog(`self-change ${pending.kind} rejected`, 'NORC', pending.pageId);
+    await reply(`🧭 **NORC**\n👍 Discarded the proposed \`${pending.kind}\` change. Nothing was modified.`);
+    return;
+  }
+  try {
+    const summary = await applySelfChange(apiKey, pending);
+    resolveChange(pending.id, 'approved', triggering.authorId ?? null);
+    emitLog(`self-change ${pending.kind} approved and applied`, 'NORC', pending.pageId);
+    await reply(`🧭 **NORC**\n✅ Applied — ${summary}.`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'unknown';
+    emitLog(`self-change apply failed: ${msg}`, 'NORC', pending.pageId);
+    await reply(`🧭 **NORC**\n⚠️ Approval received, but applying failed: ${msg}. The change stays pending — reply **approve** to retry or **reject** to discard.`);
+  }
 }

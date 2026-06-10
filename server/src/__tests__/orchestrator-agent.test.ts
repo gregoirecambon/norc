@@ -118,6 +118,47 @@ describe('buildTriagePrompt', () => {
   });
 });
 
+const withHumans: TriageCandidate[] = [
+  ...candidates,
+  { name: 'Greg', kind: 'human', specialty: 'partnerships, golf domain', capabilities: 'review' },
+];
+
+describe('buildTriagePrompt — human candidates', () => {
+  it('renders humans in a separate LAST RESORT section with the suggest-only rules', () => {
+    const p = buildTriagePrompt(triageInput({ candidates: withHumans }));
+    expect(p).toContain('HUMAN TEAM MEMBERS (LAST RESORT ONLY):');
+    expect(p).toContain('### Greg');
+    expect(p).toContain('ALWAYS prefer an AI agent');
+    expect(p).toContain('MUST be "suggest" (never "route")');
+    // Agents stay in their own section, before the humans.
+    expect(p.indexOf('### emilien')).toBeLessThan(p.indexOf('HUMAN TEAM MEMBERS'));
+  });
+
+  it('omits the human section and rules when no humans are in the roster', () => {
+    const p = buildTriagePrompt(triageInput());
+    expect(p).not.toContain('HUMAN TEAM MEMBERS');
+    expect(p).not.toContain('LAST RESORT');
+  });
+
+  it('renders an agent-less roster with humans only', () => {
+    const p = buildTriagePrompt(triageInput({ candidates: withHumans.filter(c => c.kind === 'human') }));
+    expect(p).toContain('(no agents registered)');
+    expect(p).toContain('### Greg');
+  });
+});
+
+describe('parseDecision — human candidates', () => {
+  it('downgrades a "route" on a human to "suggest" (hard guarantee)', () => {
+    const d = parseDecision('{"decision":"route","agent":"Greg","confidence":0.9,"message":"only Greg can sign this"}', withHumans);
+    expect(d).toEqual({ decision: 'suggest', agent: 'Greg', confidence: 0.9, message: 'only Greg can sign this' });
+  });
+
+  it('keeps a plain suggest on a human, and routing to agents is unaffected', () => {
+    expect(parseDecision('{"decision":"suggest","agent":"greg","confidence":0.4,"message":"x"}', withHumans).agent).toBe('Greg');
+    expect(parseDecision('{"decision":"route","agent":"dimi","confidence":0.8,"message":"x"}', withHumans).decision).toBe('route');
+  });
+});
+
 describe('parseAssessment', () => {
   it('parses a blocked outcome with the need', () => {
     const a = parseAssessment('{"outcome":"blocked","need":"DB credentials","message":"can\'t reach the database"}');

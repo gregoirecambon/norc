@@ -116,22 +116,37 @@ export function buildRichText(segs: RichSeg[]): unknown[] {
   return out.length ? out : toRichText(' ');
 }
 
+export interface PostedComment {
+  commentId: string;
+  /** The thread the comment belongs to — a fresh page comment starts a new one. */
+  discussionId: string | null;
+}
+
+/** The Notion comment object carries its discussion_id (used by the self-change
+ * approval flow to watch the right thread for a verdict reply). */
+function commentResult(res: Record<string, unknown>): PostedComment {
+  return {
+    commentId: String(res['id'] ?? ''),
+    discussionId: typeof res['discussion_id'] === 'string' ? res['discussion_id'] : null,
+  };
+}
+
 /** Post a page comment built from rich segments (real @mentions). */
-export async function postCommentRich(apiKey: string, pageId: string, segs: RichSeg[]): Promise<{ commentId: string }> {
+export async function postCommentRich(apiKey: string, pageId: string, segs: RichSeg[]): Promise<PostedComment> {
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     parent: { page_id: pageId },
     rich_text: buildRichText(segs),
   });
-  return { commentId: String(res['id'] ?? '') };
+  return commentResult(res);
 }
 
 /** Reply into a discussion built from rich segments (real @mentions). */
-export async function postCommentReplyRich(apiKey: string, discussionId: string, segs: RichSeg[]): Promise<{ commentId: string }> {
+export async function postCommentReplyRich(apiKey: string, discussionId: string, segs: RichSeg[]): Promise<PostedComment> {
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     discussion_id: discussionId,
     rich_text: buildRichText(segs),
   });
-  return { commentId: String(res['id'] ?? '') };
+  return commentResult(res);
 }
 
 /** Post a comment on a page; returns the created comment id (for loop guard). */
@@ -139,12 +154,12 @@ export async function postComment(
   apiKey: string,
   pageId: string,
   text: string,
-): Promise<{ commentId: string }> {
+): Promise<PostedComment> {
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     parent: { page_id: pageId },
     rich_text: toRichText(text),
   });
-  return { commentId: String(res['id'] ?? '') };
+  return commentResult(res);
 }
 
 /**
@@ -156,12 +171,12 @@ export async function postCommentReply(
   apiKey: string,
   discussionId: string,
   text: string,
-): Promise<{ commentId: string }> {
+): Promise<PostedComment> {
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     discussion_id: discussionId,
     rich_text: toRichText(text),
   });
-  return { commentId: String(res['id'] ?? '') };
+  return commentResult(res);
 }
 
 /** Post a page comment that @mentions a user (used to pull a human into the loop). */
@@ -170,12 +185,12 @@ export async function postCommentMentioning(
   pageId: string,
   userId: string,
   text: string,
-): Promise<{ commentId: string }> {
+): Promise<PostedComment> {
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     parent: { page_id: pageId },
     rich_text: toRichTextMentioning(userId, text),
   });
-  return { commentId: String(res['id'] ?? '') };
+  return commentResult(res);
 }
 
 /** Reply into a discussion with a leading @user mention. */
@@ -184,12 +199,12 @@ export async function postCommentReplyMentioning(
   discussionId: string,
   userId: string,
   text: string,
-): Promise<{ commentId: string }> {
+): Promise<PostedComment> {
   const res = await notionPost<Record<string, unknown>>(apiKey, '/comments', {
     discussion_id: discussionId,
     rich_text: toRichTextMentioning(userId, text),
   });
-  return { commentId: String(res['id'] ?? '') };
+  return commentResult(res);
 }
 
 /** Append child blocks to a page/block, chunked to Notion's 100-per-call limit. */
@@ -200,7 +215,7 @@ export async function appendBlocks(apiKey: string, pageId: string, blocks: Recor
   }
 }
 
-export type TaskStatus = 'Backlog' | 'Queued' | 'In Progress' | 'Done' | 'Failed' | 'Blocked';
+export type TaskStatus = 'Draft' | 'Backlog' | 'Queued' | 'In Progress' | 'Done' | 'Failed' | 'Blocked';
 
 /** Set a Task page's Status select. */
 export async function setTaskStatus(apiKey: string, taskPageId: string, status: TaskStatus): Promise<void> {

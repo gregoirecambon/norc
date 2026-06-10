@@ -9,6 +9,8 @@ import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
 import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus } from '../lib/notion-provision.js';
+import { ensureNorcAgent, getNorcOrgPageId } from '../lib/norc-identity.js';
+import { listHumans, resolveOrgMembers } from '../lib/org-members.js';
 import { norcBaseUrl } from '../lib/base-url.js';
 
 const router: ExpressRouter = Router();
@@ -168,7 +170,49 @@ router.post('/provision', zodMiddleware(ProvisionSchema), async (req, res) => {
     data: { workspaceStatus: 'provisioned', parentPageId: pageId, databases: created },
   });
 
+  // Give NORC its own Org DB page (Type = Orchestrator). Best-effort — never
+  // fails the provision; the boot hook / norc-agent endpoint can retry.
+  await ensureNorcAgent();
+
   res.status(201).json({ databases: created });
+});
+
+// GET /api/notion/org-members — the non-agent Org DB roster: NORC's own page
+// (Type = Orchestrator) + every Human. Read-only, TTL-cached on the lib side.
+router.get('/org-members', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.json({ members: [] });
+    return;
+  }
+  const members: Array<{ pageId: string; name: string; type: string; specialty: string; status: string }> = [];
+  const norcPageId = getNorcOrgPageId();
+  if (norcPageId) {
+    const [norc] = await resolveOrgMembers(integration.apiKey, [norcPageId]).catch(() => []);
+    if (norc) members.push({ pageId: norc.pageId, name: norc.name || 'NORC', type: 'orchestrator', specialty: norc.specialty, status: norc.status });
+  }
+  const humans = await listHumans(integration.apiKey).catch(() => []);
+  for (const h of humans) {
+    members.push({ pageId: h.pageId, name: h.name, type: 'human', specialty: h.specialty, status: h.status });
+  }
+  res.json({ members });
+});
+
+// POST /api/notion/provision/norc-agent — ensure NORC's own Org DB page exists
+// (Type = Orchestrator) so the orchestrator is @mentionable/assignable. Adds the
+// 'Orchestrator' Type option to older workspaces. Idempotent + self-healing.
+router.post('/provision/norc-agent', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the workspace first.' });
+    return;
+  }
+  const pageId = await ensureNorcAgent();
+  if (!pageId) {
+    res.status(502).json({ error: 'notion_error', message: 'Could not create or adopt the NORC agent page — check the logs.' });
+    return;
+  }
+  res.status(200).json({ ok: true, pageId });
 });
 
 // POST /api/notion/provision/company — additively add the Company DB to a

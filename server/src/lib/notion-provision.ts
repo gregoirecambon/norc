@@ -128,9 +128,14 @@ export function isInertTaskStatus(status: string | null | undefined): boolean {
 
 // --- Phase 1: base (non-relation) property schemas ------------------------
 
+// Org DB member types. 'Orchestrator' is NORC's own singleton page — kept out of
+// 'AI Agent' so Type-based sweeps (the humans roster, the agents sync) never pick
+// it up, and out of 'Human' so it's never treated as a person.
+export const ORG_TYPE_OPTIONS = ['Human', 'AI Agent', 'Orchestrator'] as const;
+
 const orgProps: Record<string, unknown> = {
   'Name': { title: {} },
-  'Type': sel('Human', 'AI Agent'),
+  'Type': sel(...ORG_TYPE_OPTIONS),
   'Technology': sel('Claude Code', 'Codex', 'Cursor', 'OpenClaw'),
   'Specialty': text(),
   'Status': sel('Available', 'Busy', 'Offline'),
@@ -251,6 +256,50 @@ export async function provisionSchedulingFields(apiKey: string, tasksDatabaseId:
  */
 export async function provisionBlockedStatus(apiKey: string, tasksDatabaseId: string): Promise<void> {
   await updateDatabase(apiKey, tasksDatabaseId, { 'Status': sel(...TASK_STATUS_OPTIONS) });
+}
+
+/**
+ * Ensure NORC itself exists in the Org DB as a singleton page (Type =
+ * Orchestrator) so it can be @mentioned and assigned like any team member.
+ * Idempotent and self-healing: the Type option merge is an additive PATCH, an
+ * existing Orchestrator page is adopted (heals a lost sqlite pointer), and a
+ * page is created only when none exists.
+ */
+export async function provisionNorcAgent(apiKey: string, orgDbId: string): Promise<{ pageId: string; url: string | null }> {
+  // Additive select merge — upgrades workspaces provisioned before 'Orchestrator' existed.
+  await updateDatabase(apiKey, orgDbId, { 'Type': sel(...ORG_TYPE_OPTIONS) });
+
+  // Adopt an existing Orchestrator page when there is one.
+  const queryRes = await fetch(`${NOTION_API}/databases/${orgDbId}/query`, {
+    method: 'POST',
+    headers: headers(apiKey),
+    body: JSON.stringify({ filter: { property: 'Type', select: { equals: 'Orchestrator' } }, page_size: 1 }),
+  });
+  const queryBody = await queryRes.json().catch(() => ({})) as Record<string, unknown>;
+  if (queryRes.ok && Array.isArray(queryBody['results']) && queryBody['results'].length > 0) {
+    const page = queryBody['results'][0] as Record<string, unknown>;
+    return { pageId: page['id'] as string, url: (page['url'] as string) ?? null };
+  }
+
+  const res = await fetch(`${NOTION_API}/pages`, {
+    method: 'POST',
+    headers: headers(apiKey),
+    body: JSON.stringify({
+      parent: { database_id: orgDbId },
+      properties: {
+        'Name': { title: [{ type: 'text', text: { content: 'NORC' } }] },
+        'Type': { select: { name: 'Orchestrator' } },
+        'Status': { select: { name: 'Available' } },
+        'Specialty': { rich_text: [{ type: 'text', text: { content: 'Task orchestration, triage, workspace operations' } }] },
+      },
+    }),
+  });
+  const body = await res.json().catch(() => ({})) as Record<string, unknown>;
+  if (!res.ok) {
+    const msg = typeof body['message'] === 'string' ? body['message'] : 'Failed to create the NORC agent page';
+    throw new Error(msg);
+  }
+  return { pageId: body['id'] as string, url: (body['url'] as string) ?? null };
 }
 
 async function getDatabase(apiKey: string, databaseId: string): Promise<Record<string, unknown>> {

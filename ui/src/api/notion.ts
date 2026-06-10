@@ -84,6 +84,21 @@ export async function provisionBlockedStatus(): Promise<{ ok: boolean }> {
   return res.json() as Promise<{ ok: boolean }>;
 }
 
+export interface OrgMemberRow {
+  pageId: string;
+  name: string;
+  type: 'orchestrator' | 'human' | string;
+  specialty: string;
+  status: string;
+}
+
+export async function listOrgMembers(): Promise<OrgMemberRow[]> {
+  const res = await fetch('/api/notion/org-members');
+  if (!res.ok) throw new Error(`${res.status}`);
+  const body = await res.json() as { members: OrgMemberRow[] };
+  return body.members;
+}
+
 export async function saveNotionKey(apiKey: string): Promise<NotionIntegration> {
   const res = await fetch('/api/notion/key', {
     method: 'POST',

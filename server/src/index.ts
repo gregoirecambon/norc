@@ -39,6 +39,8 @@ import { runAutoPropose } from './lib/auto-propose.js';
 import { escalateTimedOutRun, drainAgent } from './lib/orchestrator.js';
 import { dropPendingForAgentPage, agentsWithPending } from './lib/dispatch-queue.js';
 import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
+import { ensureNorcAgent } from './lib/norc-identity.js';
+import { expireStaleChanges } from './lib/self-changes.js';
 
 const app = express();
 app.use(cors());
@@ -125,6 +127,9 @@ setInterval(() => {
     void drainAgent(agentId).catch(err =>
       emitLog(`queue drain error for agent ${agentId}: ${err instanceof Error ? err.message : 'unknown'}`));
   }
+  // Pending NORC self-change proposals expire after 7 days (cheap sqlite update).
+  const expired = expireStaleChanges();
+  if (expired > 0) emitLog(`expired ${expired} stale NORC self-change proposal(s)`);
 }, 60_000);
 
 // Resolve one timeout candidate. Idle OpenClaw runs with a known run handle get a
@@ -234,6 +239,9 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   }, 8_000);
   // Kick off the heartbeat shortly after boot so startup settles first.
   setTimeout(() => { void heartbeatLoop(); }, 5_000);
+  // Ensure NORC's own Org DB page exists (Type = Orchestrator) — idempotent,
+  // self-healing, no-op until the workspace is provisioned.
+  setTimeout(() => { void ensureNorcAgent(); }, 6_000);
   // Deep heartbeat a bit later still (each check is a real AI call).
   setTimeout(() => { void deepHeartbeatLoop(); }, 20_000);
   // Recurring co-CEO analysis (first check a bit later; runs only when enabled).

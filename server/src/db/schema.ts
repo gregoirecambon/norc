@@ -79,6 +79,7 @@ export const notionIntegration = sqliteTable('notion_integration', {
   status:             text('status').notNull().default('pending_key'),
   parentPageId:       text('parent_page_id'),
   workspaceStatus:    text('workspace_status').notNull().default('not_provisioned'),
+  norcOrgPageId:      text('norc_org_page_id'),     // NORC's own Org DB page (Type = Orchestrator)
   createdAt:          integer('created_at').notNull(),
   updatedAt:          integer('updated_at').notNull(),
 });
@@ -278,6 +279,27 @@ export const dispatchQueue = sqliteTable('dispatch_queue', {
   enqueuedAt:    integer('enqueued_at').notNull(),
   dispatchedAt:  integer('dispatched_at'),
   droppedReason: text('dropped_reason'),
+});
+
+// NORC self-modification proposals (propose → approve). When the NORC agent is
+// asked to change its own configuration (system prompt, thresholds, automations,
+// its Org DB profile) it posts a before→after diff comment and parks the change
+// here until a human replies "approve"/"reject" in that thread. discussionId is
+// the lookup key for matching the verdict reply; same-kind pending rows are
+// superseded by newer proposals so a change can never double-apply.
+export const pendingSelfChanges = sqliteTable('pending_self_changes', {
+  id:                text('id').primaryKey(),
+  kind:              text('kind').notNull(),          // SelfChangeKind (see self-changes.ts)
+  payloadJson:       text('payload_json').notNull(),  // proposed value(s), kind-specific
+  diffText:          text('diff_text').notNull(),     // rendered before→after (display/audit)
+  status:            text('status').notNull().default('pending'), // pending|approved|rejected|expired|superseded
+  discussionId:      text('discussion_id'),           // Notion thread to watch for the verdict
+  pageId:            text('page_id').notNull(),       // where the proposal comment was posted
+  proposedCommentId: text('proposed_comment_id'),
+  proposedByUserId:  text('proposed_by_user_id'),     // who asked for the change (audit)
+  createdAt:         integer('created_at').notNull(),
+  resolvedAt:        integer('resolved_at'),
+  resolvedByUserId:  text('resolved_by_user_id'),
 });
 
 // Per-project rolling co-CEO memo — one bounded slice per Notion project, updated

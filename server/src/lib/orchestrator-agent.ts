@@ -12,6 +12,8 @@ export type TriageProvider = 'anthropic' | 'openai';
 
 export interface TriageCandidate {
   name: string;
+  /** 'human' members are last-resort, suggest-only candidates. Default: 'agent'. */
+  kind?: 'agent' | 'human';
   specialty: string;
   capabilities: string;
   technology?: string;
@@ -70,7 +72,9 @@ const DEFAULT_SYSTEM =
   'should take it. Prefer "suggest" (human confirms) under any doubt; "route" only for an obvious, confident, ' +
   'evidenced fit; "ignore" for noise, items needing no agent, or when no agent has the needed capability. ' +
   'Your confidence score is a calibration promise: above 0.5 means you can cite the exact roster evidence ' +
-  'for the match; without citable evidence, stay below 0.5.';
+  'for the match; without citable evidence, stay below 0.5. Human team members may appear in the roster as ' +
+  'a LAST RESORT: always prefer an AI agent; pick a human only when no agent plausibly fits, and then only ' +
+  'ever "suggest" — never "route" — so a person confirms the assignment.';
 
 /** One roster entry as a multi-line block. Empty key fields render explicitly as
  * "(none listed)" — load-bearing for calibration: a blank line would let the
@@ -93,9 +97,20 @@ export function rosterBlock(c: TriageCandidate): string {
 /** Assemble the triage user prompt. Pure and exported so prompt-shape changes are
  * unit-testable without an LLM call. */
 export function buildTriagePrompt(input: TriageInput): string {
-  const roster = input.candidates.length
-    ? input.candidates.map(rosterBlock).join('\n\n')
+  const agentCandidates = input.candidates.filter(c => c.kind !== 'human');
+  const humanCandidates = input.candidates.filter(c => c.kind === 'human');
+  const roster = agentCandidates.length
+    ? agentCandidates.map(rosterBlock).join('\n\n')
     : '(no agents registered)';
+  const humanRoster = humanCandidates.length
+    ? ['', 'HUMAN TEAM MEMBERS (LAST RESORT ONLY):', humanCandidates.map(rosterBlock).join('\n\n')].join('\n')
+    : '';
+  const humanRules = humanCandidates.length
+    ? [
+        `Humans are a LAST RESORT: ALWAYS prefer an AI agent. Consider a human ONLY when no listed agent's capabilities plausibly cover this work.`,
+        `A human can never be auto-routed: when your best fit is a human, the decision MUST be "suggest" (never "route"), with a message proposing the assignment for a person to confirm.`,
+      ]
+    : [];
   const commented = input.commentedText?.trim()
     ? `\n\nText being commented on:\n"""\n${input.commentedText.trim()}\n"""`
     : '';
@@ -130,12 +145,14 @@ export function buildTriagePrompt(input: TriageInput): string {
     ``,
     `AVAILABLE AGENTS:`,
     roster,
+    humanRoster,
     ``,
     `Respond with ONLY a JSON object, no prose or code fences:`,
     `{"decision":"route"|"suggest"|"ignore","agent":"<exact agent name from the list, or null>","confidence":<number 0..1>,"message":"<one short sentence shown to the user in Notion>"}`,
     `- route: a listed agent's capabilities clearly and confidently match — dispatch now.`,
     `- suggest: a listed agent likely fits, but a human should confirm.`,
     `- ignore: NO listed agent has the needed capability (ask the human), or no agent action is needed.`,
+    ...humanRules,
     `Only pick an agent whose listed specialty/capabilities/technology actually cover this task. Do NOT guess or invent a fit, and never name an agent not in the list above.`,
     `Each agent shows its current load (running/queued/cap). When two candidates fit comparably, prefer the less-loaded one — work routed to a saturated agent waits in its queue. Capability fit always comes first.`,
     `In "message", address the user and write the agent as @name when routing or suggesting; when ignoring for lack of a fit, say so and ask who should take it.`,
@@ -579,13 +596,19 @@ export function parseDecision(text: string, candidates: TriageCandidate[]): Tria
   const message = typeof obj['message'] === 'string' ? obj['message'] : '';
   const rawAgent = typeof obj['agent'] === 'string' ? obj['agent'] : null;
 
-  let agent: string | null = null;
+  let matched: TriageCandidate | undefined;
   if (rawAgent) {
     const norm = rawAgent.replace(/^@/, '').trim().toLowerCase();
-    agent = candidates.find(c => c.name.toLowerCase() === norm)?.name ?? null;
+    matched = candidates.find(c => c.name.toLowerCase() === norm);
   }
+  const agent = matched?.name ?? null;
 
-  if (obj['decision'] === 'route' && agent) return { decision: 'route', agent, confidence, message };
+  if (obj['decision'] === 'route' && agent) {
+    // Hard guarantee, independent of the prompt: a human is never auto-routed —
+    // a "route" verdict on a human candidate downgrades to a suggestion.
+    if (matched?.kind === 'human') return { decision: 'suggest', agent, confidence, message };
+    return { decision: 'route', agent, confidence, message };
+  }
   if (obj['decision'] === 'suggest') return { decision: 'suggest', agent, confidence, message };
   return { decision: 'ignore', agent: null, confidence, message };
 }
