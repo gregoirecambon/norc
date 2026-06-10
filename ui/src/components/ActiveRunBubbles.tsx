@@ -28,7 +28,8 @@ export default function ActiveRunBubbles() {
         anchorKind: string; pageId: string; createdAt: number;
       };
       setRuns(prev => prev.some(r => r.id === data.id) ? prev : [...prev, {
-        ...data, taskPageId: null, status: 'in_flight', agentActed: false, completedAt: null,
+        ...data, taskPageId: null, status: 'in_flight', agentActed: false,
+        sessionId: null, sessionUrl: null, completedAt: null,
       }]);
     });
 

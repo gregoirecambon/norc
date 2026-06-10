@@ -94,6 +94,12 @@ export function setOpenclawRunId(id: string, openclawRunId: string): void {
     .where(and(eq(taskRuns.id, id), eq(taskRuns.status, 'in_flight'))).run();
 }
 
+/** Record which session this run addressed (resolveSession), for dashboard/debug.
+ * Not guarded to in_flight — failed runs keep their session for post-mortem. */
+export function setRunSessionId(id: string, sessionId: string): void {
+  db.update(taskRuns).set({ sessionId }).where(eq(taskRuns.id, id)).run();
+}
+
 export function getRun(id: string): TaskRun | null {
   return db.select().from(taskRuns).where(eq(taskRuns.id, id)).all()[0] ?? null;
 }

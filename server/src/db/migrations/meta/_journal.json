@@ -176,6 +176,13 @@
       "when": 1782800000000,
       "tag": "0024_run_liveness",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1782900000000,
+      "tag": "0025_agent_sessions",
+      "breakpoints": true
     }
   ]
 }

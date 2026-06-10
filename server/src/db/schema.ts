@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text } from 'drizzle-orm/sqlite-core';
+import { integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const agents = sqliteTable('agents', {
   id: text('id').primaryKey(),
@@ -222,9 +222,31 @@ export const taskRuns = sqliteTable('task_runs', {
   // OpenClaw-side run handle, persisted on async dispatch so the timeout sweep can
   // probe "are you still executing?" (agent.wait) before escalating.
   openclawRunId:    text('openclaw_run_id'),
+  // The session this run addressed (resolveSession): the NORC key (page / page#chat
+  // / page#g2) or, for openclaw, the adapter's own session key. Display/debug only.
+  sessionId:        text('session_id'),
   createdAt:        integer('created_at').notNull(),
   completedAt:      integer('completed_at'),
 });
+
+// One row per (agent, anchor page, lane). Holds the agent's CURRENT session id and
+// the narrow context fingerprint that minted it. A turn reuses the session while the
+// fingerprint is unchanged and rebuilds it (epoch++ → a fresh session key) when the
+// agent's framing changes. Only session-capable adapters (openclaw today) get rows;
+// stateless adapters re-assemble clean each turn and need no session memory.
+export const agentSessions = sqliteTable('agent_sessions', {
+  id:          text('id').primaryKey(),
+  agentId:     text('agent_id').notNull().references(() => agents.id, { onDelete: 'cascade' }),
+  pageId:      text('page_id').notNull(),
+  lane:        text('lane').notNull().default('work'),  // 'work' | 'chat' (keyed separately)
+  sessionId:   text('session_id').notNull(),            // resolved key: page / page#chat / page#g2
+  fingerprint: text('fingerprint').notNull(),           // the NARROW session fingerprint
+  epoch:       integer('epoch').notNull().default(1),   // monotonic; bumps on each rebuild
+  createdAt:   integer('created_at').notNull(),
+  updatedAt:   integer('updated_at').notNull(),
+}, (t) => ({
+  uniq: uniqueIndex('agent_sessions_agent_page_lane_idx').on(t.agentId, t.pageId, t.lane),
+}));
 
 // Work waiting for agent capacity. A turn that can't dispatch (the agent is at
 // its maxConcurrentRuns cap, or already has an in-flight run on the same

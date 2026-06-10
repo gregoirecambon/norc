@@ -87,7 +87,14 @@ export interface AssembledContext {
   /** The linked Project page's written body — only when the anchor is a task
    * (when the anchor IS the project, its body is already in bodyMarkdown). */
   projectBody: string;
+  /** Broad fingerprint — hashes the FULL assembled context (incl. page body and
+   * inlined resources). Currently informational; kept for compatibility. */
   fingerprint: string;
+  /** Narrow fingerprint governing session reuse: only the durable framing
+   * (system prompt + resolved project/strategic/related context + context level).
+   * Editing the task body does NOT change it — so an agent's session is reused
+   * across normal back-and-forth and rebuilt only when its framing changes. */
+  sessionFingerprint: string;
 }
 
 const DEFAULT_SYSTEM_PROMPT =
@@ -234,7 +241,10 @@ export async function assembleContext(args: {
   }
 
   const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody });
-  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody, fingerprint };
+  // Narrow fingerprint: durable framing only (no body/resources), so session reuse
+  // survives task-body edits and rebuilds only when the agent's framing changes.
+  const sessionFingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks });
+  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody, fingerprint, sessionFingerprint };
 }
 
 /**

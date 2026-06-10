@@ -72,6 +72,49 @@ function RunTitle({ run }: { run: DashboardRun }) {
   );
 }
 
+// Session id (copyable) + optional deep-link into the agent's own tool. Debug aid
+// on the active-run view: the id is shown for any adapter that has one, and becomes
+// an "open session" link only when the agent is configured with a console URL.
+function SessionId({ run }: { run: DashboardRun }) {
+  const [copied, setCopied] = useState(false);
+  if (!run.sessionId) return null;
+  const sessionId = run.sessionId;
+  const copy = () => {
+    navigator.clipboard?.writeText(sessionId).then(
+      () => { setCopied(true); setTimeout(() => setCopied(false), 1000); },
+      () => { /* clipboard blocked — leave the title showing the full id */ },
+    );
+  };
+  const pillBase: CSSProperties = {
+    flexShrink: 0, fontSize: 11, whiteSpace: 'nowrap',
+    padding: '2px 8px', borderRadius: 4, border: '1px solid var(--border)',
+    background: 'var(--surface1)',
+  };
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+      <span
+        onClick={copy}
+        title={copied ? 'Copied!' : `Session ${sessionId} — click to copy`}
+        style={{
+          ...pillBase, fontFamily: 'var(--font-mono)', color: 'var(--text-dim)',
+          cursor: 'pointer', maxWidth: 180, overflow: 'hidden', textOverflow: 'ellipsis',
+        }}
+      >
+        {copied ? 'copied ✓' : sessionId}
+      </span>
+      {run.sessionUrl && (
+        <a
+          href={run.sessionUrl} target="_blank" rel="noreferrer"
+          title="Open this session in the agent's tool"
+          style={{ ...pillBase, fontWeight: 600, color: 'var(--text-secondary)', textDecoration: 'none' }}
+        >
+          open session ↗
+        </a>
+      )}
+    </span>
+  );
+}
+
 const rowStyle: CSSProperties = {
   display: 'flex', alignItems: 'center', gap: 10,
   padding: '8px 0', borderBottom: '1px solid var(--border)',
@@ -132,6 +175,7 @@ export default function DashboardPage() {
                 <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{run.agentName}</span>
                 <RunTitle run={run} />
                 <span style={{ flex: 1 }} />
+                <SessionId run={run} />
                 <span style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap' }}>
                   started {timeAgo(run.createdAt)}
                 </span>

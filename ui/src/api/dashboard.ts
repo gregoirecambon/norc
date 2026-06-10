@@ -10,6 +10,11 @@ export interface DashboardRun {
   taskPageId: string | null;
   status: RunStatus;
   agentActed: boolean;
+  /** The session this run addressed (resolveSession). NULL on legacy/just-minted runs. */
+  sessionId: string | null;
+  /** Deep-link into the agent's own tool, when it's configured with a console URL
+   * template. NULL for adapters with no session UI (most). */
+  sessionUrl: string | null;
   createdAt: number;
   completedAt: number | null;
 }

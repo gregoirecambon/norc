@@ -4,7 +4,7 @@ import { runMigrations, db } from '../db/client.js';
 import { agents, taskRuns } from '../db/schema.js';
 import { onEvent, type NorcEvent } from '../lib/events.js';
 import {
-  createRun, touchRun, setOpenclawRunId, finalizeRun, findTimeoutCandidates, getRun,
+  createRun, touchRun, setOpenclawRunId, setRunSessionId, finalizeRun, findTimeoutCandidates, getRun,
 } from '../lib/runs.js';
 
 const IDLE = 300_000;        // 5 min silence window
@@ -108,5 +108,20 @@ describe('setOpenclawRunId', () => {
     finalizeRun(id, 'done');
     setOpenclawRunId(id, 'oc-run-9');
     expect(getRun(id)!.openclawRunId).toBeNull();
+  });
+});
+
+describe('setRunSessionId', () => {
+  it('records the session a run addressed', () => {
+    const { id } = newRun();
+    setRunSessionId(id, 'p1#g2');
+    expect(getRun(id)!.sessionId).toBe('p1#g2');
+  });
+
+  it('persists even after the run is finalized (post-mortem debugging)', () => {
+    const { id } = newRun();
+    finalizeRun(id, 'failed');
+    setRunSessionId(id, 'agent:alpha:norc:task:p1');
+    expect(getRun(id)!.sessionId).toBe('agent:alpha:norc:task:p1');
   });
 });

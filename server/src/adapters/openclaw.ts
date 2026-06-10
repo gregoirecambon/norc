@@ -506,9 +506,9 @@ export async function dispatchOpenclaw(
     const { text, openclawRunId } = keypair
       ? await dispatchViaWebSocket(wsUrl, keypair, ocAgentId, idKey, message, agentName, sessionKey, captureMs, authToken)
       : { text: await dispatchViaHttp(wsUrl, authToken, ocAgentId, message, sessionKey, captureMs), openclawRunId: null };
-    if (text && text.trim()) return { ok: true, supported: true, text: text.trim(), openclawRunId };
+    if (text && text.trim()) return { ok: true, supported: true, text: text.trim(), openclawRunId, sessionKey };
     // Bare ACK — the agent will report back via the Agent API.
-    return { ok: true, supported: true, async: true, openclawRunId };
+    return { ok: true, supported: true, async: true, openclawRunId, sessionKey };
   } catch (err) {
     return { ok: false, supported: true, error: err instanceof Error ? err.message : 'OpenClaw dispatch failed' };
   }

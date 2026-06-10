@@ -30,7 +30,8 @@ import { getAnyTitle, getRelationIds, getDate, getSelect } from './notion-props.
 import { isInertTaskStatus } from './notion-provision.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
-import { createRun, getRun, finalizeRun, setOpenclawRunId, hasPriorRunOnPage, timedOutAgentIdsForPage, activeRunCount, hasRunConflict, type TaskRun } from './runs.js';
+import { createRun, getRun, finalizeRun, setOpenclawRunId, setRunSessionId, hasPriorRunOnPage, timedOutAgentIdsForPage, activeRunCount, hasRunConflict, type TaskRun } from './runs.js';
+import { resolveSession } from './agent-sessions.js';
 import { enqueueTurn, nextEligible, claimAndCheck, dropItem, dropPendingForAgentPage, agentsWithPending, pendingCount, type QueuedTurn, type DispatchQueueRow } from './dispatch-queue.js';
 import { unmetDependencies, detectDependencyCycle, getDependsOnIds } from './task-deps.js';
 import { notionQuery } from './notion-client.js';
@@ -1529,13 +1530,23 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
       `🛰️ **NORC** dispatched this to **@${agentRef.name}** (context: ${ctx.contextLevel}). Working on it…`));
   }
 
-  // Chat-lane turns get their own session so a parallel conversation never
-  // collides with (or pollutes) the in-flight task run's per-page memory.
+  // Resolve which session this turn addresses. Chat-lane turns are keyed
+  // separately so a parallel conversation never collides with the task run's
+  // per-page memory. Session-capable adapters reuse their session while the
+  // narrow context fingerprint is unchanged, and rebuild it (a fresh `#gN` key)
+  // when the agent's framing changes — so stale memory is dropped on a real
+  // context shift but survives ordinary back-and-forth.
   const lane = reservation?.lane ?? opts.lane ?? 'work';
-  const sessionId = lane === 'chat' ? `${anchor.pageId}#chat` : anchor.pageId;
+  const { sessionId, reused } = resolveSession({
+    agentId: agentRef.agentId, pageId: anchor.pageId, lane,
+    fingerprint: ctx.sessionFingerprint, adapterType,
+  });
 
-  emitLog(`dispatching to "${agentRef.name}" (${adapterType}, level=${ctx.contextLevel}, via ${opts.how}, run ${runId}) on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
+  emitLog(`dispatching to "${agentRef.name}" (${adapterType}, level=${ctx.contextLevel}, via ${opts.how}, run ${runId}) on ${anchor.kind} page ${anchor.pageId} — ${reused ? `reusing session ${sessionId}` : `new session ${sessionId}`}`, agentRef.name);
   const result = await dispatch({ adapterType, config, system, prompt, agentName: agentRef.name, sessionId });
+  // Record the session the run actually addressed (prefer the adapter's own key,
+  // e.g. openclaw's namespaced sessionKey) for the dashboard / debugging.
+  setRunSessionId(runId, result.sessionKey ?? sessionId);
 
   if (!result.ok) {
     const failMsg = `**@${agentRef.name}** failed ✗ — ${result.error}`;

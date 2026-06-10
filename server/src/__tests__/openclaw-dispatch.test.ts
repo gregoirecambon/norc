@@ -62,6 +62,8 @@ describe('dispatchOpenclaw (WebSocket)', () => {
     expect(res.supported).toBe(true);
     expect(res.text).toBe('agent answer here');
     expect(res.async).toBeUndefined();
+    // The agent-facing session key is surfaced for the dashboard / debugging.
+    expect(res.sessionKey).toBe('agent:emilien:norc:task:page-1');
   });
 
   it('returns async:true on a bare ACK (reply comes via the Agent API)', async () => {
@@ -70,6 +72,8 @@ describe('dispatchOpenclaw (WebSocket)', () => {
     expect(res.ok).toBe(true);
     expect(res.async).toBe(true);
     expect(res.text).toBeUndefined();
+    // The session key is known before the send, so it's returned on the async path too.
+    expect(res.sessionKey).toBe('agent:emilien:norc:task:page-1');
   });
 
   it('captures the agent reply over WS (subscribe + agent.wait) when ACK has a runId', async () => {

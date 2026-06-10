@@ -32,6 +32,10 @@ export interface DispatchResult {
   /** OpenClaw-side run handle (when known) — persisted so the timeout sweep can
    * probe the run's liveness (agent.wait) before escalating. */
   openclawRunId?: string | null;
+  /** The adapter's own session key, when it differs from the NORC sessionId
+   * (openclaw namespaces it as `agent:<id>:norc:task:<sessionId>`). Persisted on
+   * the run so the dashboard shows the exact key the agent tool knows. */
+  sessionKey?: string;
 }
 
 export interface DispatchArgs {
