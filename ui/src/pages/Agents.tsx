@@ -4,15 +4,7 @@ import { getNotionConfig } from '../api/notion.js';
 import { AgentTable } from '../components/AgentTable.js';
 import { AddAgentModal } from '../components/AddAgentModal.js';
 import { parseSse } from '../lib/sse.js';
-
-function timeAgo(epochMs: number | null): string {
-  if (!epochMs) return '—';
-  const diff = Date.now() - epochMs;
-  if (diff < 60_000) return 'just now';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m ago`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h ago`;
-  return `${Math.floor(diff / 86_400_000)}d ago`;
-}
+import { timeAgo } from '../lib/time.js';
 
 const STATUS_STYLE: Record<AgentRow['status'], { bg: string; text: string; label: string }> = {
   connected:  { bg: 'var(--tint-mint)',    text: 'var(--tint-mint-text)',    label: 'Connected' },

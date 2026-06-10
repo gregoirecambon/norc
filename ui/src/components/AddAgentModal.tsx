@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import { getInvite, createAgent, type AgentRow, type AdapterType, type InviteData } from '../api/agents.js';
+import { microLabelStyle } from './ui.js';
 
 type Tab = 'invite' | 'manual';
 type AgentKind = 'claude-code' | 'codex' | 'openclaw';
@@ -471,11 +472,7 @@ export function AddAgentModal({ onClose, onCreated }: Props) {
   );
 }
 
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: 11, fontWeight: 600, color: 'var(--text-dim)',
-  textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5,
-};
+const labelStyle = microLabelStyle;
 
 const inputStyle: React.CSSProperties = {
   fontSize: 13, padding: '7px 10px',

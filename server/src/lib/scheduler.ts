@@ -10,7 +10,8 @@
 
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { notionIntegration, notionDatabases, processedTriggers } from '../db/schema.js';
+import { notionIntegration, notionDatabases } from '../db/schema.js';
+import { alreadyProcessed, markProcessed } from './processed-triggers.js';
 import { notionQuery } from './notion-client.js';
 import { getTitle, getRichText, getSelect, getRelationIds } from './notion-props.js';
 import { createTaskPage, setTaskScheduledFor } from './notion-writeback.js';
@@ -18,13 +19,6 @@ import { isInertTaskStatus } from './notion-provision.js';
 import { dispatchScheduledTask } from './orchestrator.js';
 import { unmetDependencies } from './task-deps.js';
 import { emitLog } from './logger.js';
-
-function alreadyProcessed(key: string): boolean {
-  return !!db.select().from(processedTriggers).where(eq(processedTriggers.triggerKey, key)).all()[0];
-}
-function markProcessed(key: string): void {
-  db.insert(processedTriggers).values({ triggerKey: key, createdAt: Date.now() }).onConflictDoNothing().run();
-}
 
 /** Read a Notion date property's start (ISO string) or null. */
 function getDateStart(props: unknown, name: string): string | null {

@@ -4,19 +4,8 @@ import {
   type NotionConfig, type NotionIntegration, type NotionDatabase,
 } from '../api/notion.js';
 import { parseSse } from '../lib/sse.js';
-
-/** Compact relative time, e.g. "just now", "5 min ago", "2 h ago", "3 d ago". */
-function timeAgo(ts: number): string {
-  const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
-  if (sec < 10) return 'just now';
-  if (sec < 60) return `${sec} s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min} min ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr} h ago`;
-  const d = Math.floor(hr / 24);
-  return `${d} d ago`;
-}
+import { timeAgoFine as timeAgo } from '../lib/time.js';
+import { microLabelStyle } from '../components/ui.js';
 
 const REQUIRED_CAPABILITIES = [
   'Read content',
@@ -26,14 +15,7 @@ const REQUIRED_CAPABILITIES = [
   'Comments',
 ];
 
-const labelStyle: React.CSSProperties = {
-  display: 'block',
-  fontSize: 11, fontWeight: 600,
-  color: 'var(--text-dim)',
-  textTransform: 'uppercase',
-  letterSpacing: '0.6px',
-  marginBottom: 6,
-};
+const labelStyle = microLabelStyle;
 
 const inputStyle: React.CSSProperties = {
   width: '100%',

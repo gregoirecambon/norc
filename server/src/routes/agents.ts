@@ -19,6 +19,7 @@ import { pendingItems } from '../lib/dispatch-queue.js';
 import { drainAgent } from '../lib/orchestrator.js';
 import { setTaskStatus } from '../lib/notion-writeback.js';
 import { notionIntegration } from '../db/schema.js';
+import { norcBaseUrl } from '../lib/base-url.js';
 import type { AdapterType } from '../types.js';
 
 const router: ExpressRouter = Router();
@@ -50,7 +51,10 @@ const SECRET_FIELDS = new Set(['apiKey', 'authToken', 'token', 'password', 'secr
 
 function redactConfig(raw: string): Record<string, unknown> {
   let config: Record<string, unknown>;
-  try { config = JSON.parse(raw); } catch { return {}; }
+  try { config = JSON.parse(raw); } catch {
+    console.warn('redactConfig: malformed adapterConfig JSON — returning empty config');
+    return {};
+  }
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(config)) {
     out[k] = SECRET_FIELDS.has(k) && typeof v === 'string' && v.length > 0 ? '[set]' : v;
@@ -99,7 +103,7 @@ router.patch('/:id/limits', zodMiddleware(LimitsSchema), (req, res) => {
 // GET /api/agents/invite
 router.get('/invite', async (_req, res) => {
   const token = await ensureActiveToken();
-  const norcUrl = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
+  const norcUrl = norcBaseUrl();
 
   let prompt = '';
   try {
@@ -119,7 +123,7 @@ router.post('/:id/update-skills', async (req, res) => {
   const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
   if (!row) { res.status(404).json({ error: 'not_found' }); return; }
 
-  const norcUrl = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
+  const norcUrl = norcBaseUrl();
   const skillUrl = `${norcUrl}/api/skill`;
   let config: Record<string, unknown>;
   try { config = JSON.parse(row.adapterConfig); } catch { config = {}; }

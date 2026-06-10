@@ -7,6 +7,7 @@ import { emitEvent } from '../lib/events.js';
 import { verifyNotionSignature } from '../lib/notion-webhook-verify.js';
 import { processWebhookEvent } from '../lib/orchestrator.js';
 import { createSemaphore } from '../lib/semaphore.js';
+import { norcBaseUrl } from '../lib/base-url.js';
 
 const router: ExpressRouter = Router();
 
@@ -16,8 +17,7 @@ const router: ExpressRouter = Router();
 const webhookGate = createSemaphore(4);
 
 function getWebhookUrl(): string {
-  const base = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
-  return `${base}/webhooks/notion`;
+  return `${norcBaseUrl()}/webhooks/notion`;
 }
 
 function safeRow(row: typeof notionIntegration.$inferSelect) {

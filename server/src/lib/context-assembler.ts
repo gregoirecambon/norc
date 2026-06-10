@@ -17,6 +17,7 @@ import { notionGet, notionQuery } from './notion-client.js';
 import { getTitle, getRichText, getSelect, getRelationIds, getAnyTitle } from './notion-props.js';
 import { readPageMarkdown, listChildResources, normalizeId, type Anchor, type ResourceRef } from './notion-anchor.js';
 import { tokenize, titleSimilarity } from './task-similarity.js';
+import { emitLog } from './logger.js';
 import type { AgentRef } from './notion-mentions.js';
 
 // How much written content to inject. The anchor page's own body is the richest
@@ -304,7 +305,10 @@ export async function collectProjectRelationRefs(apiKey: string, projectProps: u
         const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${id}`);
         out.push({ id, title: getAnyTitle(page['properties']), kind: 'page', relation: propName });
         if (out.length >= cap) return out;
-      } catch { /* skip unreadable row */ }
+      } catch (err) {
+        // Best-effort: skip the row, but surface it — usually a Notion permission gap.
+        emitLog(`context: unreadable ${propName} relation row ${id}: ${err instanceof Error ? err.message : 'unknown'}`);
+      }
     }
   }
   return out;
@@ -321,7 +325,10 @@ async function resolveRelatedBlocks(apiKey: string, projectProps: unknown): Prom
     let summary = '';
     try {
       summary = (await readPageMarkdown(apiKey, ref.id, RELATED_SUMMARY_MAX_CHARS, 1)).trim();
-    } catch { /* summary is best-effort; still surface the ref so it's fetchable */ }
+    } catch (err) {
+      // Summary is best-effort; still surface the ref so it's fetchable.
+      emitLog(`context: summary read failed for ${ref.id}: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
     out.push({ relation: ref.relation, name: ref.title, summary, id: ref.id });
   }
   return out;
@@ -345,7 +352,9 @@ async function resolveCompanyBlocks(apiKey: string, projectProps: unknown): Prom
       if (getSelect(cp, 'Status') === 'Active') {
         out.push({ name: getTitle(cp, 'Name'), type: getSelect(cp, 'Type') ?? '', content: getRichText(cp, 'Content') });
       }
-    } catch { /* skip unreadable row */ }
+    } catch (err) {
+      emitLog(`context: unreadable Company row ${id}: ${err instanceof Error ? err.message : 'unknown'}`);
+    }
   }
   if (out.length > 0) return out;
 

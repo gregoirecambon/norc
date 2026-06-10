@@ -7,12 +7,9 @@ import { assertAgentAuth } from '../lib/auth.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { listExternalTasks, intakeExternalTask, type IntakeOutcome } from '../lib/external-tasks.js';
 import { emitLog } from '../lib/logger.js';
+import { norcBaseUrl } from '../lib/base-url.js';
 
 const router: ExpressRouter = Router();
-
-function norcBaseUrl(): string {
-  return process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
-}
 
 // GET /api/me/platforms — agent retrieves its granted platform API keys
 router.get('/platforms', (req, res) => {

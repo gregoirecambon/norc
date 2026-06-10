@@ -94,9 +94,15 @@ async function probeGateway(url: string, authToken: string | null, timeoutMs = 3
       resolve(status);
     };
 
+    let warnedBadFrame = false;
     ws.on('message', raw => {
       let parsed: unknown;
-      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch {
+        // Non-JSON frames are dropped; log once per connection so a broken
+        // gateway doesn't fail silently.
+        if (!warnedBadFrame) { warnedBadFrame = true; emitLog('openclaw probe: dropped non-JSON ws frame'); }
+        return;
+      }
 
       const event = asRecord(parsed);
       if (event?.type === 'event' && event.event === 'connect.challenge') {
@@ -398,9 +404,13 @@ async function sendChallengeViaWebSocket(
       reject(new Error('Timed out waiting for agent method ack'));
     }, 10_000);
 
+    let warnedBadFrame = false;
     ws.on('message', raw => {
       let parsed: unknown;
-      try { parsed = JSON.parse(rawDataToString(raw)); } catch { return; }
+      try { parsed = JSON.parse(rawDataToString(raw)); } catch {
+        if (!warnedBadFrame) { warnedBadFrame = true; emitLog('openclaw: dropped non-JSON ws frame awaiting method ack'); }
+        return;
+      }
       const frame = asRecord(parsed);
       if (frame?.id === reqId) {
         clearTimeout(ackTimeout);

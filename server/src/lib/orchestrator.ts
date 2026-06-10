@@ -14,7 +14,9 @@
 
 import { eq, inArray } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agents, notionIntegration, notionDatabases, orchestratorComments, processedTriggers } from '../db/schema.js';
+import { agents, notionIntegration, notionDatabases, orchestratorComments } from '../db/schema.js';
+import { norcBaseUrl } from './base-url.js';
+import { alreadyProcessed, markProcessed, unmarkProcessed } from './processed-triggers.js';
 import type { AdapterType } from '../types.js';
 import { emitLog } from './logger.js';
 import { emitEvent } from './events.js';
@@ -43,10 +45,6 @@ import {
   setTaskStatus, setTaskAssignee, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
 } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
-
-function norcBaseUrl(): string {
-  return process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
-}
 
 /**
  * The compact per-task run block. The static protocol (how to use the API) lives
@@ -108,20 +106,6 @@ function safeJson(raw: unknown): string {
   } catch {
     return '';
   }
-}
-
-function alreadyProcessed(key: string): boolean {
-  return !!db.select().from(processedTriggers).where(eq(processedTriggers.triggerKey, key)).all()[0];
-}
-
-function markProcessed(key: string): void {
-  db.insert(processedTriggers).values({ triggerKey: key, createdAt: Date.now() }).onConflictDoNothing().run();
-}
-
-/** Release an idempotency key — used when queued work is dropped (task went
- * inert / deps unmet) so the same trigger can legitimately fire again later. */
-function unmarkProcessed(key: string): void {
-  db.delete(processedTriggers).where(eq(processedTriggers.triggerKey, key)).run();
 }
 
 /** Run a Notion write-back, logging (but never throwing) on failure. */

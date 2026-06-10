@@ -7,6 +7,7 @@ import { sendHandshakeChallenge } from '../adapters/challenge.js';
 import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import type { Agent, AdapterType, AgentStatus } from '../types.js';
+import { norcBaseUrl } from '../lib/base-url.js';
 
 const router: ExpressRouter = Router({ mergeParams: true });
 
@@ -34,8 +35,7 @@ router.post('/', async (req, res) => {
   const handshakeId = randomUUID();
   const nonce = randomBytes(16).toString('hex');
   const now = Date.now();
-  const norcUrl = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
-  const callbackUrl = `${norcUrl}/api/handshakes/${handshakeId}/complete`;
+  const callbackUrl = `${norcBaseUrl()}/api/handshakes/${handshakeId}/complete`;
 
   db.insert(handshakes).values({
     id: handshakeId,

@@ -2,15 +2,7 @@ import { useState, useEffect } from 'react';
 import { listAgents, type AgentRow } from '../../api/agents.js';
 import { StatusBadge } from '../StatusBadge.js';
 import { parseSse } from '../../lib/sse.js';
-
-function ago(ms: number | null): string {
-  if (!ms) return 'never';
-  const d = Date.now() - ms;
-  if (d < 60_000) return 'just now';
-  if (d < 3_600_000) return `${Math.floor(d / 60_000)}m ago`;
-  if (d < 86_400_000) return `${Math.floor(d / 3_600_000)}h ago`;
-  return `${Math.floor(d / 86_400_000)}d ago`;
-}
+import { timeAgo } from '../../lib/time.js';
 
 /** Live agent roster with health (status, last ping, latency). Updates from SSE. */
 export function AgentHealth() {
@@ -60,7 +52,7 @@ export function AgentHealth() {
           </div>
           <div style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{a.adapterType}</div>
           <div style={{ fontSize: 12, color: 'var(--text-dim)' }}>
-            pinged {ago(a.lastPingedAt)}{a.lastLatencyMs != null ? ` · ${a.lastLatencyMs}ms` : ''}
+            pinged {timeAgo(a.lastPingedAt, 'never')}{a.lastLatencyMs != null ? ` · ${a.lastLatencyMs}ms` : ''}
           </div>
         </div>
       ))}

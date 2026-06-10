@@ -11,6 +11,13 @@ export const labelStyle: CSSProperties = {
   fontSize: 12.5, color: 'var(--text-secondary)', marginBottom: 4, display: 'block',
 };
 
+/** Uppercase micro-label used above form fields in modals/panels. */
+export const microLabelStyle: CSSProperties = {
+  display: 'block',
+  fontSize: 11, fontWeight: 600, color: 'var(--text-dim)',
+  textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 5,
+};
+
 export const btnStyle: CSSProperties = {
   fontSize: 13, fontWeight: 500, padding: '8px 16px', borderRadius: 'var(--radius-md)',
   border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-primary)', cursor: 'pointer',

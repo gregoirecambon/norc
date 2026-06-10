@@ -9,12 +9,12 @@ import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
 import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus } from '../lib/notion-provision.js';
+import { norcBaseUrl } from '../lib/base-url.js';
 
 const router: ExpressRouter = Router();
 
 function getWebhookUrl(): string {
-  const base = process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
-  return `${base}/webhooks/notion`;
+  return `${norcBaseUrl()}/webhooks/notion`;
 }
 
 function getIntegration() {

@@ -1,11 +1,8 @@
 import { Router, type Router as ExpressRouter } from 'express';
 import { readSkillDoc, NORC_SKILL_VERSION } from '../lib/skill.js';
+import { norcBaseUrl as norcUrl } from '../lib/base-url.js';
 
 const router: ExpressRouter = Router();
-
-function norcUrl(): string {
-  return process.env['NORC_PUBLIC_URL'] ?? `http://localhost:${process.env['PORT'] ?? 3001}`;
-}
 
 // GET /api/skill — the durable orchestration protocol (markdown).
 router.get('/', (_req, res) => {
