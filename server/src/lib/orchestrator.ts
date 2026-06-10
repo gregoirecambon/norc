@@ -39,6 +39,7 @@ import { unmetDependencies, detectDependencyCycle, getDependsOnIds } from './tas
 import { notionQuery } from './notion-client.js';
 import { getNorcSettings } from './norc-settings.js';
 import { triage, assessOutcome, classifyTaskWorthy, type TriageCandidate, type TaskWorthy } from './orchestrator-agent.js';
+import { enrichCandidates, buildTaskContext } from './triage-context.js';
 import {
   postComment, postCommentReply, postCommentMentioning, postCommentReplyMentioning,
   postCommentRich, postCommentReplyRich, type RichSeg, appendBlocks,
@@ -553,13 +554,14 @@ function triageConfigured(settings: ReturnType<typeof getNorcSettings>): boolean
 /** The agent roster (name/specialty/capabilities/technology + current load) for
  * triage/assessment, excluding the given names. Mirrors the Org DB metadata the
  * agents registered with; load lets triage route around saturated agents. */
-function rosterCandidates(excludeNames: string[]): TriageCandidate[] {
+function rosterCandidates(excludeNames: string[]): Array<TriageCandidate & { orgDbPageId: string | null }> {
   const excl = new Set(excludeNames.map(n => n.toLowerCase()));
   return db.select().from(agents).all().filter(a => !excl.has(a.name.toLowerCase())).map(a => {
     let meta: Record<string, unknown> = {};
     try { meta = JSON.parse(a.metadata); } catch { /* */ }
     return {
       name: a.name,
+      orgDbPageId: a.orgDbPageId,
       specialty: typeof meta['specialty'] === 'string' ? meta['specialty'] : (typeof meta['role'] === 'string' ? meta['role'] : ''),
       capabilities: typeof meta['capabilities'] === 'string' ? meta['capabilities'] : '',
       technology: typeof meta['technology'] === 'string' ? meta['technology'] : '',
@@ -656,6 +658,16 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     .filter(t => t.trim().length > 0);
 
   emitLog(`triage: NORC Triage Agent analyzing unassigned ${anchor.kind} ${anchor.pageId}${excludeNames.length ? ` (excluding: ${excludeNames.join(', ')})` : ''}`, 'Triage');
+
+  // Evidence for the decision: each candidate's Org DB profile (properties +
+  // bio) and the anchor's body/KPIs/project objective. Best-effort — a failed
+  // read falls back to the registration-metadata roster.
+  const enriched = await enrichCandidates(apiKey, candidates);
+  const taskContext = await buildTaskContext(apiKey, anchor).catch(() => undefined);
+  const retriageNote = excludeNames.length
+    ? `This is a RE-TRIAGE: ${excludeNames.map(n => `@${n}`).join(', ')} already timed out on this exact work and ${excludeNames.length === 1 ? 'is' : 'are'} excluded from the roster. Route only to a different agent with cited evidence; otherwise ignore and ask the human.`
+    : undefined;
+
   let decision;
   try {
     decision = await triage({
@@ -665,7 +677,8 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       model: settings!.orchestratorModel,
       systemPrompt: settings!.orchestratorSystemPrompt ?? undefined,
       kind: anchor.kind, title, text: ctx.text,
-      commentedText: ctx.commentedText, conversation, candidates,
+      commentedText: ctx.commentedText, conversation, candidates: enriched,
+      taskContext, retriageNote,
     });
   } catch (err) {
     emitLog(`triage error: ${err instanceof Error ? err.message : 'unknown'}`, 'Triage');

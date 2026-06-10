@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDecision, parseAssessment, parseTaskWorthy, parseBusinessTasks, openaiEndpoint, type TriageCandidate } from '../lib/orchestrator-agent.js';
+import { parseDecision, parseAssessment, parseTaskWorthy, parseBusinessTasks, openaiEndpoint, buildTriagePrompt, rosterBlock, type TriageCandidate, type TriageInput } from '../lib/orchestrator-agent.js';
 
 describe('openaiEndpoint', () => {
   it('appends /v1/chat/completions to a bare host', () => {
@@ -45,6 +45,76 @@ describe('parseDecision', () => {
   it('falls back to ignore on non-JSON / garbage', () => {
     expect(parseDecision('the agent could not decide', candidates).decision).toBe('ignore');
     expect(parseDecision('', candidates).decision).toBe('ignore');
+  });
+});
+
+function triageInput(extra: Partial<TriageInput> = {}): TriageInput {
+  return {
+    provider: 'anthropic', apiKey: 'k', model: 'm',
+    kind: 'task', title: 'Onboarding cleaning', text: '',
+    candidates,
+    ...extra,
+  };
+}
+
+describe('rosterBlock', () => {
+  it('renders empty specialty/capabilities explicitly as "(none listed)"', () => {
+    const block = rosterBlock({ name: 'lili', specialty: '', capabilities: '', activeRuns: 0, maxConcurrentRuns: 1 });
+    expect(block).toContain('### lili');
+    expect(block).toContain('Specialty: (none listed)');
+    expect(block).toContain('Capabilities: (none listed)');
+    expect(block).toContain('About: (no description)');
+    expect(block).toContain('Load: 0 running, 0 queued / cap 1');
+  });
+
+  it('renders enriched properties and the description', () => {
+    const block = rosterBlock({
+      name: 'dimi', specialty: 'developer', capabilities: 'code', technology: 'Claude Code',
+      description: 'Backend engineer for the API.',
+      properties: [{ name: 'Status', value: 'Available' }, { name: 'Owner email', value: 'a@b.c' }],
+    });
+    expect(block).toContain('Specialty: developer');
+    expect(block).toContain('Technology: Claude Code');
+    expect(block).toContain('Status: Available');
+    expect(block).toContain('Owner email: a@b.c');
+    expect(block).toContain('About: Backend engineer for the API.');
+    expect(block).not.toContain('Load:'); // no load info provided
+  });
+});
+
+describe('buildTriagePrompt', () => {
+  it('always includes the calibration rule and the unchanged JSON schema line', () => {
+    const p = buildTriagePrompt(triageInput());
+    expect(p).toContain('you MUST set confidence below 0.5');
+    expect(p).toContain('{"decision":"route"|"suggest"|"ignore","agent":"<exact agent name from the list, or null>","confidence":<number 0..1>,"message":"<one short sentence shown to the user in Notion>"}');
+    expect(p).toContain('AVAILABLE AGENTS:');
+    expect(p).toContain('### emilien');
+  });
+
+  it('omits TASK CONTEXT and RE-TRIAGE NOTE when absent', () => {
+    const p = buildTriagePrompt(triageInput());
+    expect(p).not.toContain('TASK CONTEXT:');
+    expect(p).not.toContain('RE-TRIAGE NOTE:');
+  });
+
+  it('renders TASK CONTEXT with only the non-empty lines', () => {
+    const p = buildTriagePrompt(triageInput({
+      taskContext: { status: 'Backlog', body: 'Clean up the onboarding flow steps.', projectName: 'Flowboard', projectObjective: 'Activate users' },
+    }));
+    expect(p).toContain('TASK CONTEXT:');
+    expect(p).toContain('Status: Backlog');
+    expect(p).toContain('Project: Flowboard — Objective: Activate users');
+    expect(p).toContain('Clean up the onboarding flow steps.');
+    expect(p).not.toContain('KPIs / success criteria:');
+  });
+
+  it('renders the RE-TRIAGE NOTE when set', () => {
+    const p = buildTriagePrompt(triageInput({ retriageNote: '@lili already timed out on this exact work' }));
+    expect(p).toContain('RE-TRIAGE NOTE: @lili already timed out on this exact work');
+  });
+
+  it('says "(no agents registered)" on an empty roster', () => {
+    expect(buildTriagePrompt(triageInput({ candidates: [] }))).toContain('(no agents registered)');
   });
 });
 

@@ -62,6 +62,43 @@ export function getPeople(properties: unknown, name: string): string[] {
     .filter((id): id is string => typeof id === 'string');
 }
 
+/** Render any simple property value to plain text — '' when empty or of a type
+ * we don't flatten (relation/people/rollup/formula/files). Used to dump a page's
+ * non-empty properties generically (e.g. the Org DB agent profile for triage). */
+export function propertyPlainText(p: unknown): string {
+  if (!p || typeof p !== 'object') return '';
+  const r = p as Record<string, unknown>;
+  switch (r['type']) {
+    case 'title': return richTextToPlain(r['title']);
+    case 'rich_text': return richTextToPlain(r['rich_text']);
+    case 'select': {
+      const sel = r['select'] as Record<string, unknown> | null;
+      return typeof sel?.['name'] === 'string' ? sel['name'] : '';
+    }
+    case 'status': {
+      const st = r['status'] as Record<string, unknown> | null;
+      return typeof st?.['name'] === 'string' ? st['name'] : '';
+    }
+    case 'multi_select': {
+      if (!Array.isArray(r['multi_select'])) return '';
+      return (r['multi_select'] as unknown[])
+        .map(o => (o as Record<string, unknown> | null)?.['name'])
+        .filter((n): n is string => typeof n === 'string')
+        .join(', ');
+    }
+    case 'number': return typeof r['number'] === 'number' ? String(r['number']) : '';
+    case 'checkbox': return typeof r['checkbox'] === 'boolean' ? (r['checkbox'] ? 'yes' : 'no') : '';
+    case 'url': return typeof r['url'] === 'string' ? r['url'] : '';
+    case 'email': return typeof r['email'] === 'string' ? r['email'] : '';
+    case 'phone_number': return typeof r['phone_number'] === 'string' ? r['phone_number'] : '';
+    case 'date': {
+      const d = r['date'] as Record<string, unknown> | null;
+      return typeof d?.['start'] === 'string' ? d['start'] : '';
+    }
+    default: return '';
+  }
+}
+
 export function getRelationIds(properties: unknown, name: string): string[] {
   const p = prop(properties, name);
   if (p?.['type'] !== 'relation' || !Array.isArray(p['relation'])) return [];

@@ -423,7 +423,7 @@ describe('triage — load-aware roster', () => {
       candidates: [{ name: 'alpha', specialty: 'dev', capabilities: 'code', activeRuns: 2, queuedCount: 3, maxConcurrentRuns: 4 }],
     });
     const prompt = dispatchMock.mock.calls.at(-1)![0].prompt;
-    expect(prompt).toContain('(load: 2 running, 3 queued / cap 4)');
+    expect(prompt).toContain('Load: 2 running, 3 queued / cap 4');
     expect(prompt).toContain('prefer the less-loaded one');
   });
 });

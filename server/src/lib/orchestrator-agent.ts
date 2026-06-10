@@ -15,12 +15,26 @@ export interface TriageCandidate {
   specialty: string;
   capabilities: string;
   technology?: string;
+  /** Short description from the agent's Org DB page body (caller-truncated). */
+  description?: string;
+  /** Other non-empty Org DB properties, already rendered to plain text. */
+  properties?: Array<{ name: string; value: string }>;
   /** In-flight work runs right now. */
   activeRuns?: number;
   /** Turns waiting in the agent's dispatch queue. */
   queuedCount?: number;
   /** The agent's concurrent-run cap. */
   maxConcurrentRuns?: number;
+}
+
+/** Task-side evidence for the triage prompt (assembled by triage-context.ts). */
+export interface TriageTaskContext {
+  /** Task/page body excerpt (caller-truncated). */
+  body?: string;
+  status?: string;
+  kpis?: string;
+  projectName?: string;
+  projectObjective?: string;
 }
 
 export interface TriageInput {
@@ -35,6 +49,9 @@ export interface TriageInput {
   commentedText?: string;
   conversation?: string[];
   candidates: TriageCandidate[];
+  taskContext?: TriageTaskContext;
+  /** Machine-facing re-triage note, e.g. "agent X already timed out on this". */
+  retriageNote?: string;
 }
 
 export type TriageDecision =
@@ -51,20 +68,33 @@ const DEFAULT_SYSTEM =
   'in the roster. ALWAYS write a clear, friendly `message` to the team: when routing, name the agent and ' +
   'explain WHY their listed capabilities fit; when unsure, say no listed agent clearly matches and ask who ' +
   'should take it. Prefer "suggest" (human confirms) under any doubt; "route" only for an obvious, confident, ' +
-  'evidenced fit; "ignore" for noise, items needing no agent, or when no agent has the needed capability.';
+  'evidenced fit; "ignore" for noise, items needing no agent, or when no agent has the needed capability. ' +
+  'Your confidence score is a calibration promise: above 0.5 means you can cite the exact roster evidence ' +
+  'for the match; without citable evidence, stay below 0.5.';
 
-/** One roster line, including current load when the caller provided it. */
-function rosterLine(c: TriageCandidate): string {
-  const load = typeof c.activeRuns === 'number'
-    ? ` (load: ${c.activeRuns} running${c.queuedCount ? `, ${c.queuedCount} queued` : ''}${typeof c.maxConcurrentRuns === 'number' ? ` / cap ${c.maxConcurrentRuns}` : ''})`
-    : '';
-  return `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.technology ? ` (tech: ${c.technology})` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}${load}`;
+/** One roster entry as a multi-line block. Empty key fields render explicitly as
+ * "(none listed)" — load-bearing for calibration: a blank line would let the
+ * model imagine capabilities the agent never claimed. */
+export function rosterBlock(c: TriageCandidate): string {
+  const lines = [
+    `### ${c.name}`,
+    `Specialty: ${c.specialty || '(none listed)'}`,
+    `Capabilities: ${c.capabilities || '(none listed)'}`,
+  ];
+  if (c.technology) lines.push(`Technology: ${c.technology}`);
+  for (const p of c.properties ?? []) lines.push(`${p.name}: ${p.value}`);
+  lines.push(`About: ${c.description || '(no description)'}`);
+  if (typeof c.activeRuns === 'number') {
+    lines.push(`Load: ${c.activeRuns} running, ${c.queuedCount ?? 0} queued${typeof c.maxConcurrentRuns === 'number' ? ` / cap ${c.maxConcurrentRuns}` : ''}`);
+  }
+  return lines.join('\n');
 }
 
-export async function triage(input: TriageInput): Promise<TriageDecision> {
-  const system = input.systemPrompt?.trim() || DEFAULT_SYSTEM;
+/** Assemble the triage user prompt. Pure and exported so prompt-shape changes are
+ * unit-testable without an LLM call. */
+export function buildTriagePrompt(input: TriageInput): string {
   const roster = input.candidates.length
-    ? input.candidates.map(rosterLine).join('\n')
+    ? input.candidates.map(rosterBlock).join('\n\n')
     : '(no agents registered)';
   const commented = input.commentedText?.trim()
     ? `\n\nText being commented on:\n"""\n${input.commentedText.trim()}\n"""`
@@ -72,15 +102,33 @@ export async function triage(input: TriageInput): Promise<TriageDecision> {
   const convo = input.conversation && input.conversation.length
     ? `\n\nConversation so far:\n${input.conversation.map(l => `- ${l}`).join('\n')}`
     : '';
+  const retriage = input.retriageNote?.trim()
+    ? `\n\nRE-TRIAGE NOTE: ${input.retriageNote.trim()}`
+    : '';
 
-  const prompt = [
+  let taskContext = '';
+  const tc = input.taskContext;
+  if (tc && (tc.body || tc.status || tc.kpis || tc.projectName || tc.projectObjective)) {
+    const lines = ['', '', 'TASK CONTEXT:'];
+    if (tc.status) lines.push(`Status: ${tc.status}`);
+    if (tc.kpis) lines.push(`KPIs / success criteria: ${tc.kpis}`);
+    if (tc.projectName || tc.projectObjective) {
+      lines.push(`Project: ${tc.projectName || '(unnamed)'}${tc.projectObjective ? ` — Objective: ${tc.projectObjective}` : ''}`);
+    }
+    if (tc.body) lines.push(`Page content:`, `"""`, tc.body, `"""`);
+    taskContext = lines.join('\n');
+  }
+
+  return [
     `A Notion ${input.kind} has no agent assigned and needs triage.`,
     `Title: ${input.title || '(untitled)'}`,
     `Content/request: ${input.text || '(none)'}`,
     commented,
     convo,
+    retriage,
+    taskContext,
     ``,
-    `Available agents:`,
+    `AVAILABLE AGENTS:`,
     roster,
     ``,
     `Respond with ONLY a JSON object, no prose or code fences:`,
@@ -91,7 +139,13 @@ export async function triage(input: TriageInput): Promise<TriageDecision> {
     `Only pick an agent whose listed specialty/capabilities/technology actually cover this task. Do NOT guess or invent a fit, and never name an agent not in the list above.`,
     `Each agent shows its current load (running/queued/cap). When two candidates fit comparably, prefer the less-loaded one — work routed to a saturated agent waits in its queue. Capability fit always comes first.`,
     `In "message", address the user and write the agent as @name when routing or suggesting; when ignoring for lack of a fit, say so and ask who should take it.`,
+    `Confidence calibration: confidence must reflect EVIDENCE, not instinct. Before choosing an agent, identify the specific Specialty/Capabilities/About line in the roster that covers this task, and cite it in "message" (e.g. "routing to @x because their capabilities include <y>"). If you cannot cite a concrete, specific match — for example the agent's fields say "(none listed)" or the task context is too thin to know what skills are needed — you MUST set confidence below 0.5 so a human confirms before any auto-route. An empty or generic roster entry is never evidence of a fit.`,
   ].join('\n');
+}
+
+export async function triage(input: TriageInput): Promise<TriageDecision> {
+  const system = input.systemPrompt?.trim() || DEFAULT_SYSTEM;
+  const prompt = buildTriagePrompt(input);
 
   const res = await callTriageLLM(input, system, prompt);
   if (!res.ok || !res.text) {
@@ -395,7 +449,7 @@ const ASSESS_SYSTEM =
  * avoid re-route loops if the LLM is unavailable). */
 export async function assessOutcome(input: AssessInput): Promise<AssessResult> {
   const roster = input.candidates.length
-    ? input.candidates.map(c => `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}`).join('\n')
+    ? input.candidates.map(c => `- ${c.name}${c.specialty ? ` — ${c.specialty}` : ''}${c.capabilities ? ` [${c.capabilities}]` : ''}${c.description ? ` — ${c.description}` : ''}`).join('\n')
     : '(no other agents)';
   const prompt = [
     `Agent "${input.agentName}" was asked to do a task and replied below.`,
