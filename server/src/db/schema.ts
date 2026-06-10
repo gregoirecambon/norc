@@ -142,6 +142,15 @@ export const norcSettings = sqliteTable('norc_settings', {
   schedulerEnabled:         integer('scheduler_enabled', { mode: 'boolean' }).notNull().default(false),       // scheduled/recurring task poller
   autoProposeEnabled:       integer('auto_propose_enabled', { mode: 'boolean' }).notNull().default(false),    // recurring co-CEO task proposals
   autoProposeIntervalHours: integer('auto_propose_interval_hours').notNull().default(12),                     // 1–24
+  // Co-CEO memory + cost controls. ceoMemo is the bounded cross-portfolio rolling
+  // memo (per-project slices live in project_memo). autoProposeSummaryModel is the
+  // cheaper model used for the incremental memo step (falls back to orchestratorModel).
+  ceoMemo:                  text('ceo_memo'),
+  ceoMemoUpdatedAt:         integer('ceo_memo_updated_at'),
+  autoProposeSummaryModel:  text('auto_propose_summary_model'),
+  // Phase 2: gated live progress probes — only stale/under-covered projects, rate-limited.
+  autoProposeProbeEnabled:       integer('auto_propose_probe_enabled', { mode: 'boolean' }).notNull().default(false),
+  autoProposeProbeCooldownHours: integer('auto_propose_probe_cooldown_hours').notNull().default(48),
   // Outgoing email (team invites). DB values win; SMTP_* env vars are the
   // fallback. host…from columns predate this feature (0013_notifications.sql,
   // unused until now) — smtp_port is nullable there, so the 587 default lives
@@ -269,4 +278,19 @@ export const dispatchQueue = sqliteTable('dispatch_queue', {
   enqueuedAt:    integer('enqueued_at').notNull(),
   dispatchedAt:  integer('dispatched_at'),
   droppedReason: text('dropped_reason'),
+});
+
+// Per-project rolling co-CEO memo — one bounded slice per Notion project, updated
+// incrementally each auto-propose cycle (only when the project's signals changed)
+// so the context fed to the LLM stays roughly constant as the portfolio grows.
+// `signalHash` lets a cycle skip re-summarizing an unchanged project (no LLM call);
+// `lastProbeAt` rate-limits the Phase-2 live progress probes.
+export const projectMemo = sqliteTable('project_memo', {
+  projectId:   text('project_id').primaryKey(),       // Notion project page id
+  title:       text('title'),                         // last-seen project name (display)
+  memo:        text('memo').notNull().default(''),    // the rolling slice for this app
+  kpiNote:     text('kpi_note'),                      // last qualitative KPI-progress read
+  signalHash:  text('signal_hash'),                   // hash of last cycle's signals → skip-if-unchanged
+  lastProbeAt: integer('last_probe_at'),              // Phase 2: last live progress probe dispatched
+  updatedAt:   integer('updated_at').notNull(),
 });

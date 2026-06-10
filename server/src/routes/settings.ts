@@ -27,6 +27,10 @@ function safe(s: NorcSettings) {
     schedulerEnabled: s.schedulerEnabled,
     autoProposeEnabled: s.autoProposeEnabled,
     autoProposeIntervalHours: s.autoProposeIntervalHours,
+    autoProposeSummaryModel: s.autoProposeSummaryModel,
+    autoProposeProbeEnabled: s.autoProposeProbeEnabled,
+    autoProposeProbeCooldownHours: s.autoProposeProbeCooldownHours,
+    ceoMemoUpdatedAt: s.ceoMemoUpdatedAt,   // observability only — the memo blob is never returned here
     // Email — password hidden, like the orchestrator key.
     smtpHost: s.smtpHost,
     smtpPort: s.smtpPort ?? 587,
@@ -66,6 +70,9 @@ router.post('/', (req, res) => {
   if (typeof b['schedulerEnabled'] === 'boolean') patch['schedulerEnabled'] = b['schedulerEnabled'];
   if (typeof b['autoProposeEnabled'] === 'boolean') patch['autoProposeEnabled'] = b['autoProposeEnabled'];
   if (typeof b['autoProposeIntervalHours'] === 'number') patch['autoProposeIntervalHours'] = Math.max(1, Math.min(24, Math.floor(b['autoProposeIntervalHours'])));
+  if ('autoProposeSummaryModel' in b) patch['autoProposeSummaryModel'] = typeof b['autoProposeSummaryModel'] === 'string' && b['autoProposeSummaryModel'].trim() ? b['autoProposeSummaryModel'].trim() : null;
+  if (typeof b['autoProposeProbeEnabled'] === 'boolean') patch['autoProposeProbeEnabled'] = b['autoProposeProbeEnabled'];
+  if (typeof b['autoProposeProbeCooldownHours'] === 'number' && b['autoProposeProbeCooldownHours'] >= 1) patch['autoProposeProbeCooldownHours'] = Math.floor(b['autoProposeProbeCooldownHours']);
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
 

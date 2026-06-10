@@ -87,4 +87,25 @@ describe('parseBusinessTasks', () => {
     expect(parseBusinessTasks('Here:\n[{"title":"X"}]\nthanks')).toEqual([{ title: 'X' }]);
     expect(parseBusinessTasks('no array at all')).toEqual([]);
   });
+
+  it('parses a valid recurring routine with cadence + first date', () => {
+    const out = parseBusinessTasks('[{"title":"Weekly retro","rationale":"cadence","kpis":"","recurrence":"Weekly","scheduledFor":"2026-06-15"}]');
+    expect(out[0]).toEqual({ title: 'Weekly retro', rationale: 'cadence', kpis: '', recurrence: 'Weekly', scheduledFor: '2026-06-15' });
+  });
+
+  it('drops an invalid recurrence — the entry stays a one-shot', () => {
+    const out = parseBusinessTasks('[{"title":"Do X","recurrence":"Yearly","scheduledFor":"2026-06-15"}]');
+    expect(out[0]).toEqual({ title: 'Do X' }); // recurrence dropped → scheduledFor not carried either
+  });
+
+  it('drops a non-positive / non-numeric repeatEveryDays but keeps repeatEveryDays when valid', () => {
+    expect(parseBusinessTasks('[{"title":"A","repeatEveryDays":"3","scheduledFor":"2026-06-15"}]')[0]).toEqual({ title: 'A' });
+    expect(parseBusinessTasks('[{"title":"B","repeatEveryDays":0}]')[0]).toEqual({ title: 'B' });
+    expect(parseBusinessTasks('[{"title":"C","repeatEveryDays":3,"scheduledFor":"2026-06-15"}]')[0]).toEqual({ title: 'C', repeatEveryDays: 3, scheduledFor: '2026-06-15' });
+  });
+
+  it('ignores a malformed scheduledFor (non-ISO) on a routine', () => {
+    const out = parseBusinessTasks('[{"title":"D","recurrence":"Daily","scheduledFor":"next monday"}]');
+    expect(out[0]).toEqual({ title: 'D', recurrence: 'Daily' }); // routine kept, bad date dropped
+  });
 });

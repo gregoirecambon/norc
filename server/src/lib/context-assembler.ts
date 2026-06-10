@@ -517,15 +517,18 @@ export function buildPrompt(args: {
   return { system: ctx.systemPrompt, prompt: assembleWithBudget(sections, MAX_CONTEXT_CHARS) };
 }
 
-interface Section { text: string; priority: number; order: number; }
+export interface Section { text: string; priority: number; order: number; }
 
 /**
  * Join sections within a character budget. Priority-0 sections are always kept
  * (the request + run contract); the rest are added in priority order until the
  * budget is reached, truncating the overflowing section rather than dropping it
  * silently. Output preserves the original emission order.
+ *
+ * Exported so other bounded-context builders (e.g. the co-CEO auto-propose loop)
+ * can reuse the same priority-truncation discipline.
  */
-function assembleWithBudget(sections: Section[], budget: number): string {
+export function assembleWithBudget(sections: Section[], budget: number): string {
   const byPriority = [...sections].sort((a, b) => a.priority - b.priority || a.order - b.order);
   const kept: Section[] = [];
   let total = 0;

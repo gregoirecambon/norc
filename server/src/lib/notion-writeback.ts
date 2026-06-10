@@ -15,6 +15,12 @@ export interface NewTask {
   assigneeIds?: string[];
   /** Task page ids this task "Depends On" — held until they're all Done. */
   dependsOn?: string[];
+  /** Recurrence preset for a proposed routine ('Daily'|'Weekdays'|'Weekly'|'Monthly'); omit/None for one-shots. */
+  recurrence?: string;
+  /** Custom cadence in days; wins over the preset (matches scheduler.nextOccurrence). */
+  repeatEveryDays?: number;
+  /** ISO date to first schedule the task/template (the scheduler fires it once Status is Backlog). */
+  scheduledFor?: string | null;
 }
 
 /**
@@ -38,6 +44,18 @@ export async function createTaskPage(apiKey: string, tasksDbId: string, task: Ne
   }
   if (task.dependsOn && task.dependsOn.length) {
     properties['Depends On'] = { relation: task.dependsOn.filter(Boolean).map(id => ({ id })) };
+  }
+  // Recurrence — set only for a proposed routine. The scheduler treats a 'Proposed'
+  // status as inert, so a proposed routine is HELD (won't fire) until a human moves
+  // it to Backlog; the date is the first occurrence once approved.
+  if (task.recurrence && task.recurrence !== 'None') {
+    properties['Recurrence'] = { select: { name: task.recurrence } };
+  }
+  if (typeof task.repeatEveryDays === 'number' && task.repeatEveryDays > 0) {
+    properties['Repeat Every (days)'] = { number: Math.floor(task.repeatEveryDays) };
+  }
+  if (task.scheduledFor) {
+    properties['Scheduled For'] = { date: { start: task.scheduledFor } };
   }
   const res = await notionPost<Record<string, unknown>>(apiKey, '/pages', {
     parent: { database_id: tasksDbId },

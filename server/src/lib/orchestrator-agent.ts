@@ -124,41 +124,133 @@ export async function testTriageConnection(cfg: LLMConfig): Promise<{ ok: boolea
   return callTriageLLM(cfg, 'You are a connectivity check for NORC.', 'Reply with the single word: OK');
 }
 
+// ─── Rolling memos: the cost-bounding incremental summaries ───────────────────
+// A cheap model folds each cycle's bounded signals into a capped rolling memo, so
+// the context handed to the proposal step stays ~constant as the workspace grows.
+
+export interface SummarizeMemoInput extends LLMConfig {
+  /** The previous rolling memo ('' on the first cycle). */
+  prevMemo: string;
+  /** This cycle's bounded signals digest. */
+  signals: string;
+  /** Hard char cap for the returned memo. */
+  maxChars: number;
+  /** 'project' = one app's slice; 'global' = cross-portfolio executive memo. */
+  scope: 'project' | 'global';
+  /** Subject label (e.g. the project name) for the prompt. */
+  label?: string;
+}
+
+const PROJECT_MEMO_SYSTEM =
+  'You maintain a concise rolling memo for ONE project/app in a company portfolio. Given the PREVIOUS ' +
+  'memo and the LATEST signals (recent completions, agent outputs, routine health, KPIs, and any ' +
+  'progress note from the team), produce an UPDATED memo capturing: the trend, what is working, what ' +
+  'is stuck/blocked, and a qualitative read on KPI progress. Be terse and evidence-grounded; drop ' +
+  'stale detail to fit the length limit. Output ONLY the memo text — no preamble, no JSON.';
+
+const GLOBAL_MEMO_SYSTEM =
+  'You maintain a concise cross-portfolio executive memo for a company running many apps. Given the ' +
+  'PREVIOUS memo and the LATEST per-project headlines, produce an UPDATED memo capturing company-wide ' +
+  'themes: which apps have momentum, which are stuck, portfolio-level risks and opportunities, and ' +
+  'where leverage is highest right now. Be terse and evidence-grounded; drop stale detail to fit the ' +
+  'length limit. Output ONLY the memo text — no preamble, no JSON.';
+
+/** Incrementally update a rolling memo with a (cheap) model. SAFE DEFAULT:
+ *  returns prevMemo unchanged when the LLM is unavailable/empty — never wipes a
+ *  good memo. The result is hard-capped to maxChars. */
+export async function summarizeMemo(input: SummarizeMemoInput): Promise<string> {
+  const system = input.scope === 'global' ? GLOBAL_MEMO_SYSTEM : PROJECT_MEMO_SYSTEM;
+  const prompt = [
+    input.label ? `Subject: ${input.label}` : '',
+    `PREVIOUS MEMO (carry forward what's still true; revise what changed):`,
+    input.prevMemo.trim() || '(none yet — this is the first cycle)',
+    ``,
+    `LATEST SIGNALS this cycle:`,
+    input.signals.trim() || '(no new signals)',
+    ``,
+    `Write the updated memo in at most ${input.maxChars} characters. Output ONLY the memo text.`,
+  ].filter(l => l !== '').join('\n');
+  const res = await callTriageLLM(input, system, prompt);
+  if (!res.ok || !res.text) return input.prevMemo;
+  const memo = res.text.trim();
+  return memo ? memo.slice(0, input.maxChars) : input.prevMemo;
+}
+
 // ─── Business proposals: the recurring co-CEO analysis ───────────────────────
 
 export interface ProposeBizInput extends LLMConfig {
-  context: string;
+  /** Cross-portfolio rolling executive memo. */
+  globalMemo: string;
+  /** Bounded per-project memos + fresh signals (already budget-truncated by the caller). */
+  projectContext: string;
+  /** Compact projects + KPIs digest. */
+  kpis: string;
+  /** Standing routines/habits already scheduled. */
+  routines: string;
+  /** Open-work titles — dedup + load sense. */
   existingTitles: string[];
   max: number;
+  /** Permit recurring-routine proposals (not just one-shots). */
+  allowRoutines: boolean;
 }
 
-export type ProposedBizTask = { title: string; rationale?: string; kpis?: string };
+export type ProposedBizTask = {
+  title: string;
+  rationale?: string;
+  kpis?: string;
+  /** Set when the co-CEO proposes a recurring routine. */
+  recurrence?: string;
+  repeatEveryDays?: number;
+  scheduledFor?: string;
+};
+
+/** Recurrence presets the scheduler understands (must match notion-provision). */
+const RECURRENCE_VALUES = new Set(['Daily', 'Weekdays', 'Weekly', 'Monthly']);
 
 const PROPOSE_SYSTEM =
-  'You are the NORC Triage Agent, a co-CEO for this company. From the vision/strategy, active projects, ' +
-  'and current open work provided, propose a few NEW, concrete, high-leverage tasks that would move the ' +
-  'business forward now. Be specific and actionable; never duplicate an existing task. If nothing is worth ' +
-  'proposing, return an empty array.';
+  'You are NORC, the co-CEO of this company. You are given a rolling executive memo, per-project state ' +
+  '(with qualitative KPI progress), the current KPIs/objectives, the standing routines, and the list of ' +
+  'open work. Think like a CEO: from the EVIDENCE provided, propose a few NEW, concrete, high-leverage ' +
+  'actions that will move KPIs and grow revenue now — closing gaps, doubling down on what is working, and ' +
+  'unblocking what is stuck. You may propose one-shot tasks AND recurring routines/habits (e.g. a weekly ' +
+  'retro, a monthly KPI review). Be specific and actionable, ground each in the evidence, and never ' +
+  'duplicate existing open work. If nothing is worth proposing, return an empty array.';
 
-/** Propose business tasks from company context. Safe default: [] (no proposals). */
+/** Propose business actions from the co-CEO's memos + fresh signals. Safe default: [] (no proposals). */
 export async function proposeBusinessTasks(input: ProposeBizInput): Promise<ProposedBizTask[]> {
   const existing = input.existingTitles.length ? input.existingTitles.map(t => `- ${t}`).join('\n') : '(none)';
+  const schema = input.allowRoutines
+    ? `[{"title":"<short imperative>","rationale":"<why it matters now, citing the evidence>","kpis":"<success criteria or empty>","recurrence":"<None|Daily|Weekdays|Weekly|Monthly>","repeatEveryDays":<number, or omit>,"scheduledFor":"<YYYY-MM-DD for a routine's first run, or omit>"}]`
+    : `[{"title":"<short imperative>","rationale":"<why it matters now>","kpis":"<success criteria or empty>"}]`;
   const prompt = [
-    `Company & work context:`,
-    input.context || '(no context available)',
+    `EXECUTIVE MEMO (cross-portfolio):`,
+    input.globalMemo.trim() || '(none yet)',
     ``,
-    `Existing open tasks — do NOT duplicate these:`,
+    `PER-PROJECT STATE & RECENT SIGNALS:`,
+    input.projectContext.trim() || '(none)',
+    ``,
+    `PROJECTS & KPIs:`,
+    input.kpis.trim() || '(none)',
+    ``,
+    `STANDING ROUTINES (habits already scheduled):`,
+    input.routines.trim() || '(none)',
+    ``,
+    `EXISTING OPEN WORK — do NOT duplicate these:`,
     existing,
     ``,
-    `Propose at most ${input.max} new tasks. Respond with ONLY a JSON array, no prose:`,
-    `[{"title":"<short imperative>","rationale":"<why it matters now>","kpis":"<success criteria or empty>"}]`,
+    input.allowRoutines
+      ? `Propose at most ${input.max} new actions; each may be a one-shot OR a recurring routine. Respond with ONLY a JSON array, no prose:`
+      : `Propose at most ${input.max} new one-shot tasks. Respond with ONLY a JSON array, no prose:`,
+    schema,
   ].join('\n');
   const res = await callTriageLLM(input, PROPOSE_SYSTEM, prompt);
   if (!res.ok || !res.text) return [];
   return parseBusinessTasks(res.text).slice(0, Math.max(1, input.max));
 }
 
-/** Parse a JSON array of proposed tasks; anything unparseable → []. */
+/** Parse a JSON array of proposed tasks; anything unparseable → []. Routine fields
+ * are validated defensively — an invalid recurrence/cadence is dropped (the entry
+ * stays a one-shot) rather than written as a malformed Notion property. */
 export function parseBusinessTasks(text: string): ProposedBizTask[] {
   const arr = extractJsonArray(text);
   if (!arr) return [];
@@ -168,10 +260,18 @@ export function parseBusinessTasks(text: string): ProposedBizTask[] {
     const r = item as Record<string, unknown>;
     const title = typeof r['title'] === 'string' ? r['title'].trim() : '';
     if (!title) continue;
+    const recurrence = typeof r['recurrence'] === 'string' && RECURRENCE_VALUES.has(r['recurrence']) ? r['recurrence'] : undefined;
+    const repeatRaw = typeof r['repeatEveryDays'] === 'number' ? r['repeatEveryDays'] : NaN;
+    const repeatEveryDays = Number.isFinite(repeatRaw) && repeatRaw > 0 ? Math.floor(repeatRaw) : undefined;
+    const scheduledFor = typeof r['scheduledFor'] === 'string' && /^\d{4}-\d{2}-\d{2}/.test(r['scheduledFor'].trim()) ? r['scheduledFor'].trim() : undefined;
     out.push({
       title,
       ...(typeof r['rationale'] === 'string' ? { rationale: r['rationale'] } : {}),
       ...(typeof r['kpis'] === 'string' ? { kpis: r['kpis'] } : {}),
+      // Routine fields only when a real recurrence/cadence is present.
+      ...(recurrence ? { recurrence } : {}),
+      ...(repeatEveryDays !== undefined ? { repeatEveryDays } : {}),
+      ...((recurrence || repeatEveryDays !== undefined) && scheduledFor ? { scheduledFor } : {}),
     });
   }
   return out;
