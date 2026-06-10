@@ -237,6 +237,7 @@ export default function DashboardPage() {
                 <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{run.agentName}</span>
                 <RunTitle run={run} />
                 <span style={{ flex: 1 }} />
+                <SessionId run={run} />
                 <StatusPill status={run.status} />
                 <span style={{ fontSize: 12, color: 'var(--text-dim)', fontFamily: 'var(--font-mono)', whiteSpace: 'nowrap', minWidth: 70, textAlign: 'right' }}>
                   {timeAgo(run.completedAt)}

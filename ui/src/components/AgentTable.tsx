@@ -90,6 +90,9 @@ const ADAPTER_FIELDS: Record<string, [string, string, boolean, string][]> = {
   openclaw: [
     ['url', 'Gateway URL', false, 'text'],
     ['authToken', 'Auth Token', true, 'password'],
+    // Optional: a deep-link to this agent's console so the dashboard's session pill
+    // becomes an "open session ↗" link. Use {sessionKey} where the session id goes.
+    ['consoleUrlTemplate', 'Console URL (optional, {sessionKey})', false, 'text'],
   ],
   'claude-api': [
     ['apiKey', 'API Key', true, 'password'],
@@ -162,9 +165,9 @@ function ConfigEditForm({ agent, onSaved }: { agent: AgentRow; onSaved: (config:
               value={values[key] ?? ''}
               onChange={e => setValues(prev => ({ ...prev, [key]: e.target.value }))}
               style={{
-                fontSize: 12, padding: '4px 8px', borderRadius: 4, width: key === 'url' ? 280 : 200,
+                fontSize: 12, padding: '4px 8px', borderRadius: 4, width: key === 'url' || key === 'consoleUrlTemplate' ? 280 : 200,
                 border: '1px solid var(--border)', background: 'var(--surface1)',
-                color: 'var(--text-primary)', fontFamily: key === 'url' ? 'var(--font-mono)' : 'inherit',
+                color: 'var(--text-primary)', fontFamily: key === 'url' || key === 'consoleUrlTemplate' ? 'var(--font-mono)' : 'inherit',
                 outline: 'none',
               }}
             />
