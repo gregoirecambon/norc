@@ -3,6 +3,7 @@ import {
   getNotionConfig, saveNotionKey, deleteNotionIntegration, provisionWorkspace,
   type NotionConfig, type NotionIntegration, type NotionDatabase,
 } from '../api/notion.js';
+import { parseSse } from '../lib/sse.js';
 
 /** Compact relative time, e.g. "just now", "5 min ago", "2 h ago", "3 d ago". */
 function timeAgo(ts: number): string {
@@ -143,10 +144,11 @@ export default function NotionPage() {
     const es = new EventSource('/api/events/stream');
 
     es.addEventListener('notion.integration.updated', (e: Event) => {
-      const data = JSON.parse((e as MessageEvent).data) as {
+      const data = parseSse<{
         status: string; workspaceName: string | null; botName: string | null;
         webhookVerifyToken: string | null; webhookUrl: string;
-      };
+      }>((e as MessageEvent).data);
+      if (!data) return;
       if (data.status === 'pending_key') {
         setConfig(prev => prev ? { ...prev, integration: null, databases: [] } : prev);
       } else {
@@ -158,9 +160,10 @@ export default function NotionPage() {
     });
 
     es.addEventListener('notion.workspace.updated', (e: Event) => {
-      const data = JSON.parse((e as MessageEvent).data) as {
+      const data = parseSse<{
         workspaceStatus: string; parentPageId: string | null; databases: NotionDatabase[];
-      };
+      }>((e as MessageEvent).data);
+      if (!data) return;
       setConfig(prev => {
         if (!prev) return prev;
         const integration = prev.integration
@@ -171,9 +174,10 @@ export default function NotionPage() {
     });
 
     es.addEventListener('notion.verification_received', (e: Event) => {
-      const data = JSON.parse((e as MessageEvent).data) as {
+      const data = parseSse<{
         verificationToken: string; workspaceName: string | null; botName: string | null;
-      };
+      }>((e as MessageEvent).data);
+      if (!data) return;
       setConfig(prev => {
         if (!prev?.integration) return prev;
         return {

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { listAgents, type AgentRow } from '../../api/agents.js';
 import { StatusBadge } from '../StatusBadge.js';
+import { parseSse } from '../../lib/sse.js';
 
 function ago(ms: number | null): string {
   if (!ms) return 'never';
@@ -20,7 +21,8 @@ export function AgentHealth() {
     listAgents().then(setAgents).catch(() => setAgents([])).finally(() => setLoaded(true));
     const es = new EventSource('/api/events/stream');
     es.addEventListener('agent.updated', (e: MessageEvent) => {
-      const d = JSON.parse(e.data as string) as { id: string; status?: AgentRow['status']; lastPingedAt?: number | null; lastLatencyMs?: number | null };
+      const d = parseSse<{ id: string; status?: AgentRow['status']; lastPingedAt?: number | null; lastLatencyMs?: number | null }>(e.data);
+      if (!d) return;
       setAgents(prev => prev.map(a => a.id !== d.id ? a : {
         ...a,
         ...(d.status !== undefined ? { status: d.status } : {}),
@@ -29,12 +31,14 @@ export function AgentHealth() {
       }));
     });
     es.addEventListener('agent.registered', (e: MessageEvent) => {
-      const a = JSON.parse(e.data as string) as AgentRow;
+      const a = parseSse<AgentRow>(e.data);
+      if (!a) return;
       setAgents(prev => prev.some(x => x.id === a.id) ? prev : [...prev, a]);
     });
     es.addEventListener('agent.deleted', (e: MessageEvent) => {
-      const { id } = JSON.parse(e.data as string) as { id: string };
-      setAgents(prev => prev.filter(a => a.id !== id));
+      const parsed = parseSse<{ id: string }>(e.data);
+      if (!parsed) return;
+      setAgents(prev => prev.filter(a => a.id !== parsed.id));
     });
     return () => es.close();
   }, []);

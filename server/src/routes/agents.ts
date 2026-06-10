@@ -91,7 +91,8 @@ router.patch('/:id/limits', zodMiddleware(LimitsSchema), (req, res) => {
   emitLog(`agent ${row.name} max concurrent runs → ${maxConcurrentRuns}`);
   emitEvent({ type: 'agent.updated', data: { id, maxConcurrentRuns } });
   // A raised cap may free queued work right away.
-  setImmediate(() => void drainAgent(id).catch(() => {}));
+  setImmediate(() => void drainAgent(id).catch(err =>
+    emitLog(`queue drain error for agent ${id}: ${err instanceof Error ? err.message : 'unknown'}`)));
   res.json({ updated: true, maxConcurrentRuns });
 });
 

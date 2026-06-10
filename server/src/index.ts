@@ -6,7 +6,7 @@ dotenvConfig({ path: path.join(path.dirname(fileURLToPath(import.meta.url)), '..
 import express from 'express';
 import cors from 'cors';
 import { lt, eq } from 'drizzle-orm';
-import { runMigrations } from './db/client.js';
+import { runMigrations, closeDb } from './db/client.js';
 import { db } from './db/client.js';
 import { handshakes, agents } from './db/schema.js';
 import { ensureActiveToken } from './lib/tokens.js';
@@ -137,7 +137,9 @@ async function handleTimeoutCandidate(run: TaskRun, reason: 'idle' | 'hardcap'):
 
   if (reason === 'idle' && agentRow?.adapterType === 'openclaw' && run.openclawRunId) {
     let config: Record<string, unknown> = {};
-    try { config = JSON.parse(agentRow.adapterConfig) as Record<string, unknown>; } catch { /* malformed config → fail-open below */ }
+    try { config = JSON.parse(agentRow.adapterConfig) as Record<string, unknown>; } catch {
+      emitLog(`malformed adapter config for agent ${agentRow.name} — liveness probe skipped`, 'Triage');
+    }
     const probe = await probeOpenclawRun(config, run.openclawRunId);
     if (probe.alive) {
       touchRun(run.id);
@@ -221,7 +223,7 @@ const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 runMigrations();
 await ensureActiveToken();
 
-app.listen(PORT, '0.0.0.0', () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   emitLog(`norc listening on port ${PORT}`);
   // Resume queued work that survived a restart (the queue is durable).
   setTimeout(() => {
@@ -239,3 +241,20 @@ app.listen(PORT, '0.0.0.0', () => {
   // Update check against GitHub releases (re-checks every ~6h).
   setTimeout(() => { void startVersionLoop(); }, 10_000);
 });
+
+// Graceful shutdown: stop accepting connections, checkpoint the SQLite WAL,
+// exit. Open SSE streams (/api/logs, /api/events) hold server.close() open
+// indefinitely, so a short force-exit timer backstops it.
+function shutdown(signal: string): void {
+  emitLog(`norc shutting down (${signal})`);
+  server.close(() => {
+    closeDb();
+    process.exit(0);
+  });
+  setTimeout(() => {
+    closeDb();
+    process.exit(0);
+  }, 5_000).unref();
+}
+process.once('SIGINT', () => shutdown('SIGINT'));
+process.once('SIGTERM', () => shutdown('SIGTERM'));

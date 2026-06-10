@@ -3,6 +3,7 @@ import { listAgents, syncAgentToNotion, type AgentRow } from '../api/agents.js';
 import { getNotionConfig } from '../api/notion.js';
 import { AgentTable } from '../components/AgentTable.js';
 import { AddAgentModal } from '../components/AddAgentModal.js';
+import { parseSse } from '../lib/sse.js';
 
 function timeAgo(epochMs: number | null): string {
   if (!epochMs) return '—';
@@ -41,20 +42,23 @@ export default function AgentsPage() {
     const es = new EventSource('/api/events/stream');
 
     es.addEventListener('agent.registered', (e: MessageEvent) => {
-      const agent = JSON.parse(e.data as string) as AgentRow;
+      const agent = parseSse<AgentRow>(e.data);
+      if (!agent) return;
       setAgents(prev => prev.some(a => a.id === agent.id) ? prev : [...prev, agent]);
     });
 
     es.addEventListener('agent.deleted', (e: MessageEvent) => {
-      const { id } = JSON.parse(e.data as string) as { id: string };
-      setAgents(prev => prev.filter(a => a.id !== id));
+      const parsed = parseSse<{ id: string }>(e.data);
+      if (!parsed) return;
+      setAgents(prev => prev.filter(a => a.id !== parsed.id));
     });
 
     es.addEventListener('agent.updated', (e: MessageEvent) => {
-      const data = JSON.parse(e.data as string) as {
+      const data = parseSse<{
         id: string; adapterConfig?: Record<string, unknown>; orgDbPageId?: string | null;
         status?: AgentRow['status']; lastPingedAt?: number | null; lastLatencyMs?: number | null;
-      };
+      }>(e.data);
+      if (!data) return;
       setAgents(prev => prev.map(a => {
         if (a.id !== data.id) return a;
         const next = { ...a };
@@ -68,14 +72,15 @@ export default function AgentsPage() {
     });
 
     es.addEventListener('notion.workspace.updated', (e: MessageEvent) => {
-      const { workspaceStatus } = JSON.parse(e.data as string) as { workspaceStatus: string };
-      setProvisioned(workspaceStatus === 'provisioned');
+      const parsed = parseSse<{ workspaceStatus: string }>(e.data);
+      if (!parsed) return;
+      setProvisioned(parsed.workspaceStatus === 'provisioned');
     });
 
     es.addEventListener('handshake.updated', (e: MessageEvent) => {
-      const { agentId, status, latencyMs } = JSON.parse(e.data as string) as {
-        agentId: string; status: string; latencyMs: number | null;
-      };
+      const parsed = parseSse<{ agentId: string; status: string; latencyMs: number | null }>(e.data);
+      if (!parsed) return;
+      const { agentId, status, latencyMs } = parsed;
       if (status === 'completed') {
         setAgents(prev => prev.map(a =>
           a.id === agentId ? { ...a, status: 'connected', lastPingedAt: Date.now(), lastLatencyMs: latencyMs } : a

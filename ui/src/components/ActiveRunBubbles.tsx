@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { getDashboard, type DashboardRun } from '../api/dashboard.js';
+import { parseSse } from '../lib/sse.js';
 
 // Floating bottom-right bubbles — one per in-flight run, so it's always visible
 // when the AI team is working, whatever page you're on. Mounted once at the App
@@ -23,10 +24,11 @@ export default function ActiveRunBubbles() {
     const es = new EventSource('/api/events/stream');
 
     es.addEventListener('run.started', (e: MessageEvent) => {
-      const data = JSON.parse(e.data as string) as {
+      const data = parseSse<{
         id: string; agentId: string; agentName: string; title: string | null;
         anchorKind: string; pageId: string; createdAt: number;
-      };
+      }>(e.data);
+      if (!data) return;
       setRuns(prev => prev.some(r => r.id === data.id) ? prev : [...prev, {
         ...data, taskPageId: null, status: 'in_flight', agentActed: false,
         sessionId: null, sessionUrl: null, completedAt: null,
@@ -34,8 +36,9 @@ export default function ActiveRunBubbles() {
     });
 
     es.addEventListener('run.finished', (e: MessageEvent) => {
-      const { id } = JSON.parse(e.data as string) as { id: string };
-      setRuns(prev => prev.filter(r => r.id !== id));
+      const parsed = parseSse<{ id: string }>(e.data);
+      if (!parsed) return;
+      setRuns(prev => prev.filter(r => r.id !== parsed.id));
     });
 
     return () => es.close();

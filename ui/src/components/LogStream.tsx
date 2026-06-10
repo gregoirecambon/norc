@@ -3,20 +3,21 @@ import { useEffect, useRef, useState } from 'react';
 const MAX_LINES = 200;
 
 export function LogStream() {
-  const [lines, setLines] = useState<string[]>([]);
+  const [lines, setLines] = useState<{ id: number; text: string }[]>([]);
+  const nextId = useRef(0);
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     const es = new EventSource('/api/logs/stream');
     es.onmessage = e => {
       // Stream payload is JSON { ts, line }; fall back to the raw string.
-      let line = e.data as string;
+      let text = e.data as string;
       try {
         const parsed = JSON.parse(e.data as string) as { line?: string };
-        if (typeof parsed.line === 'string') line = parsed.line;
+        if (typeof parsed.line === 'string') text = parsed.line;
       } catch { /* keep raw */ }
       setLines(prev => {
-        const next = [...prev, line];
+        const next = [...prev, { id: nextId.current++, text }];
         return next.length > MAX_LINES ? next.slice(next.length - MAX_LINES) : next;
       });
     };
@@ -35,7 +36,7 @@ export function LogStream() {
       <div style={{ height: 180, overflowY: 'auto', padding: 10, background: 'var(--bg)', fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-secondary)' }}>
         {lines.length === 0
           ? <span style={{ color: 'var(--text-dim)' }}>Waiting for events…</span>
-          : lines.map((line, i) => <div key={i}>{line}</div>)
+          : lines.map(line => <div key={line.id}>{line.text}</div>)
         }
         <div ref={bottomRef} />
       </div>

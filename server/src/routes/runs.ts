@@ -5,6 +5,8 @@
 
 import { Router, type Router as ExpressRouter } from 'express';
 import { eq } from 'drizzle-orm';
+import { z } from 'zod';
+import { zodMiddleware } from '../lib/validate.js';
 import { db } from '../db/client.js';
 import { notionIntegration, agents, orchestratorComments } from '../db/schema.js';
 import { emitLog } from '../lib/logger.js';
@@ -95,6 +97,41 @@ async function recordOurComment(apiKey: string, pageId: string, text: string): P
   recordCommentId((await postComment(apiKey, pageId, text)).commentId);
 }
 
+// Request-body schemas for the write endpoints. Read endpoints validate their
+// query params inline. pageSize is clamped (not rejected) in the handler to
+// stay lenient with agents that send out-of-range values.
+const CommentBody = z.object({
+  text: z.string().min(1),
+  pageId: z.string().optional(),
+  discussionId: z.string().optional(),
+});
+const QueryBody = z.object({
+  databaseId: z.string().min(1),
+  filter: z.unknown().optional(),
+  sorts: z.unknown().optional(),
+  pageSize: z.number().optional(),
+});
+const BlocksBody = z.object({
+  markdown: z.string().min(1),
+  pageId: z.string().optional(),
+});
+const StatusBody = z.object({
+  status: z.enum(['Backlog', 'In Progress', 'Done', 'Failed']).optional(),
+  agentOutput: z.string().optional(),
+});
+const ProposeTasksBody = z.object({
+  tasks: z.array(z.object({
+    title: z.string().optional(),
+    description: z.string().optional(),
+    kpis: z.string().optional(),
+    dependsOn: z.unknown().optional(),
+  })).min(1).max(20),
+});
+const CompleteBody = z.object({
+  status: z.string().optional(),
+  summary: z.string().optional(),
+});
+
 export function makeRunsRouter(): ExpressRouter {
   const r: ExpressRouter = Router({ mergeParams: true });
 
@@ -118,17 +155,16 @@ export function makeRunsRouter(): ExpressRouter {
   // POST /api/runs/:token/comment  { text, pageId?, discussionId? }
   // discussionId (= reply_discussion_id from the run block) threads the reply onto
   // the precise text; otherwise the comment lands page-level on pageId/run.pageId.
-  r.post('/:token/comment', async (req, res) => {
+  r.post('/:token/comment', zodMiddleware(CommentBody), async (req, res) => {
     const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
-    const { text, pageId, discussionId } = req.body as { text?: string; pageId?: string; discussionId?: string };
-    if (!text || typeof text !== 'string') { res.status(400).json({ error: 'text_required' }); return; }
+    const { text, pageId, discussionId } = req.body as z.infer<typeof CommentBody>;
     try {
-      if (typeof discussionId === 'string' && discussionId) {
+      if (discussionId) {
         recordCommentId((await postCommentReply(apiKey, discussionId, text)).commentId);
         markActed(run.id);
         emitLog(`agent API: reply posted on discussion ${discussionId} (run ${run.id})`, agentTag(run));
       } else {
-        const target = typeof pageId === 'string' && pageId ? pageId : run.pageId;
+        const target = pageId || run.pageId;
         await recordOurComment(apiKey, target, text);
         markActed(run.id);
         emitLog(`agent API: comment posted on page ${target} (run ${run.id})`, agentTag(run));
@@ -331,13 +367,10 @@ export function makeRunsRouter(): ExpressRouter {
 
   // POST /api/runs/:token/query  { databaseId, filter?, sorts?, pageSize? }
   // Structured DB read for strategic agents (same gate as search).
-  r.post('/:token/query', async (req, res) => {
+  r.post('/:token/query', zodMiddleware(QueryBody), async (req, res) => {
     const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
     if (!await requireOpenSearch(apiKey, run, res)) return;
-    const { databaseId, filter, sorts, pageSize } = req.body as {
-      databaseId?: string; filter?: unknown; sorts?: unknown; pageSize?: number;
-    };
-    if (!databaseId || typeof databaseId !== 'string') { res.status(400).json({ error: 'databaseId_required' }); return; }
+    const { databaseId, filter, sorts, pageSize } = req.body as z.infer<typeof QueryBody>;
     try {
       const body = await notionQuery<Record<string, unknown>>(apiKey, databaseId, {
         ...(filter ? { filter } : {}),
@@ -359,11 +392,10 @@ export function makeRunsRouter(): ExpressRouter {
   });
 
   // POST /api/runs/:token/blocks  { markdown, pageId? }
-  r.post('/:token/blocks', async (req, res) => {
+  r.post('/:token/blocks', zodMiddleware(BlocksBody), async (req, res) => {
     const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
-    const { markdown, pageId } = req.body as { markdown?: string; pageId?: string };
-    if (!markdown || typeof markdown !== 'string') { res.status(400).json({ error: 'markdown_required' }); return; }
-    const target = typeof pageId === 'string' && pageId ? pageId : run.pageId;
+    const { markdown, pageId } = req.body as z.infer<typeof BlocksBody>;
+    const target = pageId || run.pageId;
     try {
       const blocks = markdownToBlocks(markdown);
       await appendBlocks(apiKey, target, blocks);
@@ -376,15 +408,13 @@ export function makeRunsRouter(): ExpressRouter {
   });
 
   // POST /api/runs/:token/status  { status?, agentOutput? }  (task anchors only)
-  r.post('/:token/status', async (req, res) => {
+  r.post('/:token/status', zodMiddleware(StatusBody), async (req, res) => {
     const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
     if (!run.taskPageId) { res.status(409).json({ error: 'not_a_task', message: 'This run is not anchored on a Task.' }); return; }
-    const { status, agentOutput } = req.body as { status?: string; agentOutput?: string };
-    const allowed: TaskStatus[] = ['Backlog', 'In Progress', 'Done', 'Failed'];
+    const { status, agentOutput } = req.body as z.infer<typeof StatusBody>;
     try {
       if (status) {
-        if (!allowed.includes(status as TaskStatus)) { res.status(400).json({ error: 'bad_status', allowed }); return; }
-        await setTaskStatus(apiKey, run.taskPageId, status as TaskStatus);
+        await setTaskStatus(apiKey, run.taskPageId, status);
         if (status === 'Done') releaseAfterDone(run.taskPageId);
       }
       if (typeof agentOutput === 'string') await setTaskFields(apiKey, run.taskPageId, { agentOutput });
@@ -402,11 +432,10 @@ export function makeRunsRouter(): ExpressRouter {
   // (auto-route when confident, else ask the human + email). `dependsOn` entries are
   // indices of EARLIER tasks in the same batch (a DAG by construction) — dependent
   // tasks are created held and auto-released as their predecessors complete.
-  r.post('/:token/propose-tasks', async (req, res) => {
+  r.post('/:token/propose-tasks', zodMiddleware(ProposeTasksBody), async (req, res) => {
     const { run } = req as unknown as { run: TaskRun; apiKey: string };
-    const { tasks } = req.body as { tasks?: { title?: string; description?: string; kpis?: string; dependsOn?: unknown }[] };
-    if (!Array.isArray(tasks) || tasks.length === 0) { res.status(400).json({ error: 'tasks_required' }); return; }
-    const submitted = tasks.slice(0, 20);
+    const { tasks } = req.body as z.infer<typeof ProposeTasksBody>;
+    const submitted = tasks;
     // Build the clean list, remembering submitted-index → clean-index so
     // dependsOn references survive dropped (titleless) entries.
     const cleanIdx = new Map<number, number>();
@@ -450,9 +479,9 @@ export function makeRunsRouter(): ExpressRouter {
   // Delegates to the shared orchestrator finalizer, which ALWAYS posts a visible
   // comment, drives task status, and parks give-up / blocked reports for a human
   // (so a "can't do it" report never silently flips the task to Done).
-  r.post('/:token/complete', async (req, res) => {
+  r.post('/:token/complete', zodMiddleware(CompleteBody), async (req, res) => {
     const { run } = req as unknown as { run: TaskRun; apiKey: string };
-    const { status, summary } = req.body as { status?: string; summary?: string };
+    const { status, summary } = req.body as z.infer<typeof CompleteBody>;
     markActed(run.id);
     try {
       await finalizeAgentReport(run, { status, summary });

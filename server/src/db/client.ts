@@ -20,3 +20,8 @@ const migrationsFolder = path.join(
 export function runMigrations() {
   migrate(db, { migrationsFolder });
 }
+
+/** Close the SQLite handle on shutdown so the WAL checkpoints cleanly. */
+export function closeDb(): void {
+  sqlite.close();
+}
