@@ -22,6 +22,8 @@ import { meRouter } from './routes/me.js';
 import { handshakesRouter, makeCompletionRouter } from './routes/handshakes.js';
 import { notionRouter } from './routes/notion.js';
 import { notionWebhookRouter } from './routes/notionWebhook.js';
+import { slackRouter } from './routes/slack.js';
+import { slackWebhookRouter } from './routes/slackWebhook.js';
 import { makeRunsRouter } from './routes/runs.js';
 import { makeTasksRouter } from './routes/tasks.js';
 import { skillRouter } from './routes/skill.js';
@@ -49,6 +51,9 @@ app.use(cors());
 // raw bytes. This parser also populates req.body, so the global parser below
 // sees it already parsed and skips re-parsing.
 app.use('/webhooks/notion', express.json({
+  verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
+}));
+app.use('/webhooks/slack', express.json({
   verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
 }));
 app.use(express.json());
@@ -82,6 +87,7 @@ app.use('/api/dashboard', dashboardRouter);
 app.use('/api/platforms', platformsRouter);
 app.use('/api/me', meRouter);
 app.use('/api/notion', notionRouter);
+app.use('/api/slack', slackRouter);
 app.use('/api/skill', skillRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/runs', makeRunsRouter());
@@ -89,6 +95,7 @@ app.use('/api/tasks', makeTasksRouter());
 app.use('/api/team', teamRouter);
 app.use('/api/version', versionRouter);
 app.use('/webhooks/notion', notionWebhookRouter);
+app.use('/webhooks/slack', slackWebhookRouter);
 
 // Drop expired dashboard sessions hourly.
 setInterval(() => pruneExpiredSessions(), 3600_000);

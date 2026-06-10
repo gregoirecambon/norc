@@ -48,6 +48,9 @@ export interface ProjectBlock {
   objective: string;
   kpis: string;
   docs: string;
+  /** Slack channel bound to the project ('Slack Channel ID' property) — agents
+   * can post there via the /slack run endpoint; empty when unbound. */
+  slackChannelId: string;
 }
 
 export interface CompanyBlock {
@@ -106,6 +109,24 @@ function fingerprintOf(parts: unknown): string {
   return createHash('sha256').update(JSON.stringify(parts)).digest('hex');
 }
 
+/** Agent persona + clearance from its Org DB page (defaults when unreadable).
+ * Shared by assembleContext and the Slack chat path. */
+export async function agentPersona(apiKey: string, orgDbPageId: string): Promise<{ systemPrompt: string; contextLevel: ContextLevel }> {
+  let systemPrompt = DEFAULT_SYSTEM_PROMPT;
+  let contextLevel: ContextLevel = 'project';
+  try {
+    const agentPage = await notionGet<Record<string, unknown>>(apiKey, `/pages/${orgDbPageId}`);
+    const props = agentPage['properties'];
+    const sp = getRichText(props, 'System Prompt').trim();
+    if (sp) systemPrompt = sp;
+    const lvl = getSelect(props, 'Context Level');
+    if (lvl === 'task' || lvl === 'project' || lvl === 'strategic') contextLevel = lvl;
+  } catch {
+    // fall back to defaults if the agent page can't be read
+  }
+  return { systemPrompt, contextLevel };
+}
+
 /** Build the structured context for one agent on one anchor. */
 export async function assembleContext(args: {
   apiKey: string;
@@ -118,18 +139,7 @@ export async function assembleContext(args: {
   const { apiKey, anchor, agentRef, request } = args;
 
   // Agent persona + clearance from its Org DB page.
-  let systemPrompt = DEFAULT_SYSTEM_PROMPT;
-  let contextLevel: ContextLevel = 'project';
-  try {
-    const agentPage = await notionGet<Record<string, unknown>>(apiKey, `/pages/${agentRef.orgDbPageId}`);
-    const props = agentPage['properties'];
-    const sp = getRichText(props, 'System Prompt').trim();
-    if (sp) systemPrompt = sp;
-    const lvl = getSelect(props, 'Context Level');
-    if (lvl === 'task' || lvl === 'project' || lvl === 'strategic') contextLevel = lvl;
-  } catch {
-    // fall back to defaults if the agent page can't be read
-  }
+  const { systemPrompt, contextLevel } = await agentPersona(apiKey, agentRef.orgDbPageId);
 
   let taskBlock: TaskBlock | null = null;
   let projectBlock: ProjectBlock | null = null;
@@ -163,6 +173,7 @@ export async function assembleContext(args: {
         objective: getRichText(pp, 'Objective'),
         kpis: getRichText(pp, 'KPIs'),
         docs: getRichText(pp, 'Docs'),
+        slackChannelId: getRichText(pp, 'Slack Channel ID').trim(),
       };
     } catch {
       // no project context if it can't be read
@@ -558,11 +569,12 @@ export function assembleWithBudget(sections: Section[], budget: number): string 
   return kept.sort((a, b) => a.order - b.order).map(s => s.text).join('\n\n');
 }
 
-function projectSection(p: ProjectBlock): string {
+export function projectSection(p: ProjectBlock): string {
   return [
     `Project: ${p.name || '(unnamed)'}`,
     p.objective ? `Objective: ${p.objective}` : '',
     p.kpis ? `KPIs: ${p.kpis}` : '',
     p.docs ? `Docs: ${p.docs}` : '',
+    p.slackChannelId ? `Slack channel: ${p.slackChannelId}` : '',
   ].filter(Boolean).join('\n');
 }

@@ -121,6 +121,35 @@ curl -s -X POST <api_base>/propose-tasks -H 'Content-Type: application/json' \
                {"title":"Final pricing proposal","description":"…","dependsOn":[0,1]}]}'
 ```
 
+## Talking in Slack
+
+When the NORC install is connected to Slack, you can post into Slack channels
+through the run API — the message appears under **your own name**, sent by the
+Norc app. Use it when the task asks for a brief/update/announcement in Slack,
+or when the project is bound to a channel.
+
+```bash
+# Post to a Slack channel as yourself. threadTs is optional (reply in-thread).
+curl -s -X POST <api_base>/slack -H 'Content-Type: application/json' \
+  -d '{"channel":"C0123456789","text":"Pricing brief: …"}'
+```
+
+How to find the channel id, in order of preference:
+
+1. The `Slack channel: C…` line in your `[CONTEXT]` block — that's the channel
+   bound to this run's project.
+2. `GET <api_base>/context` → `project.slackChannelId`.
+3. A channel id written in the task body itself (e.g. "post the summary to
+   C0123456789").
+
+Rules: only channels the Norc app has been invited to work (`403 not_in_channel`
+otherwise — tell the human to `/invite @Norc` there, don't retry). `503` means
+this install has no Slack connection: report your result in Notion instead and
+note that Slack was unavailable. Don't post secrets or raw API output; write a
+short, channel-appropriate message. When a task's project has a bound channel,
+NORC already posts a completion summary there automatically — only post yourself
+when the task explicitly asks for Slack content beyond that summary.
+
 ### Going deeper (strategic agents)
 
 If you are a `strategic`-clearance agent and your operator has enabled open

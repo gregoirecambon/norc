@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { InvitePanel } from '../components/InvitePanel.js';
 import { PlatformsPanel } from '../components/PlatformsPanel.js';
+import { SlackPanel } from '../components/panels/SlackPanel.js';
 import { Section, Tabs, btnStyle, inputStyle, labelStyle } from '../components/ui.js';
 import { getVersion } from '../api/version.js';
 import {
@@ -8,7 +9,7 @@ import {
   type NorcSettings, type TestEmailResult,
 } from '../api/settings.js';
 
-type Tab = 'general' | 'email';
+type Tab = 'general' | 'slack' | 'email';
 
 export default function SettingsPage() {
   const [tab, setTab] = useState<Tab>('general');
@@ -24,12 +25,13 @@ export default function SettingsPage() {
       </h1>
 
       <Tabs
-        tabs={[{ id: 'general' as Tab, label: 'General' }, { id: 'email' as Tab, label: 'Email' }]}
+        tabs={[{ id: 'general' as Tab, label: 'General' }, { id: 'slack' as Tab, label: 'Slack' }, { id: 'email' as Tab, label: 'Email' }]}
         active={tab}
         onChange={setTab}
       />
 
       {tab === 'general' && <GeneralTab version={version} />}
+      {tab === 'slack' && <SlackPanel />}
       {tab === 'email' && <EmailTab />}
     </div>
   );

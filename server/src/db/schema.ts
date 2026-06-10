@@ -23,6 +23,13 @@ export const agents = sqliteTable('agents', {
   // Dispatch capacity: how many WORK runs may be in flight at once for this
   // agent. Excess work waits in dispatch_queue. Chat-lane runs are exempt.
   maxConcurrentRuns: integer('max_concurrent_runs').notNull().default(1),
+  // Slack reachability. slackEnabled gates whether this agent is targetable
+  // from Slack; slackUsergroupId/slackHandle hold the per-agent user group
+  // (@handle) NORC provisioned for it — null on free plans (fallback:
+  // "@Norc <Name> …"). The usergroup is disabled (kept) on toggle-off.
+  slackEnabled:      integer('slack_enabled', { mode: 'boolean' }).notNull().default(false),
+  slackUsergroupId:  text('slack_usergroup_id'),
+  slackHandle:       text('slack_handle'),
 });
 
 export const registrationTokens = sqliteTable('registration_tokens', {
@@ -82,6 +89,25 @@ export const notionIntegration = sqliteTable('notion_integration', {
   norcOrgPageId:      text('norc_org_page_id'),     // NORC's own Org DB page (Type = Orchestrator)
   createdAt:          integer('created_at').notNull(),
   updatedAt:          integer('updated_at').notNull(),
+});
+
+// Singleton Slack workspace connection (one row, like notionIntegration).
+// botToken/signingSecret may be null when the install relies on the
+// SLACK_BOT_TOKEN / SLACK_SIGNING_SECRET env fallback — resolution lives in
+// lib/slack-integration.ts. botUserId is our app's bot user, used both for
+// loop prevention (ignore our own messages) and to detect @Norc mentions.
+export const slackIntegration = sqliteTable('slack_integration', {
+  id:            text('id').primaryKey(),
+  botToken:      text('bot_token'),
+  signingSecret: text('signing_secret'),
+  botUserId:     text('bot_user_id'),
+  appId:         text('app_id'),
+  teamId:        text('team_id'),
+  teamName:      text('team_name'),
+  botName:       text('bot_name'),
+  status:        text('status').notNull().default('pending'), // 'pending' | 'active' | 'error'
+  createdAt:     integer('created_at').notNull(),
+  updatedAt:     integer('updated_at').notNull(),
 });
 
 export const notionDatabases = sqliteTable('notion_databases', {
@@ -235,6 +261,12 @@ export const taskRuns = sqliteTable('task_runs', {
   // The session this run addressed (resolveSession): the NORC key (page / page#chat
   // / page#g2) or, for openclaw, the adapter's own session key. Display/debug only.
   sessionId:        text('session_id'),
+  // Where the triggering request came from. Slack-originated runs carry the
+  // channel + thread so replies/completions land back in the right Slack thread
+  // (for chat runs the anchor itself is synthetic: pageId = slack:<ch>:<ts>).
+  origin:           text('origin').notNull().default('notion'), // 'notion' | 'slack'
+  slackChannel:     text('slack_channel'),
+  slackThreadTs:    text('slack_thread_ts'),
   createdAt:        integer('created_at').notNull(),
   completedAt:      integer('completed_at'),
 });

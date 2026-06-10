@@ -20,6 +20,8 @@ import { drainAgent } from '../lib/orchestrator.js';
 import { setTaskStatus } from '../lib/notion-writeback.js';
 import { notionIntegration } from '../db/schema.js';
 import { norcBaseUrl } from '../lib/base-url.js';
+import { isSlackActive } from '../lib/slack-integration.js';
+import { ensureAgentUsergroup, disableAgentUsergroup } from '../lib/slack-agents.js';
 import type { AdapterType } from '../types.js';
 
 const router: ExpressRouter = Router();
@@ -81,6 +83,8 @@ router.get('/', (_req, res) => {
     metadata: parseJson(r.metadata),
     orgDbPageId: r.orgDbPageId ?? null,
     maxConcurrentRuns: r.maxConcurrentRuns,
+    slackEnabled: r.slackEnabled,
+    slackHandle: r.slackHandle ?? null,
   })));
 });
 
@@ -98,6 +102,38 @@ router.patch('/:id/limits', zodMiddleware(LimitsSchema), (req, res) => {
   setImmediate(() => void drainAgent(id).catch(err =>
     emitLog(`queue drain error for agent ${id}: ${err instanceof Error ? err.message : 'unknown'}`)));
   res.json({ updated: true, maxConcurrentRuns });
+});
+
+// PATCH /api/agents/:id/slack — toggle whether this agent is reachable from
+// Slack. On: provision/re-enable its @handle user group (best-effort — a paid-
+// plan failure still enables the agent, with the "@Norc <name>" fallback).
+// Off: disable the user group, keep the mapping for re-enable.
+const SlackToggleSchema = z.object({ enabled: z.boolean() });
+router.patch('/:id/slack', zodMiddleware(SlackToggleSchema), async (req, res) => {
+  const { id } = req.params as { id: string };
+  const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
+  if (!row) { res.status(404).json({ error: 'not_found' }); return; }
+  const { enabled } = req.body as z.infer<typeof SlackToggleSchema>;
+  if (enabled && !isSlackActive()) {
+    res.status(400).json({ error: 'slack_not_active', message: 'Connect Slack in Settings first.' });
+    return;
+  }
+
+  db.update(agents).set({ slackEnabled: enabled }).where(eq(agents.id, id)).run();
+
+  let handle: string | null = row.slackHandle;
+  let warning: string | undefined;
+  if (enabled) {
+    const result = await ensureAgentUsergroup(id);
+    handle = result.handle;
+    warning = result.warning;
+  } else {
+    await disableAgentUsergroup(id);
+  }
+
+  emitLog(`agent ${row.name} Slack ${enabled ? 'enabled' : 'disabled'}${handle ? ` (@${handle})` : ''}`, 'Slack');
+  emitEvent({ type: 'agent.updated', data: { id, slackEnabled: enabled, slackHandle: handle } });
+  res.json({ enabled, handle, ...(warning ? { warning } : {}) });
 });
 
 // GET /api/agents/invite

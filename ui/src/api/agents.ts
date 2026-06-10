@@ -12,6 +12,8 @@ export interface AgentRow {
   metadata: Record<string, unknown>;
   orgDbPageId: string | null;
   maxConcurrentRuns: number;
+  slackEnabled: boolean;
+  slackHandle: string | null;
 }
 
 export interface InviteData {
@@ -120,6 +122,19 @@ export async function updateAgentLimits(id: string, maxConcurrentRuns: number): 
     throw new Error(body.message ?? body.error ?? `${res.status}`);
   }
   return res.json() as Promise<{ maxConcurrentRuns: number }>;
+}
+
+export async function toggleAgentSlack(id: string, enabled: boolean): Promise<{ enabled: boolean; handle: string | null; warning?: string }> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(id)}/slack`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled }),
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
+    throw new Error(body.message ?? body.error ?? `${res.status}`);
+  }
+  return res.json() as Promise<{ enabled: boolean; handle: string | null; warning?: string }>;
 }
 
 export async function deleteAgent(id: string): Promise<void> {

@@ -378,7 +378,7 @@ export default function LogsPage() {
                   }}>
                     {l.raw}
                   </span>
-                  {l.pageId && linkIds.has(l.id) && (
+                  {l.pageId && !l.pageId.startsWith('slack:') && linkIds.has(l.id) && (
                     <a
                       href={notionUrl(l.pageId)}
                       target="_blank"

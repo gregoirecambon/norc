@@ -43,6 +43,9 @@ import { enrichCandidates, buildTaskContext } from './triage-context.js';
 import { resolveOrgMembers, listHumans, type OrgMember } from './org-members.js';
 import { norcDecide, type NorcAction, type NorcDecision, type NorcOpenTask } from './norc-agent.js';
 import { getNorcOrgPageId } from './norc-identity.js';
+import { notifySlackOnCompletion, projectForChannel } from './slack-notify.js';
+import { isSlackAnchor, parseSlackAnchor, getSlack as getSlackCreds } from './slack-integration.js';
+import { postAsAgent } from './slack-client.js';
 import {
   createPendingChange, attachProposalComment, findPendingByDiscussion, resolveChange,
   applySelfChange, parseApprovalReply, renderSelfChangeDiff, describeCurrentValue, describeProposedValue,
@@ -639,7 +642,7 @@ async function holdForDependencies(integration: Integration, anchor: Anchor, unm
 }
 
 /** Resolve an agent name (as the orchestrator returned it) to a dispatchable ref. */
-function matchAgentByName(name: string): AgentRef | null {
+export function matchAgentByName(name: string): AgentRef | null {
   const norm = name.replace(/^@/, '').trim().toLowerCase();
   const row = db.select().from(agents).all().find(a => a.name.toLowerCase() === norm);
   if (!row || !row.orgDbPageId) return null;
@@ -662,7 +665,7 @@ interface TriageOpts {
  * Returns true when it took ownership of the event (so the caller skips the
  * generic "discarded" log). No-op (returns false) when disabled / no agents.
  */
-function triageConfigured(settings: ReturnType<typeof getNorcSettings>): boolean {
+export function triageConfigured(settings: ReturnType<typeof getNorcSettings>): boolean {
   if (!settings?.orchestratorEnabled) return false;
   // anthropic needs a key; openai (LiteLLM) needs a base URL (key optional).
   return settings.orchestratorProvider === 'openai' ? !!settings.orchestratorBaseUrl : !!settings.orchestratorApiKey;
@@ -671,7 +674,7 @@ function triageConfigured(settings: ReturnType<typeof getNorcSettings>): boolean
 /** The agent roster (name/specialty/capabilities/technology + current load) for
  * triage/assessment, excluding the given names. Mirrors the Org DB metadata the
  * agents registered with; load lets triage route around saturated agents. */
-function rosterCandidates(excludeNames: string[]): Array<TriageCandidate & { orgDbPageId: string | null }> {
+export function rosterCandidates(excludeNames: string[]): Array<TriageCandidate & { orgDbPageId: string | null }> {
   const excl = new Set(excludeNames.map(n => n.toLowerCase()));
   return db.select().from(agents).all().filter(a => !excl.has(a.name.toLowerCase())).map(a => {
     let meta: Record<string, unknown> = {};
@@ -893,13 +896,29 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
  * one. When all agents are exhausted it asks a human.
  */
 export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
-  const integration = db.select().from(notionIntegration).all()[0] ?? null;
-  if (!integration || integration.status !== 'active') return;
-  const apiKey = integration.apiKey;
-
   const dedupKey = `timeout:${run.id}`;
   if (alreadyProcessed(dedupKey)) return;
   markProcessed(dedupKey);
+
+  // Slack-chat runs: a one-line note in the thread, no Notion writes and no
+  // re-triage — chat is ephemeral, the human just asks again.
+  if (isSlackAnchor(run.pageId)) {
+    const where = parseSlackAnchor(run.pageId);
+    const { botToken } = getSlackCreds();
+    const slackAgentName = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0]?.name ?? run.agentId;
+    if (where && botToken) {
+      await postAsAgent(botToken, {
+        channel: where.channel, threadTs: where.threadTs, agentName: 'NORC',
+        text: `⏱ @${slackAgentName} didn't answer in time. Mention them again to retry, or tag another agent.`,
+      }).catch(() => undefined);
+    }
+    emitLog(`slack chat run ${run.id} timed out — noted in thread`, 'Triage');
+    return;
+  }
+
+  const integration = db.select().from(notionIntegration).all()[0] ?? null;
+  if (!integration || integration.status !== 'active') return;
+  const apiKey = integration.apiKey;
 
   const agentRow = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0];
   const agentName = agentRow?.name ?? run.agentId;
@@ -961,6 +980,8 @@ async function parkTaskBlocked(args: {
   await safeWrite('blocked notice', () => postAgentComment(apiKey, anchor.pageId,
     `🚧 **@${agentName}** is blocked and needs your input before this can continue.${detail}`, who));
   finalizeRun(runId, 'done');
+  const run = getRun(runId);
+  if (run) void notifySlackOnCompletion(run, 'blocked', need).catch(() => {});
   emitLog(`"${agentName}" parked ${anchor.kind} ${anchor.pageId} as Blocked — pinged human`, agentName);
 }
 
@@ -972,6 +993,25 @@ async function parkTaskBlocked(args: {
  * task for a human instead of silently marking it Done.
  */
 export async function finalizeAgentReport(run: TaskRun, report: { status?: string; summary?: string }): Promise<void> {
+  // Slack-chat runs have a synthetic anchor (slack:<channel>:<thread>) — no
+  // Notion page exists. The reply goes to the Slack thread as the agent; no
+  // Notion writes, no assessment (chat is ephemeral).
+  if (isSlackAnchor(run.pageId)) {
+    const where = parseSlackAnchor(run.pageId);
+    const { botToken } = getSlackCreds();
+    const slackAgentName = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0]?.name ?? 'NORC';
+    const ok = report.status !== 'failed';
+    const text = (report.summary ?? '').trim()
+      || (ok ? '(done)' : `⚠️ I couldn't finish that.`);
+    if (where && botToken) {
+      await postAsAgent(botToken, { channel: where.channel, threadTs: where.threadTs, agentName: slackAgentName, text })
+        .catch(err => emitLog(`slack reply post failed: ${err instanceof Error ? err.message : 'unknown'}`, slackAgentName));
+    }
+    finalizeRun(run.id, ok ? 'done' : 'failed');
+    emitLog(`agent API: slack chat run ${run.id} completed (${ok ? 'done' : 'failed'})`, slackAgentName);
+    return;
+  }
+
   const integration = db.select().from(notionIntegration).all()[0] ?? null;
   if (!integration || integration.status !== 'active') return;
   const apiKey = integration.apiKey;
@@ -1031,6 +1071,7 @@ export async function finalizeAgentReport(run: TaskRun, report: { status?: strin
   }
   if (orgDbPageId) await safeWrite('agent available', () => setAgentStatus(apiKey, orgDbPageId, 'Available'));
   finalizeRun(run.id, ok ? 'done' : 'failed');
+  void notifySlackOnCompletion(run, ok ? 'done' : 'failed', summary).catch(() => {});
   emitLog(`agent API: run ${run.id} completed (${ok ? 'done' : 'failed'})`, agentName);
 }
 
@@ -1158,12 +1199,19 @@ export async function proposeTasks(opts: {
   if (!tasksDb) throw new Error('no tasks database provisioned');
 
   // Link new tasks to the project the proposing run is anchored to (if any).
+  // A Slack-chat source has no Notion anchor — its channel's bound project
+  // (when any) plays that role instead.
+  const slackSource = parseSlackAnchor(opts.sourcePageId);
   let projectId: string | null = null;
-  try {
-    const src = await resolveAnchor(apiKey, opts.sourcePageId);
-    if (src.kind === 'project') projectId = src.pageId;
-    else if (src.kind === 'task') projectId = getRelationIds((src.page as Record<string, unknown>)['properties'], 'Project')[0] ?? null;
-  } catch { /* no project link */ }
+  if (slackSource) {
+    projectId = (await projectForChannel(slackSource.channel))?.projectId ?? null;
+  } else {
+    try {
+      const src = await resolveAnchor(apiKey, opts.sourcePageId);
+      if (src.kind === 'project') projectId = src.pageId;
+      else if (src.kind === 'task') projectId = getRelationIds((src.page as Record<string, unknown>)['properties'], 'Project')[0] ?? null;
+    } catch { /* no project link */ }
+  }
 
   const created: { id: string; title: string; disposition: TriageOutcome | 'created' | 'held' }[] = [];
   // Created page id per batch index — what later tasks' dependsOn resolves against.
@@ -1208,12 +1256,23 @@ export async function proposeTasks(opts: {
     emitLog(`propose-tasks: created "${title}" (${pageId}) → ${disposition}`, 'Triage');
   }
 
-  // Summarize on the source page so the human sees what the agent spun up.
+  // Summarize on the source page (or in the source Slack thread) so the human
+  // sees what the agent spun up.
   if (created.length > 0) {
     const lines = created.map(c => `- ${c.title} — ${dispositionLabel(c.disposition)}`).join('\n');
     const who = opts.proposerName ? `**@${opts.proposerName}**` : 'An agent';
-    await safeWrite('propose summary', () => postAgentComment(apiKey, opts.sourcePageId,
-      `🧭 **NORC Triage Agent**\n${who} proposed ${created.length} task${created.length === 1 ? '' : 's'}:\n${lines}`));
+    if (slackSource) {
+      const { botToken } = getSlackCreds();
+      if (botToken) {
+        await postAsAgent(botToken, {
+          channel: slackSource.channel, threadTs: slackSource.threadTs, agentName: 'NORC',
+          text: `${who.replace(/\*\*/g, '*')} proposed ${created.length} task${created.length === 1 ? '' : 's'}:\n${lines}`,
+        }).catch(() => undefined);
+      }
+    } else {
+      await safeWrite('propose summary', () => postAgentComment(apiKey, opts.sourcePageId,
+        `🧭 **NORC Triage Agent**\n${who} proposed ${created.length} task${created.length === 1 ? '' : 's'}:\n${lines}`));
+    }
   }
 
   return { created };
@@ -1282,6 +1341,10 @@ interface TurnOpts {
   lane?: 'work' | 'chat';
   manageTaskStatus: boolean;
   how: string;
+  /** Slack origin (when the ask came from Slack): completion summaries and
+   * status notes are mirrored back to this thread. Persisted on the run. */
+  slackChannel?: string | null;
+  slackThreadTs?: string | null;
 }
 
 /** The Notion project a turn belongs to — the per-(agent, project) serialization key. */
@@ -1316,6 +1379,7 @@ function mintReservation(anchor: Anchor, agentRef: AgentRef, opts: TurnOpts, pro
     lane,
     triggeringUserId: opts.triggeringUserId,
     manageTaskStatus: opts.manageTaskStatus,
+    ...(opts.slackChannel ? { origin: 'slack' as const, slackChannel: opts.slackChannel, slackThreadTs: opts.slackThreadTs ?? null } : {}),
   });
   return { runId: id, token, firstVisit, lane };
 }
@@ -1371,6 +1435,7 @@ export async function requestAgentTurn(integration: Integration, anchor: Anchor,
       ...(opts.commentedText ? { commentedText: opts.commentedText } : {}),
       ...(opts.triggeringUserId !== undefined ? { triggeringUserId: opts.triggeringUserId } : {}),
       ...(opts.threadBlockId ? { threadBlockId: opts.threadBlockId } : {}),
+      ...(opts.slackChannel ? { slackChannel: opts.slackChannel, slackThreadTs: opts.slackThreadTs ?? null } : {}),
       manageTaskStatus: opts.manageTaskStatus,
       how: opts.how,
     };
@@ -1585,6 +1650,7 @@ async function dispatchQueuedItem(integration: Integration, agentRow: typeof age
     ...(payload.commentedText ? { commentedText: payload.commentedText } : {}),
     ...(payload.triggeringUserId !== undefined ? { triggeringUserId: payload.triggeringUserId } : {}),
     ...(payload.threadBlockId ? { threadBlockId: payload.threadBlockId } : {}),
+    ...(payload.slackChannel ? { slackChannel: payload.slackChannel, slackThreadTs: payload.slackThreadTs ?? null } : {}),
     manageTaskStatus: payload.manageTaskStatus,
     how: `${payload.how} (dequeued)`,
   };
@@ -1725,6 +1791,8 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     if (opts.manageTaskStatus) await safeWrite('task failed', () => setTaskStatus(apiKey, anchor.pageId, 'Failed'));
     await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
     finalizeRun(runId, 'failed');
+    const failedRun = getRun(runId);
+    if (failedRun) void notifySlackOnCompletion(failedRun, 'failed', result.error ?? '').catch(() => {});
     emitLog(`dispatch failed for "${agentRef.name}": ${result.error}`, agentRef.name);
     return;
   }
@@ -1750,6 +1818,8 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
       }
       await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
       finalizeRun(runId, 'done');
+      const actedRun = getRun(runId);
+      if (actedRun) void notifySlackOnCompletion(actedRun, 'done', '').catch(() => {});
     }
     emitLog(`"${agentRef.name}" completed via Agent API on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
     return;
@@ -1772,6 +1842,8 @@ async function runAgentTurn(integration: Integration, anchor: Anchor, agentRef: 
     }
     await safeWrite('agent available', () => setAgentStatus(apiKey, agentRef.orgDbPageId, 'Available'));
     finalizeRun(runId, 'done');
+    const doneRun = getRun(runId);
+    if (doneRun) void notifySlackOnCompletion(doneRun, 'done', text).catch(() => {});
     emitLog(`"${agentRef.name}" completed on ${anchor.kind} page ${anchor.pageId}`, agentRef.name);
     return;
   }

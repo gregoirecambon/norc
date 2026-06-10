@@ -25,6 +25,10 @@ import { titleSimilarity, normalizedTitle } from '../lib/task-similarity.js';
 import { getNorcSettings } from '../lib/norc-settings.js';
 import { assist, type AssistSource } from '../lib/orchestrator-agent.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
+import { getSlack as getSlackIntegration, isSlackActive, isSlackAnchor, parseSlackAnchor } from '../lib/slack-integration.js';
+import { conversationsInfo, postAsAgent } from '../lib/slack-client.js';
+import { notifySlackOnCompletion } from '../lib/slack-notify.js';
+import { slackChatContext } from '../lib/slack-orchestrator.js';
 
 /** Open Notion search/query is opt-in (off by default) and strategic-only. */
 function openSearchEnabled(): boolean {
@@ -131,6 +135,11 @@ const CompleteBody = z.object({
   status: z.string().optional(),
   summary: z.string().optional(),
 });
+const SlackBody = z.object({
+  channel: z.string().min(1),
+  text: z.string().min(1),
+  threadTs: z.string().optional(),
+});
 
 export function makeRunsRouter(): ExpressRouter {
   const r: ExpressRouter = Router({ mergeParams: true });
@@ -165,6 +174,18 @@ export function makeRunsRouter(): ExpressRouter {
         emitLog(`agent API: reply posted on discussion ${discussionId} (run ${run.id})`, agentTag(run));
       } else {
         const target = pageId || run.pageId;
+        // Slack-chat runs: the default reply target is the Slack thread, not a
+        // Notion page (none exists for the synthetic anchor).
+        if (isSlackAnchor(target)) {
+          const where = parseSlackAnchor(target);
+          const { botToken } = getSlackIntegration();
+          if (!where || !botToken) { res.status(503).json({ error: 'slack_not_active' }); return; }
+          await postAsAgent(botToken, { channel: where.channel, threadTs: where.threadTs, agentName: agentTag(run), text });
+          markActed(run.id);
+          emitLog(`agent API: reply posted in Slack thread ${where.channel} (run ${run.id})`, agentTag(run));
+          res.json({ ok: true });
+          return;
+        }
         await recordOurComment(apiKey, target, text);
         markActed(run.id);
         emitLog(`agent API: comment posted on page ${target} (run ${run.id})`, agentTag(run));
@@ -172,6 +193,39 @@ export function makeRunsRouter(): ExpressRouter {
       res.json({ ok: true });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // POST /api/runs/:token/slack  { channel, text, threadTs? }
+  // Post into a Slack channel as this run's agent (own name via username
+  // override). Restricted to channels the Norc app is a member of — an invite
+  // is the human consent gate. Channel ids come from the project's 'Slack
+  // channel:' context line, the task body, or /context → project.slackChannelId.
+  r.post('/:token/slack', zodMiddleware(SlackBody), async (req, res) => {
+    const { run } = req as unknown as { run: TaskRun };
+    const { channel, text, threadTs } = req.body as z.infer<typeof SlackBody>;
+    const slack = getSlackIntegration();
+    if (!slack.botToken || !isSlackActive()) {
+      res.status(503).json({ error: 'slack_not_active', message: 'Slack is not connected on this NORC install.' });
+      return;
+    }
+    try {
+      const info = await conversationsInfo(slack.botToken, channel);
+      if (!info.isMember && !info.isIm) {
+        res.status(403).json({
+          error: 'not_in_channel',
+          message: `The Norc app is not a member of ${channel}. Ask a human to /invite it, or pick a channel from the project context.`,
+        });
+        return;
+      }
+      const posted = await postAsAgent(slack.botToken, {
+        channel, text, threadTs: threadTs ?? null, agentName: agentTag(run),
+      });
+      markActed(run.id);
+      emitLog(`agent API: Slack message posted to ${info.name ? '#' + info.name : channel} (run ${run.id})`, agentTag(run), run.pageId);
+      res.json({ ok: true, channel: posted.channel, ts: posted.ts });
+    } catch (err) {
+      res.status(502).json({ error: 'slack_error', message: err instanceof Error ? err.message : 'failed' });
     }
   });
 
@@ -183,6 +237,10 @@ export function makeRunsRouter(): ExpressRouter {
     const pageId = typeof req.query['pageId'] === 'string' && req.query['pageId']
       ? req.query['pageId'] as string
       : run.pageId;
+    if (isSlackAnchor(pageId)) {
+      res.status(409).json({ error: 'slack_chat_run', message: 'This run is a Slack conversation — there is no Notion page to read. Pass an explicit pageId.' });
+      return;
+    }
     const depth = Math.max(1, Math.min(5, parseInt(String(req.query['depth'] ?? '3'), 10) || 3));
     try {
       const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${pageId}`);
@@ -205,6 +263,15 @@ export function makeRunsRouter(): ExpressRouter {
     const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
     const agentRef = agentRefForRun(run);
     if (!agentRef) { res.status(404).json({ error: 'agent_not_found' }); return; }
+    if (isSlackAnchor(run.pageId)) {
+      // Slack-chat run: serve the thread + bound-project context instead.
+      try {
+        res.json(await slackChatContext(run));
+      } catch (err) {
+        res.status(502).json({ error: 'slack_error', message: err instanceof Error ? err.message : 'failed' });
+      }
+      return;
+    }
     try {
       const anchor = await resolveAnchor(apiKey, run.pageId);
       const ctx = await assembleContext({ apiKey, anchor, agentRef });
@@ -236,6 +303,10 @@ export function makeRunsRouter(): ExpressRouter {
       ? req.query['name'] as string
       : (typeof req.query['query'] === 'string' ? req.query['query'] as string : '');
     if (!q.trim()) { res.status(400).json({ error: 'name_required' }); return; }
+    if (isSlackAnchor(run.pageId)) {
+      res.status(409).json({ error: 'slack_chat_run', message: 'This run is a Slack conversation — no project scope to search. Use /assist for workspace-wide questions.' });
+      return;
+    }
     try {
       const anchor = await resolveAnchor(apiKey, run.pageId);
       let projectPageId: string | null = null;
@@ -396,6 +467,10 @@ export function makeRunsRouter(): ExpressRouter {
     const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
     const { markdown, pageId } = req.body as z.infer<typeof BlocksBody>;
     const target = pageId || run.pageId;
+    if (isSlackAnchor(target)) {
+      res.status(409).json({ error: 'slack_chat_run', message: 'This run is a Slack conversation — there is no Notion page to write into. Reply via /comment instead.' });
+      return;
+    }
     try {
       const blocks = markdownToBlocks(markdown);
       await appendBlocks(apiKey, target, blocks);
@@ -415,7 +490,10 @@ export function makeRunsRouter(): ExpressRouter {
     try {
       if (status) {
         await setTaskStatus(apiKey, run.taskPageId, status);
-        if (status === 'Done') releaseAfterDone(run.taskPageId);
+        if (status === 'Done') {
+          releaseAfterDone(run.taskPageId);
+          void notifySlackOnCompletion(run, 'done', agentOutput ?? '').catch(() => {});
+        }
       }
       if (typeof agentOutput === 'string') await setTaskFields(apiKey, run.taskPageId, { agentOutput });
       markActed(run.id);

@@ -31,6 +31,8 @@ export interface AgentUpdatedEvent {
     lastPingedAt?: number | null;
     lastLatencyMs?: number | null;
     maxConcurrentRuns?: number;
+    slackEnabled?: boolean;
+    slackHandle?: string | null;
   };
 }
 
@@ -65,6 +67,16 @@ export interface NotionWorkspaceUpdatedEvent {
     workspaceStatus: string;
     parentPageId: string | null;
     databases: { kind: string; notionDatabaseId: string; title: string; url: string | null }[];
+  };
+}
+
+export interface SlackIntegrationUpdatedEvent {
+  type: 'slack.integration.updated';
+  data: {
+    status: string;
+    teamName: string | null;
+    botName: string | null;
+    source: 'settings' | 'env' | null;
   };
 }
 
@@ -106,6 +118,7 @@ export type NorcEvent =
   | NotionIntegrationUpdatedEvent
   | NotionVerificationReceivedEvent
   | NotionWorkspaceUpdatedEvent
+  | SlackIntegrationUpdatedEvent
   | MentionDetectedEvent
   | RunStartedEvent
   | RunFinishedEvent

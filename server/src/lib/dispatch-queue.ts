@@ -32,6 +32,10 @@ export interface QueuedTurn {
   how: string;
   /** Where the triggering comment's thread lives (a block id for inline comments). */
   threadBlockId?: string;
+  /** Slack origin — carried across the queue so a drained run still reports
+   * back to the originating Slack thread. */
+  slackChannel?: string | null;
+  slackThreadTs?: string | null;
 }
 
 function emitQueueUpdated(agentId: string): void {

@@ -165,6 +165,10 @@ const projectsProps: Record<string, unknown> = {
   'Docs': text(),
   'KPIs': text(),
   'Objective': text(),
+  // Slack channel bound to this project (channel ID, e.g. C0123456789).
+  // Task completions are summarized there; agents can post to it via the
+  // /slack run endpoint. Empty = no Slack reporting for this project.
+  'Slack Channel ID': text(),
 };
 
 const pipelineProps: Record<string, unknown> = {
@@ -256,6 +260,15 @@ export async function provisionSchedulingFields(apiKey: string, tasksDatabaseId:
  */
 export async function provisionBlockedStatus(apiKey: string, tasksDatabaseId: string): Promise<void> {
   await updateDatabase(apiKey, tasksDatabaseId, { 'Status': sel(...TASK_STATUS_OPTIONS) });
+}
+
+/**
+ * Additively add the 'Slack Channel ID' field to an already-provisioned
+ * Projects DB. Idempotent — re-PATCHing an existing rich_text property is a
+ * no-op for Notion.
+ */
+export async function provisionSlackChannelField(apiKey: string, projectsDatabaseId: string): Promise<void> {
+  await updateDatabase(apiKey, projectsDatabaseId, { 'Slack Channel ID': text() });
 }
 
 /**

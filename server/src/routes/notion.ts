@@ -8,7 +8,7 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
-import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus } from '../lib/notion-provision.js';
+import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus, provisionSlackChannelField } from '../lib/notion-provision.js';
 import { ensureNorcAgent, getNorcOrgPageId } from '../lib/norc-identity.js';
 import { listHumans, resolveOrgMembers } from '../lib/org-members.js';
 import { norcBaseUrl } from '../lib/base-url.js';
@@ -327,6 +327,30 @@ router.post('/provision/blocked-status', async (_req, res) => {
     return;
   }
   emitLog('Tasks DB Blocked status provisioned');
+  res.status(200).json({ ok: true });
+});
+
+// POST /api/notion/provision/slack-channel — additively add the 'Slack Channel
+// ID' field to the Projects DB (binds a project to a Slack channel for task
+// completion summaries and agent posts). Idempotent — safe to re-run.
+router.post('/provision/slack-channel', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the workspace first.' });
+    return;
+  }
+  const projects = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'projects')).all()[0];
+  if (!projects) {
+    res.status(400).json({ error: 'no_projects_db', message: 'No Projects database recorded.' });
+    return;
+  }
+  try {
+    await provisionSlackChannelField(integration.apiKey, projects.notionDatabaseId);
+  } catch (err) {
+    res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
+    return;
+  }
+  emitLog('Projects DB Slack Channel ID field provisioned');
   res.status(200).json({ ok: true });
 });
 

@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { StatusBadge } from './StatusBadge.js';
 import { HandshakeButton } from './HandshakeButton.js';
-import { deleteAgent, updateAgentConfig, updateAgentLimits, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
+import { deleteAgent, updateAgentConfig, updateAgentLimits, toggleAgentSlack, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
 
 interface Props {
   agents: AgentRow[];
@@ -402,6 +402,7 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                       )}
                       <SkillUpdatePanel agent={a} />
                       <DispatchLimitPanel agent={a} />
+                      <SlackTogglePanel agent={a} />
                       <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
                         ID: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{a.id}</span>
                         &nbsp;&nbsp;Registered: <span style={{ color: 'var(--text-secondary)' }}>{new Date(a.registeredAt).toLocaleString()}</span>
@@ -473,6 +474,63 @@ function DispatchLimitPanel({ agent }: { agent: AgentRow }) {
       <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
         same-project tasks always run sequentially
       </span>
+      {msg && (
+        <span style={{ fontSize: 11, color: state === 'error' ? 'var(--accent-red)' : 'var(--text-dim)' }}>
+          {msg}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SlackTogglePanel({ agent }: { agent: AgentRow }) {
+  const [enabled, setEnabled] = useState(agent.slackEnabled);
+  const [handle, setHandle] = useState<string | null>(agent.slackHandle);
+  const [state, setState] = useState<'idle' | 'busy' | 'error'>('idle');
+  const [msg, setMsg] = useState('');
+
+  const toggle = async () => {
+    if (state === 'busy') return;
+    setState('busy'); setMsg('');
+    try {
+      const r = await toggleAgentSlack(agent.id, !enabled);
+      setEnabled(r.enabled);
+      setHandle(r.handle);
+      setState('idle');
+      if (r.warning) setMsg(r.warning);
+      else if (r.enabled) setMsg(r.handle ? `mentionable as @${r.handle}` : 'enabled');
+      else setMsg('disabled — mentions fall back to triage');
+    } catch (e) {
+      setState('error');
+      setMsg(e instanceof Error ? e.message : 'failed');
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <span style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+        Slack
+      </span>
+      <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)', cursor: state === 'busy' ? 'default' : 'pointer' }}>
+        <input
+          type="checkbox"
+          checked={enabled}
+          disabled={state === 'busy'}
+          onChange={toggle}
+          title="Whether this agent can be tagged and talked to from Slack. On paid Slack plans it also gets its own @handle (user group)."
+        />
+        {state === 'busy' ? 'Saving…' : 'Reachable from Slack'}
+      </label>
+      {enabled && handle && (
+        <span style={{ fontSize: 11, fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)', background: 'var(--surface2)', padding: '1px 7px', borderRadius: 4, border: '1px solid var(--border)' }}>
+          @{handle}
+        </span>
+      )}
+      {enabled && !handle && (
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          no @handle — tag with "@Norc {agent.name} …"
+        </span>
+      )}
       {msg && (
         <span style={{ fontSize: 11, color: state === 'error' ? 'var(--accent-red)' : 'var(--text-dim)' }}>
           {msg}

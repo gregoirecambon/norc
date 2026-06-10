@@ -28,6 +28,11 @@ export interface NewRun {
   manageTaskStatus: boolean;
   /** The human who triggered this run — re-@mentioned if it later times out. */
   triggeringUserId?: string | null;
+  /** Where the request came from ('notion' default). Slack-originated runs also
+   * carry the channel + thread root so replies land back in the thread. */
+  origin?: 'notion' | 'slack';
+  slackChannel?: string | null;
+  slackThreadTs?: string | null;
 }
 
 /** Create an in-flight run and return its id + opaque token. */
@@ -47,6 +52,9 @@ export function createRun(input: NewRun): { id: string; token: string } {
     lane: input.lane ?? 'work',
     triggeringUserId: input.triggeringUserId ?? null,
     manageTaskStatus: input.manageTaskStatus,
+    origin: input.origin ?? 'notion',
+    slackChannel: input.slackChannel ?? null,
+    slackThreadTs: input.slackThreadTs ?? null,
     status: 'in_flight',
     agentActed: false,
     lastProgressAt: createdAt,

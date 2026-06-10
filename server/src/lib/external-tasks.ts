@@ -157,7 +157,7 @@ async function resolveProject(apiKey: string, input: string):
 }
 
 /** Open (non-terminal) tasks — project-scoped when a project id is given. */
-async function listOpenTasks(apiKey: string, tasksDbId: string, projectId?: string): Promise<OpenTask[]> {
+export async function listOpenTasks(apiKey: string, tasksDbId: string, projectId?: string): Promise<OpenTask[]> {
   const statusOr = { or: OPEN_STATUSES.map(s => ({ property: 'Status', select: { equals: s } })) };
   const filter = projectId
     ? { and: [{ property: 'Project', relation: { contains: projectId } }, statusOr] }
