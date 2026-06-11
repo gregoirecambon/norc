@@ -1002,9 +1002,11 @@ export async function finalizeAgentReport(run: TaskRun, report: { status?: strin
     const { botToken } = getSlackCreds();
     const slackAgentName = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0]?.name ?? 'NORC';
     const ok = report.status !== 'failed';
-    const text = (report.summary ?? '').trim()
-      || (ok ? '(done)' : `⚠️ I couldn't finish that.`);
-    if (where && botToken) {
+    const summary = (report.summary ?? '').trim();
+    // An agent that already replied via /comment needs no extra "(done)" echo;
+    // post only real content (or the failure note).
+    const text = summary || (ok ? (run.agentActed ? '' : '(done)') : `⚠️ I couldn't finish that.`);
+    if (where && botToken && text) {
       await postAsAgent(botToken, {
         channel: where.channel, threadTs: where.threadTs, agentName: slackAgentName, text,
         iconUrl: await agentSlackIcon(run.agentId),

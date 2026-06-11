@@ -557,6 +557,9 @@ async function dispatchViaWebSocket(
     let settled = false;
     let latestAssistant = '';
     let ackText = '';
+    // Set once agent.wait reports the run finished — from then on, the next
+    // session.message settles the capture immediately (see the race note below).
+    let runDone = false;
     // The OpenClaw-side run handle from the agent ACK — surfaced so the caller can
     // persist it for later liveness probing (agent.wait), even on the async path.
     let capturedRunId: string | null = null;
@@ -596,7 +599,12 @@ async function dispatchViaWebSocket(
         const payload = asRecord(frame['payload']) ?? frame;
         if (!payload['sessionKey'] || payload['sessionKey'] === sessionKey) {
           const t = extractAssistantText(payload['message']).trim();
-          if (t) latestAssistant = t;
+          if (t) {
+            latestAssistant = t;
+            // The run already completed and this is its (late) final message —
+            // settle now instead of leaving the text behind.
+            if (runDone) finish(latestAssistant);
+          }
         }
         return;
       }
@@ -626,7 +634,14 @@ async function dispatchViaWebSocket(
       if (id === waitId) {
         const status = asRecord(frame['payload'])?.['status'];
         emitLog(`openclaw agent.wait: status=${String(status)} session=${sessionKey}`, agentName);
-        finish(latestAssistant || ackText);
+        // RACE: the run's final session.message often arrives just AFTER the
+        // agent.wait response. Finishing empty here turned real replies into
+        // "async, no text" — and the reply was lost when the agent never calls
+        // the Agent API (typical for Slack chat). If no text was captured yet,
+        // hold the socket open briefly for that trailing message.
+        runDone = true;
+        if (latestAssistant || ackText) { finish(latestAssistant || ackText); return; }
+        setTimeout(() => finish(latestAssistant || ackText), 2500);
         return;
       }
       // id === subId (subscription ack) → nothing to do.

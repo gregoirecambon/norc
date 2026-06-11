@@ -317,14 +317,27 @@ async function routeViaTriage(botToken: string, channel: string, threadRoot: str
 
 // ─── Chat lane: synthetic-anchor dispatch ───────────────────────────────────
 
-function slackRunBlock(runId: string, token: string, channel: string, threadRoot: string): string {
+function slackRunBlock(runId: string, token: string, channel: string, threadRoot: string, asyncAdapter: boolean): string {
+  // Async adapters (openclaw) MUST reply through the API: their plain text
+  // return only reaches Slack when the socket capture wins a race against the
+  // session closing. Sync adapters return text and NORC posts it.
+  const replyContract = asyncAdapter
+    ? [
+        `This is a Slack conversation. REPLY BY API — your plain text return may never reach Slack:`,
+        `  curl -s -X POST <api_base>/comment -H 'Content-Type: application/json' -d '{"text":"your reply"}'`,
+        `Then finish:  curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' -d '{"status":"done"}'`,
+      ]
+    : [
+        `This is a Slack conversation: just return your reply as text (NORC posts it to the thread),`,
+        `or POST {"text":"…"} to <api_base>/comment.`,
+      ];
   return [
     `run_id: ${runId}`,
     `slack_channel: ${channel}`,
     `slack_thread_ts: ${threadRoot}`,
     `api_base: ${norcBaseUrl()}/api/runs/${token}`,
-    `This is a Slack conversation: POST {"text":"…"} to <api_base>/comment to reply in the thread`,
-    `(or just return your reply as text). Use your NORC skill for the full API.`,
+    ...replyContract,
+    `Use your NORC skill for the full API.`,
   ].join('\n');
 }
 
@@ -385,7 +398,7 @@ async function runSlackChatTurn(args: {
   if (project) push(`[CONTEXT]\n${projectSection(project.block)}`, 3);
   if (thread.length) push(`[CONVERSATION SO FAR]\n${thread.map(l => `${l.author}: ${l.text}`).join('\n')}`, 2);
   push(`[REQUEST]\n${asker} asks: ${request}`, 1);
-  push(`[NORC RUN]\n${slackRunBlock(runId, token, channel, threadRoot)}`, 1);
+  push(`[NORC RUN]\n${slackRunBlock(runId, token, channel, threadRoot, adapterType === 'openclaw')}`, 1);
   const prompt = assembleWithBudget(sections, MAX_PROMPT_CHARS);
 
   const fingerprint = createHash('sha256')
@@ -425,9 +438,10 @@ async function runSlackChatTurn(args: {
   // the synthetic-anchor branch in finalizeAgentReport posts it to this thread.
   if (result.async) {
     if (result.openclawRunId) setOpenclawRunId(runId, result.openclawRunId);
-    emitLog(`dispatched to "${agentRef.name}" (async) — awaiting reply for Slack thread (run ${runId})`, agentRef.name);
+    emitLog(`dispatched to "${agentRef.name}" (async, no sync text captured) — awaiting Agent API reply for Slack thread (run ${runId})`, agentRef.name);
     return;
   }
+  emitLog(`captured sync reply from "${agentRef.name}" (${(result.text ?? '').length} chars) for Slack thread (run ${runId})`, agentRef.name);
 
   // The agent may have already replied through /comment — don't double-post.
   const run = getRun(runId);

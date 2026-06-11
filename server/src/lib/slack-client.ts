@@ -95,16 +95,32 @@ export async function postAsAgent(token: string, opts: {
   iconUrl?: string | null;
   iconEmoji?: string | null;
 }): Promise<{ channel: string; ts: string }> {
-  const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
+  const base = {
     channel: opts.channel,
     text: opts.text,
     ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
-    ...(opts.agentName ? { username: opts.agentName } : {}),
-    ...(opts.iconUrl ? { icon_url: opts.iconUrl } : {}),
-    ...(opts.iconEmoji ? { icon_emoji: opts.iconEmoji } : {}),
     unfurl_links: false,
-  });
-  return { channel: r.channel, ts: r.ts };
+  };
+  const customized = !!(opts.agentName || opts.iconUrl || opts.iconEmoji);
+  try {
+    const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
+      ...base,
+      ...(opts.agentName ? { username: opts.agentName } : {}),
+      ...(opts.iconUrl ? { icon_url: opts.iconUrl } : {}),
+      ...(opts.iconEmoji ? { icon_emoji: opts.iconEmoji } : {}),
+    });
+    return { channel: r.channel, ts: r.ts };
+  } catch (err) {
+    // Delivery beats cosmetics: if Slack rejected the customized post (DM
+    // conversations, an icon URL it dislikes, a missing customize scope),
+    // retry once as the plain app with the agent's name inlined.
+    if (!customized) throw err;
+    const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
+      ...base,
+      ...(opts.agentName ? { text: `*${opts.agentName}:* ${opts.text}` } : {}),
+    });
+    return { channel: r.channel, ts: r.ts };
+  }
 }
 
 export interface SlackMessage {
