@@ -26,7 +26,7 @@ import { getNorcSettings } from '../lib/norc-settings.js';
 import { assist, type AssistSource } from '../lib/orchestrator-agent.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 import { getSlack as getSlackIntegration, isSlackActive, isSlackAnchor, parseSlackAnchor } from '../lib/slack-integration.js';
-import { conversationsInfo, postAsAgent } from '../lib/slack-client.js';
+import { ensureChannelMembership, postAsAgent } from '../lib/slack-client.js';
 import { notifySlackOnCompletion } from '../lib/slack-notify.js';
 import { slackChatContext } from '../lib/slack-orchestrator.js';
 
@@ -210,19 +210,20 @@ export function makeRunsRouter(): ExpressRouter {
       return;
     }
     try {
-      const info = await conversationsInfo(slack.botToken, channel);
-      if (!info.isMember && !info.isIm) {
-        res.status(403).json({
-          error: 'not_in_channel',
-          message: `The Norc app is not a member of ${channel}. Ask a human to /invite it, or pick a channel from the project context.`,
-        });
+      // Self-join public channels; private ones need a human /invite.
+      const membership = await ensureChannelMembership(slack.botToken, channel);
+      if (!membership.ok) {
+        res.status(403).json({ error: 'not_in_channel', message: membership.message });
         return;
+      }
+      if (membership.joined) {
+        emitLog(`Norc auto-joined ${membership.name ? '#' + membership.name : channel} to post for run ${run.id}`, 'Slack');
       }
       const posted = await postAsAgent(slack.botToken, {
         channel, text, threadTs: threadTs ?? null, agentName: agentTag(run),
       });
       markActed(run.id);
-      emitLog(`agent API: Slack message posted to ${info.name ? '#' + info.name : channel} (run ${run.id})`, agentTag(run), run.pageId);
+      emitLog(`agent API: Slack message posted to ${membership.name ? '#' + membership.name : channel} (run ${run.id})`, agentTag(run), run.pageId);
       res.json({ ok: true, channel: posted.channel, ts: posted.ts });
     } catch (err) {
       res.status(502).json({ error: 'slack_error', message: err instanceof Error ? err.message : 'failed' });

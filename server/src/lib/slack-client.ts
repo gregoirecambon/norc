@@ -133,7 +133,7 @@ export async function fetchThreadReplies(token: string, channel: string, threadT
 
 /** conversations.info — channel metadata; is_member gates agent sends. */
 export async function conversationsInfo(token: string, channel: string): Promise<{
-  id: string; name: string | null; isMember: boolean; isIm: boolean;
+  id: string; name: string | null; isMember: boolean; isIm: boolean; isPrivate: boolean;
 }> {
   const r = await request<SlackOk & { channel: Record<string, unknown> }>(token, 'conversations.info', { channel });
   const c = r.channel ?? {};
@@ -141,8 +141,52 @@ export async function conversationsInfo(token: string, channel: string): Promise
     id: String(c['id'] ?? channel),
     name: typeof c['name'] === 'string' ? c['name'] : null,
     isMember: c['is_member'] === true,
-    isIm: c['is_im'] === true,
+    isIm: c['is_im'] === true || c['is_mpim'] === true,
+    isPrivate: c['is_group'] === true || c['is_private'] === true,
   };
+}
+
+/** conversations.join — the app adds itself to a PUBLIC channel (channels:join).
+ * Private channels always reject this: Slack only admits apps a member invited. */
+export async function joinChannel(token: string, channel: string): Promise<void> {
+  await request(token, 'conversations.join', { channel });
+}
+
+export type MembershipResult =
+  | { ok: true; name: string | null; joined: boolean }
+  | { ok: false; reason: 'private' | 'error'; name: string | null; message: string };
+
+/**
+ * Make sure the app can post in a channel, self-joining public channels it
+ * isn't in yet. Private channels can't be self-joined (platform rule) — the
+ * result carries a human-actionable message ("/invite @Norc") instead.
+ */
+export async function ensureChannelMembership(token: string, channel: string): Promise<MembershipResult> {
+  let info;
+  try {
+    info = await conversationsInfo(token, channel);
+  } catch (err) {
+    // channel_not_found on a private channel the app can't even SEE — same
+    // remedy as not being a member: someone inside must invite it.
+    const msg = err instanceof Error ? err.message : 'unknown';
+    if (msg.includes('channel_not_found')) {
+      return { ok: false, reason: 'private', name: null, message: `I can't access ${channel} — it's private (or doesn't exist). Ask a member to run /invite @Norc there.` };
+    }
+    return { ok: false, reason: 'error', name: null, message: msg };
+  }
+  if (info.isMember || info.isIm) return { ok: true, name: info.name, joined: false };
+  if (info.isPrivate) {
+    return {
+      ok: false, reason: 'private', name: info.name,
+      message: `${info.name ? '#' + info.name : channel} is private — apps can't join those by themselves. Ask a member to run /invite @Norc there.`,
+    };
+  }
+  try {
+    await joinChannel(token, channel);
+    return { ok: true, name: info.name, joined: true };
+  } catch (err) {
+    return { ok: false, reason: 'error', name: info.name, message: err instanceof Error ? err.message : 'join failed' };
+  }
 }
 
 /** users.info — display name for thread-context rendering. Cached by caller. */

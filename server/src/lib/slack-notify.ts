@@ -13,7 +13,7 @@ import { db } from '../db/client.js';
 import { agents, notionIntegration, notionDatabases } from '../db/schema.js';
 import { emitLog } from './logger.js';
 import { getSlack, isSlackActive } from './slack-integration.js';
-import { postAsAgent } from './slack-client.js';
+import { postAsAgent, ensureChannelMembership } from './slack-client.js';
 import { notionGet, notionQuery } from './notion-client.js';
 import { getRichText, getTitle } from './notion-props.js';
 import { alreadyProcessed, markProcessed } from './processed-triggers.js';
@@ -119,6 +119,14 @@ export async function notifySlackOnCompletion(
 
   for (const p of posts) {
     try {
+      // The project channel may be one we've never posted in — self-join
+      // public channels; a private channel logs the /invite remedy instead.
+      const membership = await ensureChannelMembership(botToken, p.channel);
+      if (!membership.ok) {
+        emitLog(`slack completion post skipped for ${p.channel}: ${membership.message}`, agentName, run.taskPageId ?? undefined);
+        continue;
+      }
+      if (membership.joined) emitLog(`Norc auto-joined ${membership.name ? '#' + membership.name : p.channel} for completion summaries`, 'Slack');
       await postAsAgent(botToken, { channel: p.channel, text, threadTs: p.threadTs, agentName });
       emitLog(`completion summary posted to Slack ${p.channel}${p.threadTs ? ' (thread)' : ''} (run ${run.id})`, agentName, run.taskPageId ?? undefined);
     } catch (err) {

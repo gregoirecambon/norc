@@ -52,6 +52,13 @@ function appManifest(): Record<string, unknown> {
     },
     features: {
       bot_user: { display_name: 'Norc', always_online: true },
+      // The Messages tab is what makes DMs with the app possible — without
+      // this, Slack greys out the message box on the app's profile.
+      app_home: {
+        home_tab_enabled: false,
+        messages_tab_enabled: true,
+        messages_tab_read_only_enabled: false,
+      },
     },
     oauth_config: {
       scopes: {
@@ -59,8 +66,10 @@ function appManifest(): Record<string, unknown> {
           'app_mentions:read',
           'chat:write',
           'chat:write.customize',
-          'channels:history', 'groups:history', 'im:history',
+          'channels:history', 'groups:history', 'im:history', 'mpim:history',
           'channels:read', 'groups:read',
+          'channels:join',
+          'im:write',
           'users:read',
           'usergroups:read', 'usergroups:write',
         ],
@@ -69,7 +78,7 @@ function appManifest(): Record<string, unknown> {
     settings: {
       event_subscriptions: {
         request_url: getWebhookUrl(),
-        bot_events: ['app_mention', 'message.channels', 'message.groups', 'message.im'],
+        bot_events: ['app_mention', 'message.channels', 'message.groups', 'message.im', 'message.mpim'],
       },
       org_deploy_enabled: false,
       socket_mode_enabled: false,

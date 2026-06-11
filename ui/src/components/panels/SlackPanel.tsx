@@ -166,8 +166,9 @@ export function SlackPanel() {
         </div>
 
         <div style={{ marginTop: 14, fontSize: 12.5, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-          <strong>After installing:</strong> invite the bot to the channels where agents should listen and post
-          (<code style={{ fontFamily: 'var(--font-mono)' }}>/invite @Norc</code>). Subteam mentions only reach NORC in channels the bot is a member of.
+          <strong>After installing:</strong> Norc joins <em>public</em> channels by itself when it needs to post, but it only <em>hears</em> mentions
+          in channels it's a member of — invite it where agents should listen (<code style={{ fontFamily: 'var(--font-mono)' }}>/invite @Norc</code>).
+          <em> Private</em> channels always need an invite (Slack doesn't let apps join those alone). You can also DM the bot directly from its Messages tab.
           Per-agent <code style={{ fontFamily: 'var(--font-mono)' }}>@handles</code> use Slack user groups, which require a paid plan — on free plans, tag agents with
           <code style={{ fontFamily: 'var(--font-mono)' }}> @Norc AgentName …</code> instead.
         </div>

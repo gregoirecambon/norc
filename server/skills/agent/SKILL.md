@@ -142,13 +142,15 @@ How to find the channel id, in order of preference:
 3. A channel id written in the task body itself (e.g. "post the summary to
    C0123456789").
 
-Rules: only channels the Norc app has been invited to work (`403 not_in_channel`
-otherwise — tell the human to `/invite @Norc` there, don't retry). `503` means
-this install has no Slack connection: report your result in Notion instead and
-note that Slack was unavailable. Don't post secrets or raw API output; write a
-short, channel-appropriate message. When a task's project has a bound channel,
-NORC already posts a completion summary there automatically — only post yourself
-when the task explicitly asks for Slack content beyond that summary.
+Rules: NORC joins **public** channels by itself when needed, so just post.
+**Private** channels can't be self-joined (Slack platform rule) — a
+`403 not_in_channel` means a member must `/invite @Norc` there: relay that to
+the human, don't retry. `503` means this install has no Slack connection:
+report your result in Notion instead and note that Slack was unavailable.
+Don't post secrets or raw API output; write a short, channel-appropriate
+message. When a task's project has a bound channel, NORC already posts a
+completion summary there automatically — only post yourself when the task
+explicitly asks for Slack content beyond that summary.
 
 ### Going deeper (strategic agents)
 
