@@ -26,7 +26,7 @@ import { getNorcSettings } from '../lib/norc-settings.js';
 import { assist, type AssistSource } from '../lib/orchestrator-agent.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 import { getSlack as getSlackIntegration, isSlackActive, isSlackAnchor, parseSlackAnchor } from '../lib/slack-integration.js';
-import { ensureChannelMembership, postAsAgent } from '../lib/slack-client.js';
+import { ensureChannelMembership, resolveChannelRef, postAsAgent } from '../lib/slack-client.js';
 import { notifySlackOnCompletion } from '../lib/slack-notify.js';
 import { slackChatContext } from '../lib/slack-orchestrator.js';
 import { agentSlackIcon } from '../lib/slack-agents.js';
@@ -214,8 +214,18 @@ export function makeRunsRouter(): ExpressRouter {
       return;
     }
     try {
+      // Agents pass channels however the conversation rendered them —
+      // "<#C0123|app-lutai>", "#C0123…", a bare id, or a name. Normalize first.
+      const resolved = await resolveChannelRef(slack.botToken, channel);
+      if (!resolved) {
+        res.status(404).json({
+          error: 'channel_not_found',
+          message: `No channel matches "${channel}". Pass the channel id (C0123456789) or its exact name.`,
+        });
+        return;
+      }
       // Self-join public channels; private ones need a human /invite.
-      const membership = await ensureChannelMembership(slack.botToken, channel);
+      const membership = await ensureChannelMembership(slack.botToken, resolved);
       if (!membership.ok) {
         res.status(403).json({ error: 'not_in_channel', message: membership.message });
         return;
@@ -224,7 +234,7 @@ export function makeRunsRouter(): ExpressRouter {
         emitLog(`Norc auto-joined ${membership.name ? '#' + membership.name : channel} to post for run ${run.id}`, 'Slack');
       }
       const posted = await postAsAgent(slack.botToken, {
-        channel, text, threadTs: threadTs ?? null, agentName: agentTag(run),
+        channel: resolved, text, threadTs: threadTs ?? null, agentName: agentTag(run),
         iconUrl: await agentSlackIcon(run.agentId),
       });
       markActed(run.id);

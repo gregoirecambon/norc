@@ -932,6 +932,18 @@ export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
   emitLog(`run ${run.id} timed out — "${agentName}" didn't report back; escalating`, agentRow?.name ?? 'NORC');
   emitEvent({ type: 'mention.detected', data: { agentId: run.agentId, agentName, pageId: run.pageId, anchorKind: run.anchorKind } });
 
+  // The ask came from Slack ("I'll report back here") — honour that even on
+  // failure: tell the thread instead of going silent while Notion escalates.
+  if (run.slackChannel) {
+    const { botToken } = getSlackCreds();
+    if (botToken) {
+      void postAsAgent(botToken, {
+        channel: run.slackChannel, threadTs: run.slackThreadTs, agentName: 'NORC',
+        text: `⏱ @${agentName} didn't report back on *${run.title ?? 'the task'}* — escalating in Notion (re-routing or asking a human).`,
+      }).catch(() => undefined);
+    }
+  }
+
   let anchor: Anchor;
   try {
     anchor = await resolveAnchor(apiKey, run.pageId);

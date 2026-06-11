@@ -15,11 +15,11 @@
 import { createHash } from 'node:crypto';
 import { eq, and } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agents, agentSessions, notionIntegration, notionDatabases } from '../db/schema.js';
+import { agents, agentSessions, taskRuns, notionIntegration, notionDatabases } from '../db/schema.js';
 import { emitLog } from './logger.js';
 import { emitEvent } from './events.js';
 import { getSlack, isSlackActive, slackAnchorId, parseSlackAnchor } from './slack-integration.js';
-import { postAsAgent, fetchThreadReplies, conversationsInfo, slackUserName, type SlackMessage } from './slack-client.js';
+import { postAsAgent, fetchThreadReplies, fetchChannelHistory, conversationsInfo, slackUserName, type SlackMessage } from './slack-client.js';
 import { createRun, finalizeRun, getRun, setOpenclawRunId, setRunSessionId, type TaskRun } from './runs.js';
 import { resolveSession } from './agent-sessions.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
@@ -95,10 +95,14 @@ export function parseSlackMentions(text: string, botUserId: string | null, isDm 
 
   const norc = isDm || (!!botUserId && text.includes(`<@${botUserId}>`));
 
-  // Strip every mention token to recover the plain request.
+  // Strip every mention token to recover the plain request. Channel tokens
+  // (<#C0123|app-lutai>) are unwrapped, keeping the id visible so agents can
+  // pass it straight to the /slack endpoint.
   let request = text
     .replace(/<!subteam\^[A-Z0-9]+(?:\|[^>]*)?>/g, ' ')
     .replace(/<@[A-Z0-9]+>/g, ' ')
+    .replace(/<#([A-Z0-9]+)\|([^>]+)>/g, '#$2 (channel id $1)')
+    .replace(/<#([A-Z0-9]+)>/g, 'channel $1')
     .replace(/\s+/g, ' ')
     .trim();
 
@@ -138,11 +142,16 @@ async function displayName(token: string, userId: string): Promise<string> {
   return name;
 }
 
-/** The thread so far, rendered as "author: text" lines (latest message last,
- * the triggering message excluded by ts). */
+/** The conversation so far, rendered as "author: text" lines (latest message
+ * last, the triggering message excluded by ts). The 'dm' anchor reads the
+ * DM's top-level history instead of a thread. */
 async function threadLines(token: string, channel: string, threadRoot: string, excludeTs: string): Promise<SlackThreadLine[]> {
   let msgs: SlackMessage[] = [];
-  try { msgs = await fetchThreadReplies(token, channel, threadRoot, MAX_THREAD_MSGS); } catch { return []; }
+  try {
+    msgs = threadRoot === 'dm'
+      ? await fetchChannelHistory(token, channel, MAX_THREAD_MSGS)
+      : await fetchThreadReplies(token, channel, threadRoot, MAX_THREAD_MSGS);
+  } catch { return []; }
   const out: SlackThreadLine[] = [];
   for (const m of msgs) {
     if (m.ts === excludeTs || !m.text.trim()) continue;
@@ -200,16 +209,18 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   markProcessed(msgKey);
 
   const isDm = ev.channel_type === 'im';
-  const threadRoot = ev.thread_ts ?? ev.ts;
+  // DMs are ONE rolling conversation: top-level messages share a stable 'dm'
+  // anchor (otherwise every message would mint a fresh session — total
+  // amnesia between turns). Explicit threads keep their own anchor.
+  const threadRoot = ev.thread_ts ?? (isDm ? 'dm' : ev.ts);
   const parsed = parseSlackMentions(ev.text, slack.botUserId, isDm);
 
-  // Untargeted channel chatter: only a thread we're already in continues the
-  // conversation (Notion's UX — no re-tagging every message).
+  // Prefer the agent already engaged in this conversation (Notion's UX — no
+  // re-tagging every message); untargeted channel chatter outside an engaged
+  // thread is ignored.
   let target: AgentRef | null = parsed.agents[0] ?? null;
-  if (!target && !parsed.norc) {
-    target = continuationAgent(ev.channel, threadRoot);
-    if (!target) return;
-  }
+  if (!target) target = continuationAgent(ev.channel, threadRoot);
+  if (!target && !parsed.norc) return;
 
   const request = parsed.request || '(no message text)';
   emitLog(`slack ${isDm ? 'DM' : `message in ${ev.channel}`}${target ? ` → @${target.name}` : parsed.norc ? ' → NORC' : ''}: ${request.slice(0, 140)}`, 'Slack');
@@ -254,6 +265,21 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   await runSlackChatTurn({
     botToken: slack.botToken, agentRef: target,
     channel: ev.channel, threadRoot, request, asker, thread,
+  });
+}
+
+/** Work-lane runs spawned from this Slack conversation, rendered for the chat
+ * prompt — the agent can answer "so, how's it going?" with real status. */
+function tasksFromThread(channel: string, threadRoot: string): string[] {
+  const rows = db.select().from(taskRuns)
+    .where(and(eq(taskRuns.slackChannel, channel), eq(taskRuns.slackThreadTs, threadRoot), eq(taskRuns.lane, 'work')))
+    .all()
+    .slice(-5);
+  return rows.map(r => {
+    const age = Math.round((Date.now() - r.createdAt) / 60_000);
+    const state = r.status === 'in_flight' ? `in progress (started ${age}m ago)` : r.status.replace('_', ' ');
+    const url = r.taskPageId ? ` — https://www.notion.so/${r.taskPageId.replace(/-/g, '')}` : '';
+    return `- "${r.title ?? 'task'}": ${state}${url}`;
   });
 }
 
@@ -394,9 +420,13 @@ async function runSlackChatTurn(args: {
   const sections: Section[] = [];
   let order = 0;
   const push = (text: string, priority: number) => { sections.push({ text, priority, order: order++ }); };
-  push(`[SLACK]\nYou are talking in the Slack ${channelInfo?.isIm ? 'DM' : `channel ${channelLabel}`} (thread). Reply conversationally — one concise message, Slack-formatted (plain text, *bold*, bullets). Do not use Notion-style markdown headers.`, 1);
+  push(`[SLACK]\nYou are talking in the Slack ${channelInfo?.isIm ? 'DM' : `channel ${channelLabel}`}${threadRoot === 'dm' ? '' : ' (thread)'}. Reply conversationally — one concise message, Slack-formatted (plain text, *bold*, bullets). Do not use Notion-style markdown headers.`, 1);
   if (project) push(`[CONTEXT]\n${projectSection(project.block)}`, 3);
   if (thread.length) push(`[CONVERSATION SO FAR]\n${thread.map(l => `${l.author}: ${l.text}`).join('\n')}`, 2);
+  // Tasks NORC spawned from this very conversation — so "how is it going?"
+  // and "so?" have something real to answer from.
+  const threadTaskLines = tasksFromThread(channel, threadRoot);
+  if (threadTaskLines.length) push(`[CONVERSATION TASKS]\nWork NORC created from this conversation (answer status questions from this):\n${threadTaskLines.join('\n')}`, 2);
   push(`[REQUEST]\n${asker} asks: ${request}`, 1);
   push(`[NORC RUN]\n${slackRunBlock(runId, token, channel, threadRoot, adapterType === 'openclaw')}`, 1);
   const prompt = assembleWithBudget(sections, MAX_PROMPT_CHARS);

@@ -134,6 +134,10 @@ curl -s -X POST <api_base>/slack -H 'Content-Type: application/json' \
   -d '{"channel":"C0123456789","text":"Pricing brief: …"}'
 ```
 
+`channel` accepts a channel id in any form it may appear in your context —
+`C0123456789`, `#C0123456789`, `<#C0123456789|app-lutai>` — or the exact
+channel *name* (`app-lutai`). Prefer the bare id when you have it.
+
 How to find the channel id, in order of preference:
 
 1. The `Slack channel: C…` line in your `[CONTEXT]` block — that's the channel

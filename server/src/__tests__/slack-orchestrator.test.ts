@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { runMigrations, db } from '../db/client.js';
 import { agents } from '../db/schema.js';
 import { parseSlackMentions, slackAnchorId, isSlackAnchor, parseSlackAnchor } from '../lib/slack-orchestrator.js';
+import { extractChannelId } from '../lib/slack-client.js';
 
 const BOT = 'U0BOT';
 
@@ -94,5 +95,28 @@ describe('parseSlackMentions', () => {
     expect(bySubteam.agents).toHaveLength(0);
     const byName = parseSlackMentions(`<@${BOT}> Hidden Agent hi`, BOT);
     expect(byName.agents).toHaveLength(0);
+  });
+
+  it('unwraps channel tokens, keeping the id usable for /slack', () => {
+    const named = parseSlackMentions(`<@${BOT}> post a brief in <#C0B6KGCA3PE|app-lutai>`, BOT);
+    expect(named.request).toBe('post a brief in #app-lutai (channel id C0B6KGCA3PE)');
+    const bare = parseSlackMentions(`<@${BOT}> send a message in <#C0B6KGCA3PE>`, BOT);
+    expect(bare.request).toBe('send a message in channel C0B6KGCA3PE');
+  });
+});
+
+describe('extractChannelId', () => {
+  it('accepts every decoration agents pass', () => {
+    expect(extractChannelId('C0B6KGCA3PE')).toBe('C0B6KGCA3PE');
+    expect(extractChannelId('#C0B6KGCA3PE')).toBe('C0B6KGCA3PE');
+    expect(extractChannelId('<#C0B6KGCA3PE>')).toBe('C0B6KGCA3PE');
+    expect(extractChannelId('<#C0B6KGCA3PE|app-lutai>')).toBe('C0B6KGCA3PE');
+    expect(extractChannelId(' <#C0B6KGCA3PE|app-lutai> ')).toBe('C0B6KGCA3PE');
+  });
+
+  it('returns null for names (resolved via conversations.list instead)', () => {
+    expect(extractChannelId('app-lutai')).toBe(null);
+    expect(extractChannelId('#app-lutai')).toBe(null);
+    expect(extractChannelId('')).toBe(null);
   });
 });

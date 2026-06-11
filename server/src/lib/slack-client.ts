@@ -101,10 +101,13 @@ export async function postAsAgent(token: string, opts: {
   iconUrl?: string | null;
   iconEmoji?: string | null;
 }): Promise<{ channel: string; ts: string }> {
+  // 'dm' is the synthetic thread root for top-level DM conversations (one
+  // stable anchor per DM) — it's not a real ts, so post top-level.
+  const threadTs = opts.threadTs && opts.threadTs !== 'dm' ? opts.threadTs : null;
   const base = {
     channel: opts.channel,
     text: opts.text,
-    ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
+    ...(threadTs ? { thread_ts: threadTs } : {}),
     unfurl_links: false,
   };
   const username = opts.agentName ? displayAgentName(opts.agentName) : null;
@@ -139,6 +142,22 @@ export interface SlackMessage {
   text: string;
 }
 
+/** conversations.history — a conversation's recent top-level messages, oldest
+ * first (Slack returns newest-first). The DM analogue of fetchThreadReplies. */
+export async function fetchChannelHistory(token: string, channel: string, limit = 30): Promise<SlackMessage[]> {
+  const r = await request<SlackOk & { messages?: Array<Record<string, unknown>> }>(token, 'conversations.history', {
+    channel, limit,
+  });
+  return (r.messages ?? []).reverse().map(m => ({
+    ts: String(m['ts'] ?? ''),
+    threadTs: typeof m['thread_ts'] === 'string' ? m['thread_ts'] : null,
+    userId: typeof m['user'] === 'string' ? m['user'] : null,
+    botId: typeof m['bot_id'] === 'string' ? m['bot_id'] : null,
+    username: typeof m['username'] === 'string' ? m['username'] : null,
+    text: typeof m['text'] === 'string' ? m['text'] : '',
+  }));
+}
+
 /** conversations.replies — full thread history, oldest first. */
 export async function fetchThreadReplies(token: string, channel: string, threadTs: string, limit = 50): Promise<SlackMessage[]> {
   const r = await request<SlackOk & { messages?: Array<Record<string, unknown>> }>(token, 'conversations.replies', {
@@ -167,6 +186,41 @@ export async function conversationsInfo(token: string, channel: string): Promise
     isIm: c['is_im'] === true || c['is_mpim'] === true,
     isPrivate: c['is_group'] === true || c['is_private'] === true,
   };
+}
+
+/**
+ * Pull a channel ID out of however an agent (or a Slack message) refers to a
+ * channel: "C0123ABCDEF", "#C0123ABCDEF", "<#C0123ABCDEF>", "<#C0123|app-lutai>".
+ * Returns null when it's not an ID shape (likely a channel NAME — resolve via
+ * resolveChannelRef).
+ */
+export function extractChannelId(ref: string): string | null {
+  const token = ref.trim().match(/^<#([A-Z0-9]+)(?:\|[^>]*)?>$/i);
+  if (token) return token[1]!;
+  const bare = ref.trim().replace(/^#/, '');
+  return /^[CDG][A-Z0-9]{6,}$/.test(bare) ? bare : null;
+}
+
+/** Resolve any channel reference — ID in any decoration, or a channel NAME
+ * ("app-lutai", "#app-lutai") looked up via conversations.list. */
+export async function resolveChannelRef(token: string, ref: string): Promise<string | null> {
+  const direct = extractChannelId(ref);
+  if (direct) return direct;
+  const wanted = ref.trim().replace(/^#/, '').toLowerCase();
+  if (!wanted) return null;
+  let cursor: string | undefined;
+  for (let page = 0; page < 5; page++) {
+    const r = await request<SlackOk & { channels?: Array<{ id: string; name?: string }>; response_metadata?: { next_cursor?: string } }>(
+      token, 'conversations.list', {
+        types: 'public_channel,private_channel', exclude_archived: true, limit: 200,
+        ...(cursor ? { cursor } : {}),
+      });
+    const hit = (r.channels ?? []).find(c => (c.name ?? '').toLowerCase() === wanted);
+    if (hit) return hit.id;
+    cursor = r.response_metadata?.next_cursor || undefined;
+    if (!cursor) break;
+  }
+  return null;
 }
 
 /** conversations.join — the app adds itself to a PUBLIC channel (channels:join).
