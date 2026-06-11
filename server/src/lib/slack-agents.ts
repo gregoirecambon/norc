@@ -10,7 +10,7 @@ import { db } from '../db/client.js';
 import { agents, notionIntegration } from '../db/schema.js';
 import { emitLog } from './logger.js';
 import { getSlack } from './slack-integration.js';
-import { slackPost, type SlackOk } from './slack-client.js';
+import { slackPost, displayAgentName, type SlackOk } from './slack-client.js';
 import { notionGet } from './notion-client.js';
 
 export interface UsergroupResult {
@@ -101,9 +101,9 @@ export async function ensureAgentUsergroup(agentId: string): Promise<UsergroupRe
       const handle = candidate();
       try {
         const created = await slackPost<SlackOk & { usergroup: UsergroupRow }>(botToken, 'usergroups.create', {
-          name: suffix === 1 ? agentRow.name : `${agentRow.name} ${suffix}`,
+          name: suffix === 1 ? displayAgentName(agentRow.name) : `${displayAgentName(agentRow.name)} ${suffix}`,
           handle,
-          description: `NORC agent — mention to hand work to ${agentRow.name}`,
+          description: `NORC agent — mention to hand work to ${displayAgentName(agentRow.name)}`,
         });
         const id = created.usergroup.id;
         db.update(agents).set({ slackUsergroupId: id, slackHandle: handle }).where(eq(agents.id, agentId)).run();

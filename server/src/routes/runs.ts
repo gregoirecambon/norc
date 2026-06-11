@@ -181,7 +181,10 @@ export function makeRunsRouter(): ExpressRouter {
           const where = parseSlackAnchor(target);
           const { botToken } = getSlackIntegration();
           if (!where || !botToken) { res.status(503).json({ error: 'slack_not_active' }); return; }
-          await postAsAgent(botToken, { channel: where.channel, threadTs: where.threadTs, agentName: agentTag(run), text });
+          await postAsAgent(botToken, {
+            channel: where.channel, threadTs: where.threadTs, agentName: agentTag(run), text,
+            iconUrl: await agentSlackIcon(run.agentId),
+          });
           markActed(run.id);
           emitLog(`agent API: reply posted in Slack thread ${where.channel} (run ${run.id})`, agentTag(run));
           res.json({ ok: true });

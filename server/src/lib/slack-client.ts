@@ -87,6 +87,12 @@ export async function slackAuthTest(token: string): Promise<{
  * name/avatar. Requires chat:write + chat:write.customize. Note: username
  * overrides don't apply in DMs — there the message posts as the app.
  */
+/** Display form of an agent name — leading capital ("lili" → "Lili"),
+ * already-cased names untouched ("NORC", "Research Agent"). */
+export function displayAgentName(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
 export async function postAsAgent(token: string, opts: {
   channel: string;
   text: string;
@@ -101,11 +107,12 @@ export async function postAsAgent(token: string, opts: {
     ...(opts.threadTs ? { thread_ts: opts.threadTs } : {}),
     unfurl_links: false,
   };
-  const customized = !!(opts.agentName || opts.iconUrl || opts.iconEmoji);
+  const username = opts.agentName ? displayAgentName(opts.agentName) : null;
+  const customized = !!(username || opts.iconUrl || opts.iconEmoji);
   try {
     const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
       ...base,
-      ...(opts.agentName ? { username: opts.agentName } : {}),
+      ...(username ? { username } : {}),
       ...(opts.iconUrl ? { icon_url: opts.iconUrl } : {}),
       ...(opts.iconEmoji ? { icon_emoji: opts.iconEmoji } : {}),
     });
@@ -117,7 +124,7 @@ export async function postAsAgent(token: string, opts: {
     if (!customized) throw err;
     const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
       ...base,
-      ...(opts.agentName ? { text: `*${opts.agentName}:* ${opts.text}` } : {}),
+      ...(username ? { text: `*${username}:* ${opts.text}` } : {}),
     });
     return { channel: r.channel, ts: r.ts };
   }
