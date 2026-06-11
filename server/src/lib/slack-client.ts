@@ -25,6 +25,22 @@ function retryAfterSec(res: Response): number | null {
 
 export interface SlackOk { ok: boolean; error?: string; [key: string]: unknown }
 
+/**
+ * Slack accepts application/json ONLY on write methods (chat.postMessage,
+ * usergroups.*, …) — read methods (conversations.info/replies/history/list,
+ * users.info) silently fail with invalid_arguments when sent JSON. Form
+ * encoding is accepted by EVERY Web API method, so all calls use it; object/
+ * array values are JSON-encoded inside their form field (Slack's convention).
+ */
+function formEncode(body: Record<string, unknown>): string {
+  const form = new URLSearchParams();
+  for (const [k, v] of Object.entries(body)) {
+    if (v === undefined || v === null) continue;
+    form.set(k, typeof v === 'object' ? JSON.stringify(v) : String(v));
+  }
+  return form.toString();
+}
+
 async function request<T extends SlackOk>(
   token: string,
   method: string,
@@ -36,9 +52,9 @@ async function request<T extends SlackOk>(
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
-        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Type': 'application/x-www-form-urlencoded; charset=utf-8',
       },
-      ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+      ...(body !== undefined ? { body: formEncode(body) } : {}),
     });
     if (res.status === 429 && attempt < MAX_RETRIES) {
       const waitSec = retryAfterSec(res) ?? Math.min(8, 2 ** attempt);
