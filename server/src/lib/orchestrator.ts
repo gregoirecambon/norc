@@ -46,6 +46,7 @@ import { getNorcOrgPageId } from './norc-identity.js';
 import { notifySlackOnCompletion, projectForChannel } from './slack-notify.js';
 import { isSlackAnchor, parseSlackAnchor, getSlack as getSlackCreds } from './slack-integration.js';
 import { postAsAgent } from './slack-client.js';
+import { agentSlackIcon } from './slack-agents.js';
 import {
   createPendingChange, attachProposalComment, findPendingByDiscussion, resolveChange,
   applySelfChange, parseApprovalReply, renderSelfChangeDiff, describeCurrentValue, describeProposedValue,
@@ -1004,8 +1005,10 @@ export async function finalizeAgentReport(run: TaskRun, report: { status?: strin
     const text = (report.summary ?? '').trim()
       || (ok ? '(done)' : `⚠️ I couldn't finish that.`);
     if (where && botToken) {
-      await postAsAgent(botToken, { channel: where.channel, threadTs: where.threadTs, agentName: slackAgentName, text })
-        .catch(err => emitLog(`slack reply post failed: ${err instanceof Error ? err.message : 'unknown'}`, slackAgentName));
+      await postAsAgent(botToken, {
+        channel: where.channel, threadTs: where.threadTs, agentName: slackAgentName, text,
+        iconUrl: await agentSlackIcon(run.agentId),
+      }).catch(err => emitLog(`slack reply post failed: ${err instanceof Error ? err.message : 'unknown'}`, slackAgentName));
     }
     finalizeRun(run.id, ok ? 'done' : 'failed');
     emitLog(`agent API: slack chat run ${run.id} completed (${ok ? 'done' : 'failed'})`, slackAgentName);

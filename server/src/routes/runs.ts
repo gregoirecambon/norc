@@ -29,6 +29,7 @@ import { getSlack as getSlackIntegration, isSlackActive, isSlackAnchor, parseSla
 import { ensureChannelMembership, postAsAgent } from '../lib/slack-client.js';
 import { notifySlackOnCompletion } from '../lib/slack-notify.js';
 import { slackChatContext } from '../lib/slack-orchestrator.js';
+import { agentSlackIcon } from '../lib/slack-agents.js';
 
 /** Open Notion search/query is opt-in (off by default) and strategic-only. */
 function openSearchEnabled(): boolean {
@@ -221,6 +222,7 @@ export function makeRunsRouter(): ExpressRouter {
       }
       const posted = await postAsAgent(slack.botToken, {
         channel, text, threadTs: threadTs ?? null, agentName: agentTag(run),
+        iconUrl: await agentSlackIcon(run.agentId),
       });
       markActed(run.id);
       emitLog(`agent API: Slack message posted to ${membership.name ? '#' + membership.name : channel} (run ${run.id})`, agentTag(run), run.pageId);

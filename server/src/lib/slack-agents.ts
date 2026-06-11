@@ -7,10 +7,11 @@
 
 import { eq } from 'drizzle-orm';
 import { db } from '../db/client.js';
-import { agents } from '../db/schema.js';
+import { agents, notionIntegration } from '../db/schema.js';
 import { emitLog } from './logger.js';
 import { getSlack } from './slack-integration.js';
 import { slackPost, type SlackOk } from './slack-client.js';
+import { notionGet } from './notion-client.js';
 
 export interface UsergroupResult {
   ok: boolean;
@@ -77,8 +78,9 @@ export async function ensureAgentUsergroup(agentId: string): Promise<UsergroupRe
     const base = slugifyHandle(agentRow.name);
     const existing = await listUsergroups(botToken).catch(() => [] as UsergroupRow[]);
 
-    // Adopt a same-handle group (ours from a previous install).
-    const adopt = existing.find(g => g.handle === base);
+    // Adopt a same-handle group (ours from a previous install, or one the
+    // user created by hand while testing). Case-insensitive — Slack handles are.
+    const adopt = existing.find(g => g.handle.toLowerCase() === base.toLowerCase());
     if (adopt) {
       if (adopt.date_delete) await slackPost(botToken, 'usergroups.enable', { usergroup: adopt.id }).catch(() => undefined);
       db.update(agents).set({ slackUsergroupId: adopt.id, slackHandle: adopt.handle }).where(eq(agents.id, agentId)).run();
@@ -86,24 +88,81 @@ export async function ensureAgentUsergroup(agentId: string): Promise<UsergroupRe
       return { ok: true, usergroupId: adopt.id, handle: adopt.handle };
     }
 
-    // Fresh create, suffixing on collision with a foreign handle.
-    const taken = new Set(existing.map(g => g.handle));
-    let handle = base;
-    for (let i = 2; taken.has(handle) && i < 10; i++) handle = `${base}-${i}`;
-    const created = await slackPost<SlackOk & { usergroup: UsergroupRow }>(botToken, 'usergroups.create', {
-      name: agentRow.name,
-      handle,
-      description: `NORC agent — mention to hand work to ${agentRow.name}`,
-    });
-    const id = created.usergroup.id;
-    db.update(agents).set({ slackUsergroupId: id, slackHandle: handle }).where(eq(agents.id, agentId)).run();
-    emitLog(`created Slack handle @${handle} for "${agentRow.name}"`, 'Slack');
-    return { ok: true, usergroupId: id, handle };
+    // Fresh create. The pre-computed suffix only avoids collisions the list
+    // could SEE — usergroups.list can miss groups (failed call, IDP/hidden
+    // groups), so *_already_exists from the create itself retries with the
+    // next suffix instead of giving up.
+    const taken = new Set(existing.map(g => g.handle.toLowerCase()));
+    let suffix = 1;
+    const candidate = () => (suffix === 1 ? base : `${base}-${suffix}`);
+    while (taken.has(candidate()) && suffix < 10) suffix++;
+
+    for (; suffix <= 10; suffix++) {
+      const handle = candidate();
+      try {
+        const created = await slackPost<SlackOk & { usergroup: UsergroupRow }>(botToken, 'usergroups.create', {
+          name: suffix === 1 ? agentRow.name : `${agentRow.name} ${suffix}`,
+          handle,
+          description: `NORC agent — mention to hand work to ${agentRow.name}`,
+        });
+        const id = created.usergroup.id;
+        db.update(agents).set({ slackUsergroupId: id, slackHandle: handle }).where(eq(agents.id, agentId)).run();
+        emitLog(`created Slack handle @${handle} for "${agentRow.name}"`, 'Slack');
+        return { ok: true, usergroupId: id, handle };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : '';
+        if (!msg.includes('already_exists')) throw err; // real failures keep their meaning
+      }
+    }
+    return { ok: false, usergroupId: null, handle: null, warning: `Handles @${base} through @${base}-10 are all taken — free one up in Slack (People → User groups) and re-toggle.` };
   } catch (err) {
     const warning = friendlyWarning(err);
     emitLog(`slack usergroup for "${agentRow.name}": ${warning}`, 'Slack');
     return { ok: false, usergroupId: null, handle: null, warning };
   }
+}
+
+// ─── Agent avatars: the Notion Org DB page icon, as Slack icon_url ──────────
+// Notion-hosted file icons are presigned S3 URLs that expire (~1h), so the
+// cache TTL stays well under that and a fresh URL is fetched per window.
+// Emoji icons map to the Twemoji CDN (Slack's icon_url wants an image URL).
+
+const iconCache = new Map<string, { url: string | null; at: number }>();
+const ICON_TTL_MS = 10 * 60_000;
+
+function twemojiUrl(emoji: string): string | null {
+  const codepoints = [...emoji]
+    .map(c => c.codePointAt(0)!)
+    .filter(cp => cp !== 0xfe0f) // variation selectors aren't in twemoji filenames
+    .map(cp => cp.toString(16));
+  if (codepoints.length === 0) return null;
+  return `https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/${codepoints.join('-')}.png`;
+}
+
+/** The agent's Slack avatar URL (its Notion Org DB page icon), or null. */
+export async function agentSlackIcon(agentId: string): Promise<string | null> {
+  const agentRow = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
+  if (!agentRow?.orgDbPageId) return null;
+  const hit = iconCache.get(agentRow.orgDbPageId);
+  if (hit && Date.now() - hit.at < ICON_TTL_MS) return hit.url;
+
+  const integration = db.select().from(notionIntegration).all()[0];
+  let url: string | null = null;
+  if (integration?.status === 'active') {
+    try {
+      const page = await notionGet<Record<string, unknown>>(integration.apiKey, `/pages/${agentRow.orgDbPageId}`);
+      const icon = page['icon'] as Record<string, unknown> | null;
+      if (icon?.['type'] === 'external') {
+        url = String((icon['external'] as Record<string, unknown>)?.['url'] ?? '') || null;
+      } else if (icon?.['type'] === 'file') {
+        url = String((icon['file'] as Record<string, unknown>)?.['url'] ?? '') || null;
+      } else if (icon?.['type'] === 'emoji' && typeof icon['emoji'] === 'string') {
+        url = twemojiUrl(icon['emoji']);
+      }
+    } catch { /* no icon — Slack falls back to the app avatar */ }
+  }
+  iconCache.set(agentRow.orgDbPageId, { url, at: Date.now() });
+  return url;
 }
 
 /** Disable (never delete) the agent's user group — the mapping survives so

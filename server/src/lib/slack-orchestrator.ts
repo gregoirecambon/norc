@@ -33,6 +33,7 @@ import {
 } from './orchestrator.js';
 import { listOpenTasks, findBlockingSimilar } from './external-tasks.js';
 import { projectForChannel } from './slack-notify.js';
+import { agentSlackIcon } from './slack-agents.js';
 import { createTaskPage, appendBlocks } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
 import { resolveAnchor } from './notion-anchor.js';
@@ -435,7 +436,10 @@ async function runSlackChatTurn(args: {
     return;
   }
   const text = (result.text ?? '').trim() || '(no reply)';
-  await postAsAgent(botToken, { channel, threadTs: threadRoot, agentName: agentRef.name, text }).catch(err =>
+  await postAsAgent(botToken, {
+    channel, threadTs: threadRoot, agentName: agentRef.name, text,
+    iconUrl: await agentSlackIcon(agentRef.agentId),
+  }).catch(err =>
     emitLog(`slack reply post failed: ${err instanceof Error ? err.message : 'unknown'}`, agentRef.name));
   finalizeRun(runId, 'done');
   emitLog(`"${agentRef.name}" replied in Slack ${channelLabel} (run ${runId})`, agentRef.name);

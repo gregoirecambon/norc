@@ -14,6 +14,7 @@ import { agents, notionIntegration, notionDatabases } from '../db/schema.js';
 import { emitLog } from './logger.js';
 import { getSlack, isSlackActive } from './slack-integration.js';
 import { postAsAgent, ensureChannelMembership } from './slack-client.js';
+import { agentSlackIcon } from './slack-agents.js';
 import { notionGet, notionQuery } from './notion-client.js';
 import { getRichText, getTitle } from './notion-props.js';
 import { alreadyProcessed, markProcessed } from './processed-triggers.js';
@@ -111,6 +112,7 @@ export async function notifySlackOnCompletion(
   const { botToken } = getSlack();
   if (!botToken) return;
   const agentName = db.select().from(agents).where(eq(agents.id, run.agentId)).all()[0]?.name ?? 'NORC';
+  const iconUrl = await agentSlackIcon(run.agentId);
   const text = formatCompletion(run, outcome, summary);
 
   const posts: { channel: string; threadTs: string | null }[] = [];
@@ -127,7 +129,7 @@ export async function notifySlackOnCompletion(
         continue;
       }
       if (membership.joined) emitLog(`Norc auto-joined ${membership.name ? '#' + membership.name : p.channel} for completion summaries`, 'Slack');
-      await postAsAgent(botToken, { channel: p.channel, text, threadTs: p.threadTs, agentName });
+      await postAsAgent(botToken, { channel: p.channel, text, threadTs: p.threadTs, agentName, iconUrl });
       emitLog(`completion summary posted to Slack ${p.channel}${p.threadTs ? ' (thread)' : ''} (run ${run.id})`, agentName, run.taskPageId ?? undefined);
     } catch (err) {
       emitLog(`slack completion post failed for ${p.channel}: ${err instanceof Error ? err.message : 'unknown'}`, agentName);
