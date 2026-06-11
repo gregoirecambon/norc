@@ -142,9 +142,9 @@ async function displayName(token: string, userId: string): Promise<string> {
   return name;
 }
 
-/** The conversation so far, rendered as "author: text" lines (latest message
- * last, the triggering message excluded by ts). The 'dm' anchor reads the
- * DM's top-level history instead of a thread. */
+/** The thread so far, rendered as "author: text" lines (latest message last,
+ * the triggering message excluded by ts). The 'dm' branch only serves runs
+ * minted by v0.11.5 (legacy rolling-DM anchors) still in flight. */
 async function threadLines(token: string, channel: string, threadRoot: string, excludeTs: string): Promise<SlackThreadLine[]> {
   let msgs: SlackMessage[] = [];
   try {
@@ -209,10 +209,12 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   markProcessed(msgKey);
 
   const isDm = ev.channel_type === 'im';
-  // DMs are ONE rolling conversation: top-level messages share a stable 'dm'
-  // anchor (otherwise every message would mint a fresh session — total
-  // amnesia between turns). Explicit threads keep their own anchor.
-  const threadRoot = ev.thread_ts ?? (isDm ? 'dm' : ev.ts);
+  // Conversation model (Notion's): every top-level message STARTS a thread —
+  // the agent replies under it, and that thread is the conversation. Context
+  // is always thread-scoped; the surrounding channel/DM history is never
+  // dumped into the prompt (channels are long; only the thread is relevant).
+  const isThreadReply = !!ev.thread_ts;
+  const threadRoot = ev.thread_ts ?? ev.ts;
   const parsed = parseSlackMentions(ev.text, slack.botUserId, isDm);
 
   // Prefer the agent already engaged in this conversation (Notion's UX — no
@@ -225,7 +227,9 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   const request = parsed.request || '(no message text)';
   emitLog(`slack ${isDm ? 'DM' : `message in ${ev.channel}`}${target ? ` → @${target.name}` : parsed.norc ? ' → NORC' : ''}: ${request.slice(0, 140)}`, 'Slack');
 
-  const thread = await threadLines(slack.botToken, ev.channel, threadRoot, ev.ts);
+  // Thread replies carry their thread as context; a top-level message stands
+  // alone (it OPENS the conversation — nothing precedes it).
+  const thread = isThreadReply ? await threadLines(slack.botToken, ev.channel, threadRoot, ev.ts) : [];
   const asker = await displayName(slack.botToken, ev.user);
 
   // Chat vs task — the triage LLM decides; on error/unconfigured default to
@@ -420,7 +424,7 @@ async function runSlackChatTurn(args: {
   const sections: Section[] = [];
   let order = 0;
   const push = (text: string, priority: number) => { sections.push({ text, priority, order: order++ }); };
-  push(`[SLACK]\nYou are talking in the Slack ${channelInfo?.isIm ? 'DM' : `channel ${channelLabel}`}${threadRoot === 'dm' ? '' : ' (thread)'}. Reply conversationally — one concise message, Slack-formatted (plain text, *bold*, bullets). Do not use Notion-style markdown headers.`, 1);
+  push(`[SLACK]\nYou are talking in a thread in the Slack ${channelInfo?.isIm ? 'DM' : `channel ${channelLabel}`}. Reply conversationally — one concise message, Slack-formatted (plain text, *bold*, bullets). Do not use Notion-style markdown headers.`, 1);
   if (project) push(`[CONTEXT]\n${projectSection(project.block)}`, 3);
   if (thread.length) push(`[CONVERSATION SO FAR]\n${thread.map(l => `${l.author}: ${l.text}`).join('\n')}`, 2);
   // Tasks NORC spawned from this very conversation — so "how is it going?"

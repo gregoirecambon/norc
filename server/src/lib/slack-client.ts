@@ -101,8 +101,8 @@ export async function postAsAgent(token: string, opts: {
   iconUrl?: string | null;
   iconEmoji?: string | null;
 }): Promise<{ channel: string; ts: string }> {
-  // 'dm' is the synthetic thread root for top-level DM conversations (one
-  // stable anchor per DM) — it's not a real ts, so post top-level.
+  // 'dm' was v0.11.5's rolling-DM thread root (not a real ts) — kept only so
+  // runs minted on that version still deliver; new runs always thread.
   const threadTs = opts.threadTs && opts.threadTs !== 'dm' ? opts.threadTs : null;
   const base = {
     channel: opts.channel,
