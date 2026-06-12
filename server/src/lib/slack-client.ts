@@ -8,6 +8,7 @@
 // callers handle one error path.
 
 import { createTokenBucket } from './rate-limiter.js';
+import { emitLog } from './logger.js';
 
 export const SLACK_API = 'https://slack.com/api';
 
@@ -127,24 +128,31 @@ export async function postAsAgent(token: string, opts: {
     unfurl_links: false,
   };
   const username = opts.agentName ? displayAgentName(opts.agentName) : null;
+  const icon = opts.iconUrl ? { icon_url: opts.iconUrl } : opts.iconEmoji ? { icon_emoji: opts.iconEmoji } : {};
   const customized = !!(username || opts.iconUrl || opts.iconEmoji);
+  const post = (extra: Record<string, unknown>) =>
+    request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', { ...base, ...extra });
+
+  // Delivery beats cosmetics — degrade in tiers, never silently:
+  //   1. username + icon   2. username only (icon was the problem)
+  //   3. plain app post with the name inlined (customize scope / DM rules).
+  // missing_scope dooms every customized variant, so it skips tier 2.
   try {
-    const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
-      ...base,
-      ...(username ? { username } : {}),
-      ...(opts.iconUrl ? { icon_url: opts.iconUrl } : {}),
-      ...(opts.iconEmoji ? { icon_emoji: opts.iconEmoji } : {}),
-    });
+    const r = await post({ ...(username ? { username } : {}), ...icon });
     return { channel: r.channel, ts: r.ts };
   } catch (err) {
-    // Delivery beats cosmetics: if Slack rejected the customized post (DM
-    // conversations, an icon URL it dislikes, a missing customize scope),
-    // retry once as the plain app with the agent's name inlined.
     if (!customized) throw err;
-    const r = await request<SlackOk & { channel: string; ts: string }>(token, 'chat.postMessage', {
-      ...base,
-      ...(username ? { text: `*${username}:* ${opts.text}` } : {}),
-    });
+    const msg = err instanceof Error ? err.message : String(err);
+    emitLog(`customized Slack post rejected (${msg})${username ? ` for "${username}"` : ''} — ${msg.includes('missing_scope') ? 'the app token lacks chat:write.customize; reinstall the Slack app from the manifest' : 'retrying without the icon'}`, 'Slack');
+    if (username && Object.keys(icon).length > 0 && !msg.includes('missing_scope')) {
+      try {
+        const r = await post({ username });
+        return { channel: r.channel, ts: r.ts };
+      } catch (err2) {
+        emitLog(`Slack post with username only also rejected (${err2 instanceof Error ? err2.message : 'unknown'}) — posting as the app with the name inlined`, 'Slack');
+      }
+    }
+    const r = await post(username ? { text: `*${username}:* ${opts.text}` } : {});
     return { channel: r.channel, ts: r.ts };
   }
 }
