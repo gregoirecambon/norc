@@ -14,6 +14,7 @@ export interface AgentRow {
   maxConcurrentRuns: number;
   slackEnabled: boolean;
   slackHandle: string | null;
+  avatarUrl: string | null;
 }
 
 export interface InviteData {
@@ -86,13 +87,13 @@ export async function verifyWsPairing(id: string): Promise<{ status: 'paired' | 
   return res.json() as Promise<{ status: 'paired' | 'pending' | 'failed'; error?: string }>;
 }
 
-export async function syncAgentToNotion(id: string): Promise<{ orgDbPageId: string; url: string | null }> {
+export async function syncAgentToNotion(id: string): Promise<{ orgDbPageId: string; url: string | null; avatarUrl: string | null }> {
   const res = await fetch(`/api/agents/${encodeURIComponent(id)}/sync-notion`, { method: 'POST' });
   if (!res.ok) {
     const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
     throw new Error(body.message ?? body.error ?? `${res.status}`);
   }
-  return res.json() as Promise<{ orgDbPageId: string; url: string | null }>;
+  return res.json() as Promise<{ orgDbPageId: string; url: string | null; avatarUrl: string | null }>;
 }
 
 export interface SkillUpdateResponse {

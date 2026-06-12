@@ -101,8 +101,10 @@ export default function AgentsPage() {
     setAgents(prev => prev.some(a => a.id === agent.id) ? prev : [...prev, agent]);
   };
 
-  const handleSynced = (id: string, orgDbPageId: string) => {
-    setAgents(prev => prev.map(a => a.id === id ? { ...a, orgDbPageId } : a));
+  const handleSynced = (id: string, orgDbPageId: string, avatarUrl?: string | null) => {
+    setAgents(prev => prev.map(a => a.id === id
+      ? { ...a, orgDbPageId, ...(avatarUrl !== undefined ? { avatarUrl } : {}) }
+      : a));
   };
 
   const handleSyncAll = async () => {
@@ -113,8 +115,8 @@ export default function AgentsPage() {
     try {
       for (const a of agents) {
         try {
-          const { orgDbPageId } = await syncAgentToNotion(a.id);
-          handleSynced(a.id, orgDbPageId);
+          const { orgDbPageId, avatarUrl } = await syncAgentToNotion(a.id);
+          handleSynced(a.id, orgDbPageId, avatarUrl);
           ok++;
         } catch (e) {
           failures.push(`${a.name}: ${e instanceof Error ? e.message : 'failed'}`);

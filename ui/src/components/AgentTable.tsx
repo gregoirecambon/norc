@@ -10,10 +10,10 @@ interface Props {
   onPingResult: (id: string, status: 'connected' | 'unreachable', latencyMs: number) => void;
   onDeleted: (id: string) => void;
   onConfigUpdated: (id: string, adapterConfig: Record<string, unknown>) => void;
-  onSynced: (id: string, orgDbPageId: string) => void;
+  onSynced: (id: string, orgDbPageId: string, avatarUrl?: string | null) => void;
 }
 
-function NotionSyncCell({ agent, provisioned, onSynced }: { agent: AgentRow; provisioned: boolean; onSynced: (id: string, orgDbPageId: string) => void }) {
+function NotionSyncCell({ agent, provisioned, onSynced }: { agent: AgentRow; provisioned: boolean; onSynced: (id: string, orgDbPageId: string, avatarUrl?: string | null) => void }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const synced = !!agent.orgDbPageId;
@@ -21,8 +21,8 @@ function NotionSyncCell({ agent, provisioned, onSynced }: { agent: AgentRow; pro
   const handleSync = async () => {
     setBusy(true); setError('');
     try {
-      const { orgDbPageId } = await syncAgentToNotion(agent.id);
-      onSynced(agent.id, orgDbPageId);
+      const { orgDbPageId, avatarUrl } = await syncAgentToNotion(agent.id);
+      onSynced(agent.id, orgDbPageId, avatarUrl);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Sync failed');
     } finally {
@@ -333,7 +333,14 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                   <td style={{ padding: '9px 8px', color: 'var(--text-dim)', fontSize: 10, userSelect: 'none' }}>
                     {isExpanded ? '▼' : '▶'}
                   </td>
-                  <td style={{ padding: '9px 12px', fontWeight: 500 }}>{a.name}</td>
+                  <td style={{ padding: '9px 12px', fontWeight: 500 }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                      {a.avatarUrl
+                        ? <img src={a.avatarUrl} alt="" width={18} height={18} style={{ borderRadius: '50%', objectFit: 'cover', flexShrink: 0 }} />
+                        : <span aria-hidden style={{ width: 18, height: 18, borderRadius: '50%', background: 'var(--surface2)', border: '1px solid var(--border)', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 9, color: 'var(--text-dim)', flexShrink: 0 }}>{a.name.charAt(0).toUpperCase()}</span>}
+                      {a.name}
+                    </span>
+                  </td>
                   <td style={{ padding: '9px 12px', color: 'var(--text-secondary)' }}>{ADAPTER_LABEL[a.adapterType] ?? a.adapterType}</td>
                   <td style={{ padding: '9px 12px' }}><StatusBadge status={a.status} /></td>
                   <td style={{ padding: '9px 12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>

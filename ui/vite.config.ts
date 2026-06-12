@@ -20,6 +20,11 @@ export default defineConfig({
         target: process.env['VITE_API_URL'] ?? 'http://localhost:3001',
         changeOrigin: true,
       },
+      // Agent avatars (public route, also fetched by Slack in prod).
+      '/icons': {
+        target: process.env['VITE_API_URL'] ?? 'http://localhost:3001',
+        changeOrigin: true,
+      },
     },
   },
 });

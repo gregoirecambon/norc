@@ -22,6 +22,7 @@ import { notionIntegration } from '../db/schema.js';
 import { norcBaseUrl } from '../lib/base-url.js';
 import { isSlackActive } from '../lib/slack-integration.js';
 import { ensureAgentUsergroup, disableAgentUsergroup } from '../lib/slack-agents.js';
+import { refreshAgentAvatar } from '../lib/agent-avatar.js';
 import type { AdapterType } from '../types.js';
 
 const router: ExpressRouter = Router();
@@ -36,6 +37,7 @@ async function syncAgentBestEffort(agent: { id: string; name: string; adapterTyp
   try {
     const { pageId } = await upsertAgentPage(ctx.apiKey, ctx.orgDbId, agent, agent.orgDbPageId ?? undefined);
     db.update(agents).set({ orgDbPageId: pageId }).where(eq(agents.id, agent.id)).run();
+    void refreshAgentAvatar(agent.id).catch(() => undefined);
     emitEvent({ type: 'agent.updated', data: { id: agent.id, orgDbPageId: pageId } });
   } catch (err) {
     emitLog(`agent ${agent.name} Notion sync failed: ${err instanceof Error ? err.message : 'unknown error'}`);
@@ -68,6 +70,11 @@ function parseJson(raw: string): Record<string, unknown> {
   try { return JSON.parse(raw) as Record<string, unknown>; } catch { return {}; }
 }
 
+/** Dashboard-relative avatar URL; ?v busts the browser cache after a re-sync. */
+function agentAvatarUrl(id: string, hasAvatar: boolean): string | null {
+  return hasAvatar ? `/icons/agents/${id}.png?v=${Date.now()}` : null;
+}
+
 // GET /api/agents
 router.get('/', (_req, res) => {
   const rows = db.select().from(agents).all();
@@ -85,6 +92,7 @@ router.get('/', (_req, res) => {
     maxConcurrentRuns: r.maxConcurrentRuns,
     slackEnabled: r.slackEnabled,
     slackHandle: r.slackHandle ?? null,
+    avatarUrl: r.avatar ? `/icons/agents/${r.id}.png?v=${r.avatarAt ?? 0}` : null,
   })));
 });
 
@@ -407,9 +415,11 @@ router.post('/:id/sync-notion', async (req, res) => {
   try {
     const { pageId, url } = await upsertAgentPage(ctx.apiKey, ctx.orgDbId, row, row.orgDbPageId ?? undefined);
     db.update(agents).set({ orgDbPageId: pageId }).where(eq(agents.id, id)).run();
-    emitLog(`agent ${row.name} synced to Notion Org DB`);
+    // Mirror the page icon while we're here, so Slack + the dashboard have it.
+    const { hasAvatar } = await refreshAgentAvatar(id);
+    emitLog(`agent ${row.name} synced to Notion Org DB${hasAvatar ? ' (avatar saved)' : ''}`);
     emitEvent({ type: 'agent.updated', data: { id, orgDbPageId: pageId } });
-    res.json({ orgDbPageId: pageId, url });
+    res.json({ orgDbPageId: pageId, url, avatarUrl: agentAvatarUrl(id, hasAvatar) });
   } catch (err) {
     res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
   }

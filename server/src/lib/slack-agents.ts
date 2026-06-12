@@ -158,42 +158,59 @@ export function slackSafeIconUrl(raw: string): string | null {
   return `https://wsrv.nl/?url=${encodeURIComponent(u.host + u.pathname)}&output=png&w=128&h=128`;
 }
 
+export type AgentIconRead =
+  | { state: 'unavailable' }            // page/integration unreadable — keep what you have
+  | { state: 'none' }                   // page read fine, no icon set — mirror that
+  | { state: 'icon'; url: string };     // upstream image URL
+
+/**
+ * Read the agent's Notion page icon NOW (no cache). The tri-state result lets
+ * sync distinguish "the icon was removed" (clear the stored avatar) from
+ * "Notion is unreachable" (keep it).
+ */
+export async function readAgentIcon(agentId: string): Promise<AgentIconRead> {
+  const agentRow = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
+  if (!agentRow?.orgDbPageId) return { state: 'unavailable' };
+  const integration = db.select().from(notionIntegration).all()[0];
+  if (integration?.status !== 'active') return { state: 'unavailable' };
+  try {
+    const page = await notionGet<Record<string, unknown>>(integration.apiKey, `/pages/${agentRow.orgDbPageId}`);
+    if (page['in_trash'] === true || page['archived'] === true) {
+      emitLog(`agent "${agentRow.name}" Org DB page is in the Notion trash — no avatar (re-sync the agent to recreate its page)`, 'Slack');
+      return { state: 'unavailable' };
+    }
+    const icon = page['icon'] as Record<string, unknown> | null;
+    let url: string | null = null;
+    if (icon?.['type'] === 'external') {
+      url = String((icon['external'] as Record<string, unknown>)?.['url'] ?? '') || null;
+    } else if (icon?.['type'] === 'file') {
+      url = String((icon['file'] as Record<string, unknown>)?.['url'] ?? '') || null;
+    } else if (icon?.['type'] === 'custom_emoji') {
+      url = String((icon['custom_emoji'] as Record<string, unknown>)?.['url'] ?? '') || null;
+    } else if (icon?.['type'] === 'emoji' && typeof icon['emoji'] === 'string') {
+      url = twemojiUrl(icon['emoji']);
+    }
+    if (url) url = slackSafeIconUrl(url);
+    return url ? { state: 'icon', url } : { state: 'none' };
+  } catch (err) {
+    // Loud, not silent: a dead page link or revoked share is invisible otherwise.
+    emitLog(`avatar lookup for "${agentRow.name}" failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Slack');
+    return { state: 'unavailable' };
+  }
+}
+
 /**
  * Upstream image URL for the agent's Notion page icon (Twemoji PNG, wsrv-
- * rasterized built-in, presigned file, custom emoji), or null. NORC fetches
- * this itself — Slack never sees it (see agentSlackIcon).
+ * rasterized built-in, presigned file, custom emoji), or null. Cached per
+ * page; NORC fetches this itself — Slack never sees it (see agentSlackIcon).
  */
 export async function resolveAgentIconSource(agentId: string): Promise<string | null> {
   const agentRow = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
   if (!agentRow?.orgDbPageId) return null;
   const hit = iconCache.get(agentRow.orgDbPageId);
   if (hit && Date.now() - hit.at < ICON_TTL_MS) return hit.url;
-
-  const integration = db.select().from(notionIntegration).all()[0];
-  let url: string | null = null;
-  if (integration?.status === 'active') {
-    try {
-      const page = await notionGet<Record<string, unknown>>(integration.apiKey, `/pages/${agentRow.orgDbPageId}`);
-      if (page['in_trash'] === true || page['archived'] === true) {
-        emitLog(`agent "${agentRow.name}" Org DB page is in the Notion trash — no Slack avatar (re-sync the agent to recreate its page)`, 'Slack');
-      }
-      const icon = page['icon'] as Record<string, unknown> | null;
-      if (icon?.['type'] === 'external') {
-        url = String((icon['external'] as Record<string, unknown>)?.['url'] ?? '') || null;
-      } else if (icon?.['type'] === 'file') {
-        url = String((icon['file'] as Record<string, unknown>)?.['url'] ?? '') || null;
-      } else if (icon?.['type'] === 'custom_emoji') {
-        url = String((icon['custom_emoji'] as Record<string, unknown>)?.['url'] ?? '') || null;
-      } else if (icon?.['type'] === 'emoji' && typeof icon['emoji'] === 'string') {
-        url = twemojiUrl(icon['emoji']);
-      }
-      if (url) url = slackSafeIconUrl(url);
-    } catch (err) {
-      // No avatar — Slack falls back to the app icon. Loud, not silent: a
-      // dead page link or revoked share is invisible otherwise.
-      emitLog(`avatar lookup for "${agentRow.name}" failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Slack');
-    }
-  }
+  const read = await readAgentIcon(agentId);
+  const url = read.state === 'icon' ? read.url : null;
   iconCache.set(agentRow.orgDbPageId, { url, at: Date.now() });
   return url;
 }
@@ -203,16 +220,19 @@ export async function resolveAgentIconSource(agentId: string): Promise<string | 
  * upstream URL. Slack's argument validator rejects exotic URLs (presigned S3
  * query strings and the like) with invalid_arguments, killing the whole
  * customized post — a short queryless self-hosted URL always passes, and the
- * server fetches/converts the real image behind it.
+ * server serves the stored/fetched image behind it.
  */
 export async function agentSlackIcon(agentId: string): Promise<string | null> {
-  const source = await resolveAgentIconSource(agentId);
-  if (!source) return null;
   const base = norcBaseUrl();
   // Slack can only fetch over the public internet — a localhost/.local dev
   // base would bounce the whole post again, so skip the icon there.
   if (/localhost|127\.0\.0\.1|\.local\b/.test(base)) return null;
-  return `${base}/icons/agents/${agentId}.png`;
+  const agentRow = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
+  if (!agentRow) return null;
+  // Avatar mirrored at sync time wins — no Notion round-trip, can't expire.
+  if (agentRow.avatar) return `${base}/icons/agents/${agentId}.png`;
+  const source = await resolveAgentIconSource(agentId);
+  return source ? `${base}/icons/agents/${agentId}.png` : null;
 }
 
 /** Disable (never delete) the agent's user group — the mapping survives so

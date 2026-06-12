@@ -1,4 +1,4 @@
-import { integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
+import { blob, integer, real, sqliteTable, text, uniqueIndex } from 'drizzle-orm/sqlite-core';
 
 export const agents = sqliteTable('agents', {
   id: text('id').primaryKey(),
@@ -30,6 +30,11 @@ export const agents = sqliteTable('agents', {
   slackEnabled:      integer('slack_enabled', { mode: 'boolean' }).notNull().default(false),
   slackUsergroupId:  text('slack_usergroup_id'),
   slackHandle:       text('slack_handle'),
+  // Avatar mirrored from the agent's Notion page icon at sync time, so Slack
+  // and the dashboard serve it without a live Notion round-trip.
+  avatar:     blob('avatar', { mode: 'buffer' }),
+  avatarType: text('avatar_type'),
+  avatarAt:   integer('avatar_at'),
 });
 
 export const registrationTokens = sqliteTable('registration_tokens', {
