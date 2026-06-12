@@ -139,7 +139,8 @@ export async function postAsAgent(token: string, opts: {
 
   // Delivery beats cosmetics — degrade in tiers, never silently:
   //   1. username + icon   2. username only (icon was the problem)
-  //   3. plain app post with the name inlined (customize scope / DM rules).
+  //   3. plain app post (customize scope / DM rules) — NORC's voice, never a
+  //      fake "Name:" prefix impersonating the agent.
   // missing_scope dooms every customized variant, so it skips tier 2.
   try {
     const r = await post({ ...(username ? { username } : {}), ...icon });
@@ -154,18 +155,24 @@ export async function postAsAgent(token: string, opts: {
         const r = await post({ username });
         return { channel: r.channel, ts: r.ts };
       } catch (err2) {
-        emitLog(`Slack post with username only also rejected (${err2 instanceof Error ? err2.message : 'unknown'}) — posting as the app with the name inlined`, 'Slack');
+        emitLog(`Slack post with username only also rejected (${err2 instanceof Error ? err2.message : 'unknown'}) — posting as the app`, 'Slack');
       }
     }
-    const r = await post(username ? { text: `*${username}:* ${opts.text}` } : {});
+    const r = await post({});
     return { channel: r.channel, ts: r.ts };
   }
 }
 
+const IMAGE_EXT = /\.(png|jpe?g|gif)$/i; // the types Slack image blocks accept
+
 /**
- * Upload a file into a channel via Slack's external-upload flow (needs
- * files:write). File shares always post as the app — username/icon overrides
- * don't apply to them — so the agent's name is carried in the comment text.
+ * Upload a file via Slack's external-upload flow (needs files:write) and post
+ * it under the AGENT's own name/avatar. File shares themselves can't carry a
+ * username/icon override (Slack rule), so for images the file is completed
+ * UNSHARED and attached to a normal agent-identity message as an image block
+ * (slack_file) — never an app-voiced "Name:" relay line. Non-images (no block
+ * support) are shared by the app with the comment text verbatim: NORC's
+ * voice, not a fake agent prefix.
  */
 export async function uploadFileAsAgent(token: string, opts: {
   channel: string;
@@ -174,6 +181,7 @@ export async function uploadFileAsAgent(token: string, opts: {
   title?: string | null;
   text?: string | null;
   agentName?: string | null;
+  iconUrl?: string | null;
   threadTs?: string | null;
 }): Promise<{ fileId: string; permalink: string | null }> {
   const ticket = await request<SlackOk & { upload_url: string; file_id: string }>(
@@ -182,20 +190,53 @@ export async function uploadFileAsAgent(token: string, opts: {
   await up.body?.cancel().catch(() => {});
   if (!up.ok) throw new Error(`Slack file upload failed (${up.status})`);
 
-  const username = opts.agentName ? displayAgentName(opts.agentName) : null;
-  const body = opts.text?.trim() ?? '';
-  const comment = body
-    ? (username ? `*${username}:* ${body}` : body)
-    : (username ? `*${username}* shared a file` : null);
+  const fileId = ticket.file_id;
   const threadTs = opts.threadTs && opts.threadTs !== 'dm' ? opts.threadTs : null;
+  const text = opts.text?.trim() ?? '';
+  const title = opts.title || opts.filename;
+
+  if (!IMAGE_EXT.test(opts.filename)) {
+    const done = await request<SlackOk & { files?: Array<{ id: string; permalink?: string }> }>(
+      token, 'files.completeUploadExternal', {
+        files: [{ id: fileId, title }],
+        channel_id: opts.channel,
+        ...(threadTs ? { thread_ts: threadTs } : {}),
+        ...(text ? { initial_comment: text } : {}),
+      });
+    return { fileId, permalink: done.files?.[0]?.permalink ?? null };
+  }
+
   const done = await request<SlackOk & { files?: Array<{ id: string; permalink?: string }> }>(
-    token, 'files.completeUploadExternal', {
-      files: [{ id: ticket.file_id, title: opts.title || opts.filename }],
-      channel_id: opts.channel,
-      ...(threadTs ? { thread_ts: threadTs } : {}),
-      ...(comment ? { initial_comment: comment } : {}),
-    });
-  return { fileId: ticket.file_id, permalink: done.files?.[0]?.permalink ?? null };
+    token, 'files.completeUploadExternal', { files: [{ id: fileId, title }] });
+  const permalink = done.files?.[0]?.permalink ?? null;
+
+  const username = opts.agentName ? displayAgentName(opts.agentName) : null;
+  const base = {
+    channel: opts.channel,
+    text: text || title, // notification fallback for clients that skip blocks
+    blocks: [
+      ...(text ? [{ type: 'section', text: { type: 'mrkdwn', text } }] : []),
+      { type: 'image', slack_file: { id: fileId }, alt_text: title },
+    ],
+    unfurl_links: false,
+    ...(threadTs ? { thread_ts: threadTs } : {}),
+  };
+  const identity = {
+    ...(username ? { username } : {}),
+    ...(opts.iconUrl ? { icon_url: opts.iconUrl } : {}),
+  };
+  // A just-completed file can take a beat to be referenceable from a block.
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) await sleep(1500);
+    try {
+      await request(token, 'chat.postMessage', { ...base, ...identity });
+      return { fileId, permalink };
+    } catch (err) { lastErr = err; }
+  }
+  emitLog(`agent-identity file post rejected (${lastErr instanceof Error ? lastErr.message : 'unknown'}) — posting as the app`, 'Slack');
+  await request(token, 'chat.postMessage', base);
+  return { fileId, permalink };
 }
 
 export interface SlackMessage {

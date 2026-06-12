@@ -292,7 +292,8 @@ export function makeRunsRouter(): ExpressRouter {
       const { permalink } = await uploadFileAsAgent(slack.botToken, {
         channel: resolved, bytes, filename: safeName,
         title: title ?? null, text: text ?? null,
-        agentName: agentTag(run), threadTs: threadTs ?? null,
+        agentName: agentTag(run), iconUrl: await agentSlackIcon(run.agentId),
+        threadTs: threadTs ?? null,
       });
       markActed(run.id);
       emitLog(`agent API: file "${safeName}" (${Math.max(1, Math.round(bytes.length / 1024))} KB) posted to ${membership.name ? '#' + membership.name : channel} (run ${run.id})`, agentTag(run), run.pageId);

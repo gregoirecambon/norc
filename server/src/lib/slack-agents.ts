@@ -229,10 +229,13 @@ export async function agentSlackIcon(agentId: string): Promise<string | null> {
   if (/localhost|127\.0\.0\.1|\.local\b/.test(base)) return null;
   const agentRow = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
   if (!agentRow) return null;
+  // ?v busts Slack's per-URL image cache — it may hold a poisoned entry from
+  // before the URL served images (and it never re-fetches a known URL).
+  const versioned = (v: number) => `${base}/icons/agents/${agentId}.png?v=${v}`;
   // Avatar mirrored at sync time wins — no Notion round-trip, can't expire.
-  if (agentRow.avatar) return `${base}/icons/agents/${agentId}.png`;
+  if (agentRow.avatar) return versioned(agentRow.avatarAt ?? 0);
   const source = await resolveAgentIconSource(agentId);
-  return source ? `${base}/icons/agents/${agentId}.png` : null;
+  return source ? versioned(0) : null;
 }
 
 /** Disable (never delete) the agent's user group — the mapping survives so

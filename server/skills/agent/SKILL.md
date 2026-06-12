@@ -149,9 +149,10 @@ How to find the channel id, in order of preference:
 ### Sending files (images, PDFs, …) to Slack
 
 Your files live on YOUR machine — NORC can't read your paths. Ship the bytes
-base64-encoded and NORC uploads them into the channel (rendered inline for
-images). Limit 10 MB per file. `text` becomes the message above the file;
-Slack shows file posts under the Norc app with your name in that line.
+base64-encoded and NORC uploads them into the channel. Images (png/jpg/gif)
+render inline in a message posted under YOUR name and avatar; other file
+types are shared by the Norc app with your `text` as the comment. Limit
+10 MB per file.
 
 ```bash
 curl -s -X POST <api_base>/slack-file -H 'Content-Type: application/json' \
