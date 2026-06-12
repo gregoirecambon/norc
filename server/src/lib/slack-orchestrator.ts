@@ -37,6 +37,7 @@ import { agentSlackIcon } from './slack-agents.js';
 import { createTaskPage, appendBlocks } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
 import { resolveAnchor } from './notion-anchor.js';
+import { getSelect } from './notion-props.js';
 import { alreadyProcessed, markProcessed } from './processed-triggers.js';
 import type { AgentRef } from './notion-mentions.js';
 
@@ -232,6 +233,12 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   const thread = isThreadReply ? await threadLines(slack.botToken, ev.channel, threadRoot, ev.ts) : [];
   const asker = await displayName(slack.botToken, ev.user);
 
+  // A reply into a thread whose task is parked Blocked answers THAT task —
+  // resume it (same page, same session) instead of classifying a new ask.
+  if (isThreadReply && await resumeThreadTask({
+    botToken: slack.botToken, channel: ev.channel, threadRoot, target, request, asker,
+  })) return;
+
   // Chat vs task — the triage LLM decides; on error/unconfigured default to
   // chat (never block a conversation).
   const settings = getNorcSettings();
@@ -272,6 +279,67 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
     botToken: slack.botToken, agentRef: target,
     channel: ev.channel, threadRoot, request, asker, thread,
   });
+}
+
+/**
+ * A reply in a thread that already drove a Notion task continues THAT task —
+ * same page, hence the same agent session — instead of minting a sibling.
+ * Applies when the thread's latest task is parked **Blocked** (an agent asked
+ * for human input and this reply answers it); in-flight or finished tasks fall
+ * through to the normal chat/task lanes. Returns true when it took the turn.
+ */
+async function resumeThreadTask(args: {
+  botToken: string;
+  channel: string;
+  threadRoot: string;
+  target: AgentRef | null;
+  request: string;
+  asker: string;
+}): Promise<boolean> {
+  const { botToken, channel, threadRoot, target, request, asker } = args;
+  const prior = db.select().from(taskRuns)
+    .where(and(eq(taskRuns.slackChannel, channel), eq(taskRuns.slackThreadTs, threadRoot), eq(taskRuns.lane, 'work')))
+    .all()
+    .filter(r => r.taskPageId)
+    .at(-1);
+  if (!prior?.taskPageId) return false;
+
+  const integration = db.select().from(notionIntegration).all()[0];
+  if (!integration || integration.status !== 'active') return false;
+
+  let anchor;
+  try { anchor = await resolveAnchor(integration.apiKey, prior.taskPageId); } catch { return false; }
+  const status = getSelect((anchor.page as Record<string, unknown>)['properties'], 'Status');
+  if (status !== 'Blocked') return false;
+
+  // Same agent (same session) unless the human explicitly tagged another one.
+  const agentRow = db.select().from(agents).where(eq(agents.id, target?.agentId ?? prior.agentId)).all()[0];
+  if (!agentRow?.orgDbPageId) return false;
+  const agentRef: AgentRef = { agentId: agentRow.id, orgDbPageId: agentRow.orgDbPageId, name: agentRow.name, adapterType: agentRow.adapterType };
+
+  emitLog(`slack reply unblocks "${prior.title ?? prior.taskPageId}" → @${agentRef.name} (same task, same session)`, 'Slack', prior.taskPageId);
+  // Audit trail on the task page (bot-authored — the webhook loop guard eats it).
+  await appendBlocks(integration.apiKey, prior.taskPageId,
+    markdownToBlocks(`**${asker}** replied in Slack: ${request}`)).catch(() => undefined);
+  markProcessed(`page:${prior.taskPageId}:${agentRef.agentId}`);
+
+  const url = `https://www.notion.so/${prior.taskPageId.replace(/-/g, '')}`;
+  await postAsAgent(botToken, {
+    channel, threadTs: threadRoot, agentName: 'NORC',
+    text: `Passing your answer to @${agentRef.name} — resuming <${url}|${prior.title ?? 'the task'}>.`,
+  }).catch(() => undefined);
+
+  await requestAgentTurn(integration, anchor, agentRef, {
+    thread: [],
+    request: `${asker} replied in Slack to your blocked report: ${request}`,
+    triggeringUserId: null,
+    lane: 'work',
+    manageTaskStatus: prior.manageTaskStatus,
+    how: 'slack follow-up on blocked task',
+    slackChannel: channel,
+    slackThreadTs: threadRoot,
+  });
+  return true;
 }
 
 /** Work-lane runs spawned from this Slack conversation, rendered for the chat
