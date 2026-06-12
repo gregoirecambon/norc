@@ -26,7 +26,8 @@ import { getNorcSettings } from '../lib/norc-settings.js';
 import { assist, type AssistSource } from '../lib/orchestrator-agent.js';
 import type { AgentRef } from '../lib/notion-mentions.js';
 import { getSlack as getSlackIntegration, isSlackActive, isSlackAnchor, parseSlackAnchor } from '../lib/slack-integration.js';
-import { ensureChannelMembership, resolveChannelRef, postAsAgent } from '../lib/slack-client.js';
+import path from 'node:path';
+import { ensureChannelMembership, resolveChannelRef, postAsAgent, uploadFileAsAgent } from '../lib/slack-client.js';
 import { notifySlackOnCompletion } from '../lib/slack-notify.js';
 import { slackChatContext } from '../lib/slack-orchestrator.js';
 import { agentSlackIcon } from '../lib/slack-agents.js';
@@ -141,6 +142,15 @@ const SlackBody = z.object({
   text: z.string().min(1),
   threadTs: z.string().optional(),
 });
+const SlackFileBody = z.object({
+  channel: z.string().min(1),
+  filename: z.string().min(1).max(200),
+  contentBase64: z.string().min(1),
+  text: z.string().optional(),
+  title: z.string().optional(),
+  threadTs: z.string().optional(),
+});
+const MAX_SLACK_FILE_BYTES = 10 * 1024 * 1024;
 
 export function makeRunsRouter(): ExpressRouter {
   const r: ExpressRouter = Router({ mergeParams: true });
@@ -242,6 +252,58 @@ export function makeRunsRouter(): ExpressRouter {
       res.json({ ok: true, channel: posted.channel, ts: posted.ts });
     } catch (err) {
       res.status(502).json({ error: 'slack_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // POST /api/runs/:token/slack-file  { channel, filename, contentBase64, text?, title?, threadTs? }
+  // Upload a file (image, PDF, …) into a Slack channel. The agent's file lives
+  // on ITS machine — it ships the bytes here base64-encoded and NORC forwards
+  // them through Slack's external-upload flow. File shares always render as
+  // the Norc app (Slack rule), with the agent named in the comment line.
+  r.post('/:token/slack-file', zodMiddleware(SlackFileBody), async (req, res) => {
+    const { run } = req as unknown as { run: TaskRun };
+    const { channel, filename, contentBase64, text, title, threadTs } = req.body as z.infer<typeof SlackFileBody>;
+    const slack = getSlackIntegration();
+    if (!slack.botToken || !isSlackActive()) {
+      res.status(503).json({ error: 'slack_not_active', message: 'Slack is not connected on this NORC install.' });
+      return;
+    }
+    const bytes = Buffer.from(contentBase64.replace(/\s+/g, ''), 'base64');
+    if (bytes.length === 0) {
+      res.status(400).json({ error: 'invalid_content', message: 'contentBase64 did not decode to any bytes.' });
+      return;
+    }
+    if (bytes.length > MAX_SLACK_FILE_BYTES) {
+      res.status(413).json({ error: 'too_large', message: `File is ${bytes.length} bytes — the limit is ${MAX_SLACK_FILE_BYTES} (10 MB).` });
+      return;
+    }
+    const safeName = path.basename(filename).replace(/[^\w.\- ]+/g, '_') || 'file';
+    try {
+      const resolved = await resolveChannelRef(slack.botToken, channel);
+      if (!resolved) {
+        res.status(404).json({ error: 'channel_not_found', message: `No channel matches "${channel}". Pass the channel id (C0123456789) or its exact name.` });
+        return;
+      }
+      const membership = await ensureChannelMembership(slack.botToken, resolved);
+      if (!membership.ok) {
+        res.status(403).json({ error: 'not_in_channel', message: membership.message });
+        return;
+      }
+      const { permalink } = await uploadFileAsAgent(slack.botToken, {
+        channel: resolved, bytes, filename: safeName,
+        title: title ?? null, text: text ?? null,
+        agentName: agentTag(run), threadTs: threadTs ?? null,
+      });
+      markActed(run.id);
+      emitLog(`agent API: file "${safeName}" (${Math.max(1, Math.round(bytes.length / 1024))} KB) posted to ${membership.name ? '#' + membership.name : channel} (run ${run.id})`, agentTag(run), run.pageId);
+      res.json({ ok: true, permalink });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'failed';
+      if (msg.includes('missing_scope')) {
+        res.status(403).json({ error: 'missing_scope', message: 'The Slack app lacks the files:write scope — the operator must reinstall it from the manifest. Post a text summary instead.' });
+        return;
+      }
+      res.status(502).json({ error: 'slack_error', message: msg });
     }
   });
 

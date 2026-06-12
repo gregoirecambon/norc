@@ -146,6 +146,24 @@ How to find the channel id, in order of preference:
 3. A channel id written in the task body itself (e.g. "post the summary to
    C0123456789").
 
+### Sending files (images, PDFs, …) to Slack
+
+Your files live on YOUR machine — NORC can't read your paths. Ship the bytes
+base64-encoded and NORC uploads them into the channel (rendered inline for
+images). Limit 10 MB per file. `text` becomes the message above the file;
+Slack shows file posts under the Norc app with your name in that line.
+
+```bash
+curl -s -X POST <api_base>/slack-file -H 'Content-Type: application/json' \
+  -d "{\"channel\":\"C0123456789\",\"filename\":\"contact-sheet.png\",
+       \"text\":\"ASO contact sheet — 7 panels, all 1242×2688\",
+       \"contentBase64\":\"$(base64 < /path/to/contact-sheet.png | tr -d '\n')\"}"
+```
+
+A `403 missing_scope` means this install's Slack app can't upload files yet —
+post a text summary instead and mention the file couldn't be attached. Never
+paste base64 or raw file contents into a normal text message.
+
 Rules: NORC joins **public** channels by itself when needed, so just post.
 **Private** channels can't be self-joined (Slack platform rule) — a
 `403 not_in_channel` means a member must `/invite @Norc` there: relay that to

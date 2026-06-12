@@ -57,7 +57,9 @@ app.use('/webhooks/notion', express.json({
 app.use('/webhooks/slack', express.json({
   verify: (req, _res, buf) => { (req as unknown as { rawBody?: Buffer }).rawBody = buf; },
 }));
-app.use(express.json());
+// 15mb: agents ship base64-encoded files through /api/runs/:token/slack-file
+// (10 MB file ≈ 13.7 MB encoded). Everything else stays tiny in practice.
+app.use(express.json({ limit: '15mb' }));
 
 // Health — also aliased at /api/health so the UI can reach it through the
 // Vite dev proxy (which only forwards /api/*).

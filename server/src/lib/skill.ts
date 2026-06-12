@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-export const NORC_SKILL_VERSION = 12;
+export const NORC_SKILL_VERSION = 13;
 
 // Vendored inside the server package (server/skills/…) so it ships in the Docker
 // image — the build context is ./server, so a repo-root path wouldn't be present.

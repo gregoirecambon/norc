@@ -162,6 +162,42 @@ export async function postAsAgent(token: string, opts: {
   }
 }
 
+/**
+ * Upload a file into a channel via Slack's external-upload flow (needs
+ * files:write). File shares always post as the app — username/icon overrides
+ * don't apply to them — so the agent's name is carried in the comment text.
+ */
+export async function uploadFileAsAgent(token: string, opts: {
+  channel: string;
+  bytes: Buffer;
+  filename: string;
+  title?: string | null;
+  text?: string | null;
+  agentName?: string | null;
+  threadTs?: string | null;
+}): Promise<{ fileId: string; permalink: string | null }> {
+  const ticket = await request<SlackOk & { upload_url: string; file_id: string }>(
+    token, 'files.getUploadURLExternal', { filename: opts.filename, length: opts.bytes.length });
+  const up = await fetch(ticket.upload_url, { method: 'POST', body: new Uint8Array(opts.bytes) });
+  await up.body?.cancel().catch(() => {});
+  if (!up.ok) throw new Error(`Slack file upload failed (${up.status})`);
+
+  const username = opts.agentName ? displayAgentName(opts.agentName) : null;
+  const body = opts.text?.trim() ?? '';
+  const comment = body
+    ? (username ? `*${username}:* ${body}` : body)
+    : (username ? `*${username}* shared a file` : null);
+  const threadTs = opts.threadTs && opts.threadTs !== 'dm' ? opts.threadTs : null;
+  const done = await request<SlackOk & { files?: Array<{ id: string; permalink?: string }> }>(
+    token, 'files.completeUploadExternal', {
+      files: [{ id: ticket.file_id, title: opts.title || opts.filename }],
+      channel_id: opts.channel,
+      ...(threadTs ? { thread_ts: threadTs } : {}),
+      ...(comment ? { initial_comment: comment } : {}),
+    });
+  return { fileId: ticket.file_id, permalink: done.files?.[0]?.permalink ?? null };
+}
+
 export interface SlackMessage {
   ts: string;
   threadTs: string | null;
