@@ -126,6 +126,9 @@ export async function ensureAgentUsergroup(agentId: string): Promise<UsergroupRe
 // Notion-hosted file icons are presigned S3 URLs that expire (~1h), so the
 // cache TTL stays well under that and a fresh URL is fetched per window.
 // Emoji icons map to the Twemoji CDN (Slack's icon_url wants an image URL).
+// All three Notion picker tabs are covered: Emoji (→ Twemoji), Icons (built-in
+// SVGs → rasterized, Slack rejects SVG avatars), Custom (uploaded file /
+// custom emoji → direct URL).
 
 const iconCache = new Map<string, { url: string | null; at: number }>();
 const ICON_TTL_MS = 10 * 60_000;
@@ -137,6 +140,21 @@ function twemojiUrl(emoji: string): string | null {
     .map(cp => cp.toString(16));
   if (codepoints.length === 0) return null;
   return `https://cdn.jsdelivr.net/gh/jdecked/twemoji@latest/assets/72x72/${codepoints.join('-')}.png`;
+}
+
+/**
+ * Slack's icon_url can't render SVG (Notion's built-in "Icons" tab serves
+ * .svg) — rasterize those through the wsrv.nl image CDN. Only public,
+ * credential-free URLs go through the proxy; presigned file URLs carry auth
+ * in their query string and stay direct (uploads are raster images anyway).
+ */
+export function slackSafeIconUrl(raw: string): string | null {
+  let u: URL;
+  try { u = new URL(raw); } catch { return null; }
+  if (!/^https?:$/.test(u.protocol)) return null;
+  if (!u.pathname.toLowerCase().endsWith('.svg')) return raw;
+  if (u.search) return null; // presigned/parameterized SVG — can't proxy safely
+  return `https://wsrv.nl/?url=${encodeURIComponent(u.host + u.pathname)}&output=png&w=128&h=128`;
 }
 
 /** The agent's Slack avatar URL (its Notion Org DB page icon), or null. */
@@ -151,15 +169,25 @@ export async function agentSlackIcon(agentId: string): Promise<string | null> {
   if (integration?.status === 'active') {
     try {
       const page = await notionGet<Record<string, unknown>>(integration.apiKey, `/pages/${agentRow.orgDbPageId}`);
+      if (page['in_trash'] === true || page['archived'] === true) {
+        emitLog(`agent "${agentRow.name}" Org DB page is in the Notion trash — no Slack avatar (re-sync the agent to recreate its page)`, 'Slack');
+      }
       const icon = page['icon'] as Record<string, unknown> | null;
       if (icon?.['type'] === 'external') {
         url = String((icon['external'] as Record<string, unknown>)?.['url'] ?? '') || null;
       } else if (icon?.['type'] === 'file') {
         url = String((icon['file'] as Record<string, unknown>)?.['url'] ?? '') || null;
+      } else if (icon?.['type'] === 'custom_emoji') {
+        url = String((icon['custom_emoji'] as Record<string, unknown>)?.['url'] ?? '') || null;
       } else if (icon?.['type'] === 'emoji' && typeof icon['emoji'] === 'string') {
         url = twemojiUrl(icon['emoji']);
       }
-    } catch { /* no icon — Slack falls back to the app avatar */ }
+      if (url) url = slackSafeIconUrl(url);
+    } catch (err) {
+      // No avatar — Slack falls back to the app icon. Loud, not silent: a
+      // dead page link or revoked share is invisible otherwise.
+      emitLog(`avatar lookup for "${agentRow.name}" failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Slack');
+    }
   }
   iconCache.set(agentRow.orgDbPageId, { url, at: Date.now() });
   return url;
