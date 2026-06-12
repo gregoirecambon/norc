@@ -32,7 +32,7 @@ import {
   requestAgentTurn, triageConfigured, rosterCandidates, matchAgentByName,
 } from './orchestrator.js';
 import { listOpenTasks, findBlockingSimilar } from './external-tasks.js';
-import { projectForChannel } from './slack-notify.js';
+import { projectForChannel, findProjectByName, listProjectNames } from './slack-notify.js';
 import { agentSlackIcon } from './slack-agents.js';
 import { createTaskPage, appendBlocks } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
@@ -235,7 +235,7 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   // Chat vs task — the triage LLM decides; on error/unconfigured default to
   // chat (never block a conversation).
   const settings = getNorcSettings();
-  let taskVerdict: { task: boolean; title?: string; kpis?: string } = { task: false };
+  let taskVerdict: { task: boolean; title?: string; kpis?: string; project?: string } = { task: false };
   if (triageConfigured(settings)) {
     try {
       taskVerdict = await classifyTaskWorthy({
@@ -247,6 +247,7 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
         title: isDm ? 'direct message' : `Slack channel ${ev.channel}`,
         text: request,
         conversation: thread.map(l => `${l.author}: ${l.text}`),
+        projects: await listProjectNames().catch(() => []),
       });
     } catch { /* stay chat */ }
   }
@@ -257,6 +258,7 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
       target, request, asker, thread,
       title: taskVerdict.title || request.slice(0, 80),
       kpis: taskVerdict.kpis ?? '',
+      projectHint: taskVerdict.project ?? null,
     });
     return;
   }
@@ -495,6 +497,14 @@ async function runSlackChatTurn(args: {
 
 // ─── Task lane: real Notion task from a Slack ask ───────────────────────────
 
+/** "for project lutai", "on the LutAI project", "projet pgt" → the name token. */
+export function extractProjectMention(text: string): string | null {
+  const m = text.match(/(?:project|projet)\s*[:\-]?\s*["'«]?([\w][\w\- .]{0,40}?)["'»]?(?=[,;.!?\n]|\s+(?:and|et|then|please|stp|svp)\b|$)/i)
+    ?? text.match(/(?:for|on|pour|sur)\s+(?:the\s+|le\s+|la\s+)?["'«]?([\w][\w\- .]{0,40}?)["'»]?\s+(?:project|projet)\b/i);
+  const name = m?.[1]?.trim();
+  return name && name.length >= 2 ? name : null;
+}
+
 async function handleTaskAsk(args: {
   botToken: string;
   channel: string;
@@ -505,8 +515,9 @@ async function handleTaskAsk(args: {
   thread: SlackThreadLine[];
   title: string;
   kpis: string;
+  projectHint?: string | null;
 }): Promise<void> {
-  const { botToken, channel, threadRoot, target, request, asker, thread, title, kpis } = args;
+  const { botToken, channel, threadRoot, target, request, asker, thread, title, kpis, projectHint } = args;
   const say = (text: string, agentName = 'NORC') =>
     postAsAgent(botToken, { channel, text, threadTs: threadRoot, agentName }).catch(() => undefined);
 
@@ -522,7 +533,15 @@ async function handleTaskAsk(args: {
     return;
   }
 
-  const project = await projectForChannel(channel);
+  // Project: an explicitly NAMED project (LLM extraction, then a keyword
+  // scan of the message) beats the channel binding — "generate X for project
+  // lutai" links to lutai even when asked from a general channel.
+  const named = projectHint ?? extractProjectMention(request);
+  const namedProject = named ? await findProjectByName(named) : null;
+  if (named && !namedProject) {
+    emitLog(`slack task: no project matches "${named}" — falling back to the channel binding`, 'Slack');
+  }
+  const project = namedProject ?? await projectForChannel(channel);
 
   // Duplicate gate (same as the out-of-band intake): "create anyway" in a
   // follow-up forces past it.
@@ -578,7 +597,7 @@ async function handleTaskAsk(args: {
   }
 
   if (target) {
-    await say(`Created <${url}|${title}> — @${target.name} is on it. I'll report back here.`);
+    await say(`Created <${url}|${title}>${project ? ` on *${project.block.name}*` : ''} — @${target.name} is on it. I'll report back here.`);
     await requestAgentTurn(integration, anchor, target, {
       thread: [],
       request,
@@ -597,7 +616,7 @@ async function handleTaskAsk(args: {
   const routed = await routeViaTriage(botToken, channel, threadRoot, `${title} — ${request}`, thread);
   if (routed) {
     markProcessed(`page:${pageId}:${routed.agentId}`);
-    await say(`Created <${url}|${title}> — @${routed.name} is on it. I'll report back here.`);
+    await say(`Created <${url}|${title}>${project ? ` on *${project.block.name}*` : ''} — @${routed.name} is on it. I'll report back here.`);
     await requestAgentTurn(integration, anchor, routed, {
       thread: [],
       request,

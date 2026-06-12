@@ -355,9 +355,11 @@ export interface ClassifyInput extends LLMConfig {
   title: string;
   text: string;
   conversation?: string[];
+  /** Known project names — lets the classifier pin "for project X" mentions. */
+  projects?: string[];
 }
 
-export type TaskWorthy = { task: boolean; title?: string; kpis?: string };
+export type TaskWorthy = { task: boolean; title?: string; kpis?: string; project?: string };
 
 const CLASSIFY_SYSTEM =
   'You decide whether a Notion comment/request is a trackable piece of WORK (something to DO that deserves ' +
@@ -368,13 +370,17 @@ const CLASSIFY_SYSTEM =
  * default: task=false (don't create spurious tasks if the LLM is unavailable). */
 export async function classifyTaskWorthy(input: ClassifyInput): Promise<TaskWorthy> {
   const convo = input.conversation?.length ? `\nConversation:\n${input.conversation.map(l => `- ${l}`).join('\n')}` : '';
+  const projectList = input.projects?.length ? `\nKnown projects: ${input.projects.join(', ')}` : '';
+  const projectField = input.projects?.length
+    ? `,"project":"<the project the request names, copied EXACTLY from the known list — empty if none is named>"`
+    : '';
   const prompt = [
     `Surface: ${input.kind} page "${input.title || '(untitled)'}"`,
-    `Request/comment: ${input.text || '(none)'}${convo}`,
+    `Request/comment: ${input.text || '(none)'}${convo}${projectList}`,
     ``,
     `Is this a trackable task (actionable work to do), or just a question/feedback?`,
     `Respond with ONLY JSON, no prose:`,
-    `{"task":true|false,"title":"<short imperative task title>","kpis":"<success criteria or empty>"}`,
+    `{"task":true|false,"title":"<short imperative task title>","kpis":"<success criteria or empty>"${projectField}}`,
   ].join('\n');
   const res = await callTriageLLM(input, CLASSIFY_SYSTEM, prompt);
   if (!res.ok || !res.text) return { task: false };
@@ -388,7 +394,8 @@ export function parseTaskWorthy(text: string): TaskWorthy {
   const task = obj['task'] === true;
   const title = typeof obj['title'] === 'string' ? obj['title'] : undefined;
   const kpis = typeof obj['kpis'] === 'string' ? obj['kpis'] : undefined;
-  return { task, ...(title ? { title } : {}), ...(kpis ? { kpis } : {}) };
+  const project = typeof obj['project'] === 'string' && obj['project'].trim() ? obj['project'].trim() : undefined;
+  return { task, ...(title ? { title } : {}), ...(kpis ? { kpis } : {}), ...(project ? { project } : {}) };
 }
 
 // ─── Duplicate-task judge: is an out-of-band request the SAME work as an open task? ───

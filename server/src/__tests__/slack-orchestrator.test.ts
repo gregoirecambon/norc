@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, beforeEach } from 'vitest';
 import { runMigrations, db } from '../db/client.js';
 import { agents } from '../db/schema.js';
-import { parseSlackMentions, slackAnchorId, isSlackAnchor, parseSlackAnchor } from '../lib/slack-orchestrator.js';
+import { parseSlackMentions, slackAnchorId, isSlackAnchor, parseSlackAnchor, extractProjectMention } from '../lib/slack-orchestrator.js';
 import { extractChannelId } from '../lib/slack-client.js';
 
 const BOT = 'U0BOT';
@@ -118,5 +118,23 @@ describe('extractChannelId', () => {
     expect(extractChannelId('app-lutai')).toBe(null);
     expect(extractChannelId('#app-lutai')).toBe(null);
     expect(extractChannelId('')).toBe(null);
+  });
+});
+
+describe('extractProjectMention', () => {
+  it('finds "project <name>"', () => {
+    expect(extractProjectMention('generate the ASO screens for project lutai please')).toBe('lutai');
+  });
+  it('finds "<name> project"', () => {
+    expect(extractProjectMention('do this on the LutAI project')).toBe('LutAI');
+  });
+  it('finds the French form', () => {
+    expect(extractProjectMention('génère ça pour le projet pgt')).toBe('pgt');
+  });
+  it('handles quoted names and trailing punctuation', () => {
+    expect(extractProjectMention('create a brief for project "Site v2", thanks')).toBe('Site v2');
+  });
+  it('returns null when no project is named', () => {
+    expect(extractProjectMention('generate a weekly summary and post it here')).toBeNull();
   });
 });

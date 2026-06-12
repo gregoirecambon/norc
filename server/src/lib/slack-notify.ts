@@ -18,6 +18,7 @@ import { agentSlackIcon } from './slack-agents.js';
 import { notionGet, notionQuery } from './notion-client.js';
 import { getRichText, getTitle } from './notion-props.js';
 import { alreadyProcessed, markProcessed } from './processed-triggers.js';
+import { titleSimilarity } from './task-similarity.js';
 import type { TaskRun } from './runs.js';
 import type { ProjectBlock } from './context-assembler.js';
 
@@ -46,6 +47,72 @@ export interface ChannelProject {
   block: ProjectBlock;
 }
 
+function rowToProject(row: Record<string, unknown>): ChannelProject {
+  const pp = row['properties'];
+  return {
+    projectId: String(row['id'] ?? ''),
+    block: {
+      name: getTitle(pp, 'Name'),
+      objective: getRichText(pp, 'Objective'),
+      kpis: getRichText(pp, 'KPIs'),
+      docs: getRichText(pp, 'Docs'),
+      slackChannelId: getRichText(pp, 'Slack Channel ID').trim(),
+    },
+  };
+}
+
+async function listProjects(): Promise<ChannelProject[]> {
+  const integration = db.select().from(notionIntegration).all()[0];
+  if (!integration || integration.status !== 'active') return [];
+  const projectsDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'projects')).all()[0];
+  if (!projectsDb) return [];
+  try {
+    const res = await notionQuery<Record<string, unknown>>(integration.apiKey, projectsDb.notionDatabaseId, { page_size: 100 });
+    const rows = (Array.isArray(res['results']) ? res['results'] : []) as Record<string, unknown>[];
+    return rows.map(rowToProject).filter(p => p.block.name);
+  } catch {
+    return [];
+  }
+}
+
+// Project names change rarely; the cache keeps Slack-message classification
+// from querying Notion on every single mention.
+let projectCache: { at: number; projects: ChannelProject[] } | null = null;
+const PROJECT_CACHE_TTL_MS = 5 * 60_000;
+
+async function cachedProjects(): Promise<ChannelProject[]> {
+  if (projectCache && Date.now() - projectCache.at < PROJECT_CACHE_TTL_MS) return projectCache.projects;
+  const projects = await listProjects();
+  projectCache = { at: Date.now(), projects };
+  return projects;
+}
+
+/** Project names for prompt context (e.g. the Slack task classifier). */
+export async function listProjectNames(): Promise<string[]> {
+  return (await cachedProjects()).map(p => p.block.name);
+}
+
+/**
+ * Resolve a project the human NAMED in a message ("…for project lutai").
+ * Exact title match first, then containment, then token similarity — null
+ * when nothing is confidently close (callers fall back to channel binding).
+ */
+export async function findProjectByName(name: string): Promise<ChannelProject | null> {
+  const wanted = name.trim().toLowerCase();
+  if (!wanted) return null;
+  const projects = await cachedProjects();
+  let best: ChannelProject | null = null;
+  let bestScore = 0;
+  for (const p of projects) {
+    const title = p.block.name.trim().toLowerCase();
+    const score = title === wanted ? 1
+      : title.includes(wanted) || wanted.includes(title) ? 0.85
+      : titleSimilarity(p.block.name, name);
+    if (score > bestScore) { best = p; bestScore = score; }
+  }
+  return bestScore >= 0.55 ? best : null;
+}
+
 /** Reverse lookup: the Notion project whose 'Slack Channel ID' is this channel. */
 export async function projectForChannel(channel: string): Promise<ChannelProject | null> {
   const integration = db.select().from(notionIntegration).all()[0];
@@ -59,17 +126,7 @@ export async function projectForChannel(channel: string): Promise<ChannelProject
     });
     const row = (Array.isArray(res['results']) ? res['results'] : [])[0] as Record<string, unknown> | undefined;
     if (!row) return null;
-    const pp = row['properties'];
-    return {
-      projectId: String(row['id'] ?? ''),
-      block: {
-        name: getTitle(pp, 'Name'),
-        objective: getRichText(pp, 'Objective'),
-        kpis: getRichText(pp, 'KPIs'),
-        docs: getRichText(pp, 'Docs'),
-        slackChannelId: channel,
-      },
-    };
+    return rowToProject(row);
   } catch {
     return null;
   }
