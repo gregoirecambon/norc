@@ -12,6 +12,7 @@ import { emitLog } from './logger.js';
 import { getSlack } from './slack-integration.js';
 import { slackPost, displayAgentName, type SlackOk } from './slack-client.js';
 import { notionGet } from './notion-client.js';
+import { norcBaseUrl } from './base-url.js';
 
 export interface UsergroupResult {
   ok: boolean;
@@ -157,8 +158,12 @@ export function slackSafeIconUrl(raw: string): string | null {
   return `https://wsrv.nl/?url=${encodeURIComponent(u.host + u.pathname)}&output=png&w=128&h=128`;
 }
 
-/** The agent's Slack avatar URL (its Notion Org DB page icon), or null. */
-export async function agentSlackIcon(agentId: string): Promise<string | null> {
+/**
+ * Upstream image URL for the agent's Notion page icon (Twemoji PNG, wsrv-
+ * rasterized built-in, presigned file, custom emoji), or null. NORC fetches
+ * this itself — Slack never sees it (see agentSlackIcon).
+ */
+export async function resolveAgentIconSource(agentId: string): Promise<string | null> {
   const agentRow = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
   if (!agentRow?.orgDbPageId) return null;
   const hit = iconCache.get(agentRow.orgDbPageId);
@@ -191,6 +196,23 @@ export async function agentSlackIcon(agentId: string): Promise<string | null> {
   }
   iconCache.set(agentRow.orgDbPageId, { url, at: Date.now() });
   return url;
+}
+
+/**
+ * The icon_url handed to Slack: NORC's own public /icons endpoint, never the
+ * upstream URL. Slack's argument validator rejects exotic URLs (presigned S3
+ * query strings and the like) with invalid_arguments, killing the whole
+ * customized post — a short queryless self-hosted URL always passes, and the
+ * server fetches/converts the real image behind it.
+ */
+export async function agentSlackIcon(agentId: string): Promise<string | null> {
+  const source = await resolveAgentIconSource(agentId);
+  if (!source) return null;
+  const base = norcBaseUrl();
+  // Slack can only fetch over the public internet — a localhost/.local dev
+  // base would bounce the whole post again, so skip the icon there.
+  if (/localhost|127\.0\.0\.1|\.local\b/.test(base)) return null;
+  return `${base}/icons/agents/${agentId}.png`;
 }
 
 /** Disable (never delete) the agent's user group — the mapping survives so

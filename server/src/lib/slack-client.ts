@@ -71,7 +71,11 @@ async function request<T extends SlackOk>(
         await sleep(Math.min(8, 2 ** attempt) * 1000);
         continue;
       }
-      throw new Error(`Slack ${method} failed: ${json.error ?? 'unknown_error'}`);
+      // invalid_arguments & friends name the offending field in
+      // response_metadata.messages — keep that, it's the whole diagnosis.
+      const meta = (json as { response_metadata?: { messages?: string[] } }).response_metadata;
+      const detail = meta?.messages?.length ? ` — ${meta.messages.join('; ')}` : '';
+      throw new Error(`Slack ${method} failed: ${json.error ?? 'unknown_error'}${detail}`);
     }
     return json;
   }
@@ -143,7 +147,8 @@ export async function postAsAgent(token: string, opts: {
   } catch (err) {
     if (!customized) throw err;
     const msg = err instanceof Error ? err.message : String(err);
-    emitLog(`customized Slack post rejected (${msg})${username ? ` for "${username}"` : ''} — ${msg.includes('missing_scope') ? 'the app token lacks chat:write.customize; reinstall the Slack app from the manifest' : 'retrying without the icon'}`, 'Slack');
+    const sentIcon = opts.iconUrl ?? opts.iconEmoji ?? null;
+    emitLog(`customized Slack post rejected (${msg})${username ? ` for "${username}"` : ''}${sentIcon ? ` [icon: ${sentIcon}]` : ''} — ${msg.includes('missing_scope') ? 'the app token lacks chat:write.customize; reinstall the Slack app from the manifest' : 'retrying without the icon'}`, 'Slack');
     if (username && Object.keys(icon).length > 0 && !msg.includes('missing_scope')) {
       try {
         const r = await post({ username });

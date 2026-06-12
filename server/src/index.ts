@@ -24,6 +24,7 @@ import { notionRouter } from './routes/notion.js';
 import { notionWebhookRouter } from './routes/notionWebhook.js';
 import { slackRouter } from './routes/slack.js';
 import { slackWebhookRouter } from './routes/slackWebhook.js';
+import { iconsRouter } from './routes/icons.js';
 import { makeRunsRouter } from './routes/runs.js';
 import { makeTasksRouter } from './routes/tasks.js';
 import { skillRouter } from './routes/skill.js';
@@ -96,6 +97,8 @@ app.use('/api/team', teamRouter);
 app.use('/api/version', versionRouter);
 app.use('/webhooks/notion', notionWebhookRouter);
 app.use('/webhooks/slack', slackWebhookRouter);
+// Public like the webhooks: Slack fetches agent avatars here with no credentials.
+app.use('/icons', iconsRouter);
 
 // Drop expired dashboard sessions hourly.
 setInterval(() => pruneExpiredSessions(), 3600_000);
