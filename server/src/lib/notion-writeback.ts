@@ -231,6 +231,13 @@ export async function setTaskAssignee(apiKey: string, taskPageId: string, orgDbP
   });
 }
 
+/** Link (or, with null, unlink) a Task page's "Project" relation. */
+export async function setTaskProject(apiKey: string, taskPageId: string, projectId: string | null): Promise<void> {
+  await notionPatch(apiKey, `/pages/${taskPageId}`, {
+    properties: { 'Project': { relation: projectId ? [{ id: projectId }] : [] } },
+  });
+}
+
 export interface TaskFields {
   agentOutput?: string;
   lastCheckpoint?: string;

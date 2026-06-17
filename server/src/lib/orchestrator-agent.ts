@@ -398,6 +398,64 @@ export function parseTaskWorthy(text: string): TaskWorthy {
   return { task, ...(title ? { title } : {}), ...(kpis ? { kpis } : {}), ...(project ? { project } : {}) };
 }
 
+// ─── Project inference: which project does this work belong to? ───────────────
+// The LAST resort in the Slack project-resolution cascade (after the channel
+// binding and the channel-name match): a calibrated guess from the request +
+// conversation, used ONLY when confidence clears a high bar so a soft topical
+// overlap never silently mis-assigns work to the wrong project.
+
+export interface InferProjectInput extends LLMConfig {
+  title: string;
+  text: string;
+  conversation?: string[];
+  /** The originating Slack channel's human name, when known (a strong cue). */
+  channelName?: string | null;
+  /** Candidate project names — the model must pick EXACTLY one or null. */
+  projects: string[];
+}
+
+export type ProjectInference = { project: string | null; confidence: number };
+
+const INFER_PROJECT_SYSTEM =
+  'You map an incoming work request to the SINGLE project it belongs to, chosen from a fixed list. ' +
+  'Decide ONLY from concrete evidence: a product/app/feature name in the request or conversation, the ' +
+  'Slack channel name, or an explicit project mention. Do NOT guess from vague topical overlap. Your ' +
+  'confidence is a calibration promise: use 0.9 or above ONLY when the evidence names the project ' +
+  'unmistakably (you can point to the exact word); under any genuine doubt, stay well below 0.9. If no ' +
+  'project clearly fits, return project null. Never invent a name that is not in the list.';
+
+/** Infer the project for a piece of work, with a calibrated confidence. Safe
+ * default: {project:null, confidence:0} when the LLM is unavailable/unparseable
+ * or no candidates exist — the caller then asks a human. */
+export async function inferProjectForTask(input: InferProjectInput): Promise<ProjectInference> {
+  if (!input.projects.length) return { project: null, confidence: 0 };
+  const convo = input.conversation?.length
+    ? `\nConversation:\n${input.conversation.map(l => `- ${l}`).join('\n')}`
+    : '';
+  const prompt = [
+    `Slack channel: ${input.channelName ? `#${input.channelName}` : '(name unknown)'}`,
+    `Request: ${input.text || '(none)'}`,
+    `Title: ${input.title || '(untitled)'}${convo}`,
+    `Known projects (choose EXACTLY one of these names, or null): ${input.projects.join(', ')}`,
+    ``,
+    `Which project does this work belong to? Respond with ONLY JSON, no prose:`,
+    `{"project":"<exact name from the list, or null>","confidence":<number 0..1>}`,
+  ].join('\n');
+  const res = await callTriageLLM(input, INFER_PROJECT_SYSTEM, prompt);
+  if (!res.ok || !res.text) return { project: null, confidence: 0 };
+  return parseProjectInference(res.text);
+}
+
+/** Parse the project-inference JSON; anything unparseable → no project. */
+export function parseProjectInference(text: string): ProjectInference {
+  const obj = extractJson(text);
+  if (!obj) return { project: null, confidence: 0 };
+  const raw = typeof obj['project'] === 'string' ? obj['project'].trim() : '';
+  const project = raw && raw.toLowerCase() !== 'null' ? raw : null;
+  const confidence = typeof obj['confidence'] === 'number' ? Math.max(0, Math.min(1, obj['confidence'])) : 0;
+  return { project, confidence };
+}
+
 // ─── Duplicate-task judge: is an out-of-band request the SAME work as an open task? ───
 
 export interface JudgeSimilarityInput extends LLMConfig {

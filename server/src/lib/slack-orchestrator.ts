@@ -27,14 +27,14 @@ import type { AdapterType } from '../types.js';
 import { agentPersona, projectSection, assembleWithBudget, type Section } from './context-assembler.js';
 import { norcBaseUrl } from './base-url.js';
 import { getNorcSettings } from './norc-settings.js';
-import { triage, classifyTaskWorthy } from './orchestrator-agent.js';
+import { triage, classifyTaskWorthy, inferProjectForTask } from './orchestrator-agent.js';
 import {
   requestAgentTurn, triageConfigured, rosterCandidates, matchAgentByName,
 } from './orchestrator.js';
 import { listOpenTasks, findBlockingSimilar } from './external-tasks.js';
-import { projectForChannel, findProjectByName, listProjectNames } from './slack-notify.js';
+import { projectForChannel, findProjectByName, listProjectNames, type ChannelProject } from './slack-notify.js';
 import { agentSlackIcon } from './slack-agents.js';
-import { createTaskPage, appendBlocks } from './notion-writeback.js';
+import { createTaskPage, appendBlocks, setTaskProject } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
 import { resolveAnchor } from './notion-anchor.js';
 import { getSelect } from './notion-props.js';
@@ -223,21 +223,33 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   // thread is ignored.
   let target: AgentRef | null = parsed.agents[0] ?? null;
   if (!target) target = continuationAgent(ev.channel, threadRoot);
-  if (!target && !parsed.norc) return;
 
   const request = parsed.request || '(no message text)';
+
+  // A thread reply can continue an existing conversation even when the human
+  // didn't re-tag anyone — so a bare "PGT v2.0" still lands. Handle these BEFORE
+  // the "addressed to us?" guard; both no-op (return false) unless they match a
+  // real task in this thread, so they never swallow ordinary chatter.
+  //   • resumeThreadTask    — the thread's task is parked Blocked → answer it
+  //   • relinkProjectFromReply — we asked "which project?" → apply the answer
+  if (isThreadReply) {
+    const replier = await displayName(slack.botToken, ev.user);
+    if (await resumeThreadTask({
+      botToken: slack.botToken, channel: ev.channel, threadRoot, target, request, asker: replier,
+    })) return;
+    if (await relinkProjectFromReply({
+      botToken: slack.botToken, channel: ev.channel, threadRoot, request,
+    })) return;
+  }
+
+  if (!target && !parsed.norc) return;
+
   emitLog(`slack ${isDm ? 'DM' : `message in ${ev.channel}`}${target ? ` → @${target.name}` : parsed.norc ? ' → NORC' : ''}: ${request.slice(0, 140)}`, 'Slack');
 
   // Thread replies carry their thread as context; a top-level message stands
   // alone (it OPENS the conversation — nothing precedes it).
   const thread = isThreadReply ? await threadLines(slack.botToken, ev.channel, threadRoot, ev.ts) : [];
   const asker = await displayName(slack.botToken, ev.user);
-
-  // A reply into a thread whose task is parked Blocked answers THAT task —
-  // resume it (same page, same session) instead of classifying a new ask.
-  if (isThreadReply && await resumeThreadTask({
-    botToken: slack.botToken, channel: ev.channel, threadRoot, target, request, asker,
-  })) return;
 
   // Chat vs task — the triage LLM decides; on error/unconfigured default to
   // chat (never block a conversation).
@@ -265,7 +277,6 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
       target, request, asker, thread,
       title: taskVerdict.title || request.slice(0, 80),
       kpis: taskVerdict.kpis ?? '',
-      projectHint: taskVerdict.project ?? null,
     });
     return;
   }
@@ -573,6 +584,152 @@ export function extractProjectMention(text: string): string | null {
   return name && name.length >= 2 ? name : null;
 }
 
+// ─── Project resolution: which project does a Slack task belong to? ───────────
+// The channel binding is the source of truth. A deliberate, explicit "for
+// project X" in the message is the ONLY thing allowed to override it; soft LLM
+// inference never does (that was the LutAI/PGT mis-assignment). Cascade:
+//   1. explicit       — "…for project X" names a project that resolves
+//   2. channel-binding — the channel's 'Slack Channel ID' in the Projects DB
+//   3. channel-name    — the Slack channel name fuzzy-matches a project name
+//   4. ai-inference    — a calibrated LLM guess, accepted only at confidence ≥ 0.9
+//   5. none            — nothing confident → create unlinked and ASK in-thread
+
+export type ProjectSource = 'explicit' | 'channel-binding' | 'channel-name' | 'ai-inference' | 'none';
+export interface ResolvedProject {
+  project: ChannelProject | null;
+  source: ProjectSource;
+}
+
+const AI_PROJECT_CONFIDENCE = 0.9;
+
+async function resolveSlackProject(args: {
+  botToken: string;
+  channel: string;
+  request: string;
+  title: string;
+  thread: SlackThreadLine[];
+}): Promise<ResolvedProject> {
+  const { botToken, channel, request, title, thread } = args;
+
+  // 1. Explicit, deliberate naming in the text — the one override of the binding.
+  const explicit = extractProjectMention(request);
+  if (explicit) {
+    const named = await findProjectByName(explicit);
+    if (named) return { project: named, source: 'explicit' };
+    emitLog(`slack project: message names "${explicit}" but no project matches — falling back to the channel`, 'Slack');
+  }
+
+  // 2. Channel binding — the primary, deterministic signal.
+  const bound = await projectForChannel(channel);
+  if (bound) return { project: bound, source: 'channel-binding' };
+
+  // 3. Channel NAME fuzzy match — e.g. #app-lutai → "lutai".
+  const info = await conversationsInfo(botToken, channel).catch(() => null);
+  if (info?.name) {
+    const byName = await findProjectByName(info.name);
+    if (byName) {
+      emitLog(`slack project: channel #${info.name} (${channel}) is not bound — matched project "${byName.block.name}" by name`, 'Slack');
+      return { project: byName, source: 'channel-name' };
+    }
+  }
+
+  // 4. AI inference from the full context — accepted only when very confident.
+  const settings = getNorcSettings();
+  if (triageConfigured(settings)) {
+    const projects = await listProjectNames().catch(() => []);
+    if (projects.length) {
+      try {
+        const inf = await inferProjectForTask({
+          provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+          apiKey: settings!.orchestratorApiKey ?? '',
+          baseUrl: settings!.orchestratorBaseUrl,
+          model: settings!.orchestratorModel,
+          title, text: request,
+          conversation: thread.map(l => `${l.author}: ${l.text}`),
+          channelName: info?.name ?? null,
+          projects,
+        });
+        if (inf.project && inf.confidence >= AI_PROJECT_CONFIDENCE) {
+          const guessed = await findProjectByName(inf.project);
+          if (guessed) {
+            emitLog(`slack project: inferred "${guessed.block.name}" for ${channel} (confidence ${inf.confidence.toFixed(2)})`, 'Slack');
+            return { project: guessed, source: 'ai-inference' };
+          }
+        } else if (inf.project) {
+          emitLog(`slack project: low-confidence guess "${inf.project}" (${inf.confidence.toFixed(2)}) for ${channel} — asking instead`, 'Slack');
+        }
+      } catch { /* fall through to ask */ }
+    }
+  }
+
+  // 5. Nothing confident — caller creates the task unlinked and asks in-thread.
+  return { project: null, source: 'none' };
+}
+
+// Threads where NORC asked "which project?" and is waiting for the human's
+// answer → the unlinked task to relink. In-memory + TTL: a project answer is a
+// near-immediate follow-up; losing the pending marker across a restart just
+// means the human re-states the project (or links it in Notion).
+const pendingProjectAsk = new Map<string, { taskPageId: string; at: number }>();
+const PENDING_PROJECT_TTL_MS = 60 * 60_000;
+
+function pendingKey(channel: string, threadRoot: string): string {
+  return `${channel}:${threadRoot}`;
+}
+
+const NO_PROJECT_REPLY =
+  /\b(no project|none|nope|sans projet|aucun projet|pas de projet|leave it|unlinked|skip)\b/i;
+
+/**
+ * A thread reply answering NORC's "which project?" question. Relinks the
+ * earlier unlinked task to the named project (updating Notion + the run rows so
+ * completion summaries route to the project channel), or confirms it stays
+ * unlinked. Returns true when it handled the turn; false (no pending ask, or the
+ * reply doesn't name a project) lets the normal chat/task lanes take it.
+ */
+async function relinkProjectFromReply(args: {
+  botToken: string;
+  channel: string;
+  threadRoot: string;
+  request: string;
+}): Promise<boolean> {
+  const { botToken, channel, threadRoot, request } = args;
+  const key = pendingKey(channel, threadRoot);
+  const pending = pendingProjectAsk.get(key);
+  if (!pending) return false;
+  if (Date.now() - pending.at > PENDING_PROJECT_TTL_MS) { pendingProjectAsk.delete(key); return false; }
+
+  const say = (text: string) =>
+    postAsAgent(botToken, { channel, threadTs: threadRoot, agentName: 'NORC', text }).catch(() => undefined);
+
+  // "no project" / "none" → stop asking, leave it unlinked.
+  if (NO_PROJECT_REPLY.test(request)) {
+    pendingProjectAsk.delete(key);
+    await say('Got it — leaving this one with no project.');
+    return true;
+  }
+
+  // Does the reply name a project? Try an explicit "project X", then the whole
+  // reply (catches a bare name or "it's PGT v2.0"). No match → not an answer.
+  const candidate = extractProjectMention(request) ?? request.trim();
+  const project = candidate ? await findProjectByName(candidate) : null;
+  if (!project) return false;
+
+  pendingProjectAsk.delete(key);
+  const integration = db.select().from(notionIntegration).all()[0];
+  if (integration?.status === 'active') {
+    await setTaskProject(integration.apiKey, pending.taskPageId, project.projectId).catch(() => undefined);
+  }
+  // Keep the run rows in step: projectId drives completion routing + serialization.
+  db.update(taskRuns).set({ projectId: project.projectId })
+    .where(eq(taskRuns.taskPageId, pending.taskPageId)).run();
+
+  const url = `https://www.notion.so/${pending.taskPageId.replace(/-/g, '')}`;
+  emitLog(`slack: relinked task to project "${project.block.name}" from thread reply`, 'Slack', pending.taskPageId);
+  await say(`Linked <${url}|the task> to *${project.block.name}*.`);
+  return true;
+}
+
 async function handleTaskAsk(args: {
   botToken: string;
   channel: string;
@@ -583,9 +740,8 @@ async function handleTaskAsk(args: {
   thread: SlackThreadLine[];
   title: string;
   kpis: string;
-  projectHint?: string | null;
 }): Promise<void> {
-  const { botToken, channel, threadRoot, target, request, asker, thread, title, kpis, projectHint } = args;
+  const { botToken, channel, threadRoot, target, request, asker, thread, title, kpis } = args;
   const say = (text: string, agentName = 'NORC') =>
     postAsAgent(botToken, { channel, text, threadTs: threadRoot, agentName }).catch(() => undefined);
 
@@ -601,15 +757,11 @@ async function handleTaskAsk(args: {
     return;
   }
 
-  // Project: an explicitly NAMED project (LLM extraction, then a keyword
-  // scan of the message) beats the channel binding — "generate X for project
-  // lutai" links to lutai even when asked from a general channel.
-  const named = projectHint ?? extractProjectMention(request);
-  const namedProject = named ? await findProjectByName(named) : null;
-  if (named && !namedProject) {
-    emitLog(`slack task: no project matches "${named}" — falling back to the channel binding`, 'Slack');
-  }
-  const project = namedProject ?? await projectForChannel(channel);
+  // Resolve the project by the binding-first cascade (channel binding is the
+  // source of truth; only an explicit "for project X" overrides it; an
+  // unconfident result links nothing and we ASK below). See resolveSlackProject.
+  const resolved = await resolveSlackProject({ botToken, channel, request, title, thread });
+  const project = resolved.project;
 
   // Duplicate gate (same as the out-of-band intake): "create anyway" in a
   // follow-up forces past it.
@@ -654,7 +806,15 @@ async function handleTaskAsk(args: {
   markProcessed(`triage:${pageId}`);
   if (target) markProcessed(`page:${pageId}:${target.agentId}`);
 
-  emitLog(`slack task created: "${title}"${target ? ` → @${target.name}` : ''}${project ? ` (project ${project.block.name})` : ''}`, 'Slack', pageId);
+  emitLog(`slack task created: "${title}"${target ? ` → @${target.name}` : ''}${project ? ` (project ${project.block.name}, via ${resolved.source})` : ' (no project)'}`, 'Slack', pageId);
+
+  // Couldn't confidently resolve a project: the task runs unlinked, and we ask
+  // the thread to name one (relinkProjectFromReply applies the answer).
+  let askLine = '';
+  if (resolved.source === 'none') {
+    pendingProjectAsk.set(pendingKey(channel, threadRoot), { taskPageId: pageId, at: Date.now() });
+    askLine = `\n_I couldn't match this to a project — reply with a project name to link it, or "no project" to leave it unlinked._`;
+  }
 
   let anchor;
   try {
@@ -665,7 +825,7 @@ async function handleTaskAsk(args: {
   }
 
   if (target) {
-    await say(`Created <${url}|${title}>${project ? ` on *${project.block.name}*` : ''} — @${target.name} is on it. I'll report back here.`);
+    await say(`Created <${url}|${title}>${project ? ` on *${project.block.name}*` : ''} — @${target.name} is on it. I'll report back here.${askLine}`);
     await requestAgentTurn(integration, anchor, target, {
       thread: [],
       request,
@@ -684,7 +844,7 @@ async function handleTaskAsk(args: {
   const routed = await routeViaTriage(botToken, channel, threadRoot, `${title} — ${request}`, thread);
   if (routed) {
     markProcessed(`page:${pageId}:${routed.agentId}`);
-    await say(`Created <${url}|${title}>${project ? ` on *${project.block.name}*` : ''} — @${routed.name} is on it. I'll report back here.`);
+    await say(`Created <${url}|${title}>${project ? ` on *${project.block.name}*` : ''} — @${routed.name} is on it. I'll report back here.${askLine}`);
     await requestAgentTurn(integration, anchor, routed, {
       thread: [],
       request,
@@ -699,5 +859,5 @@ async function handleTaskAsk(args: {
   }
   // Triage already explained itself in the thread; the task waits in Backlog —
   // assigning an agent in Notion dispatches it normally.
-  await say(`The task is parked at <${url}|${title}> — assign an agent there (or tag one here) to start it.`);
+  await say(`The task is parked at <${url}|${title}> — assign an agent there (or tag one here) to start it.${askLine}`);
 }

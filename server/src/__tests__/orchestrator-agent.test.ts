@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { parseDecision, parseAssessment, parseTaskWorthy, parseBusinessTasks, openaiEndpoint, buildTriagePrompt, rosterBlock, type TriageCandidate, type TriageInput } from '../lib/orchestrator-agent.js';
+import { parseDecision, parseAssessment, parseTaskWorthy, parseProjectInference, parseBusinessTasks, openaiEndpoint, buildTriagePrompt, rosterBlock, type TriageCandidate, type TriageInput } from '../lib/orchestrator-agent.js';
 
 describe('openaiEndpoint', () => {
   it('appends /v1/chat/completions to a bare host', () => {
@@ -184,6 +184,27 @@ describe('parseTaskWorthy', () => {
   it('defaults to not-a-task on false or garbage', () => {
     expect(parseTaskWorthy('{"task":false}').task).toBe(false);
     expect(parseTaskWorthy('no json here').task).toBe(false);
+  });
+});
+
+describe('parseProjectInference', () => {
+  it('parses a confident project pick', () => {
+    const r = parseProjectInference('{"project":"PGT v2.0","confidence":0.95}');
+    expect(r).toEqual({ project: 'PGT v2.0', confidence: 0.95 });
+  });
+
+  it('clamps confidence and tolerates surrounding prose', () => {
+    expect(parseProjectInference('here:\n{"project":"lutai","confidence":1.4}\n')).toEqual({ project: 'lutai', confidence: 1 });
+  });
+
+  it('treats a null/empty project as no match', () => {
+    expect(parseProjectInference('{"project":null,"confidence":0.2}')).toEqual({ project: null, confidence: 0.2 });
+    expect(parseProjectInference('{"project":"null","confidence":0.3}')).toEqual({ project: null, confidence: 0.3 });
+    expect(parseProjectInference('{"project":"","confidence":0.1}')).toEqual({ project: null, confidence: 0.1 });
+  });
+
+  it('defaults to no match on garbage', () => {
+    expect(parseProjectInference('not json')).toEqual({ project: null, confidence: 0 });
   });
 });
 
