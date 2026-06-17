@@ -1166,7 +1166,7 @@ export async function releaseDependents(integration: Integration, completedTaskP
         markProcessed(`page:${depTaskId}:${agent.agentId}`); // handled here — later edits must not double-fire
         await requestAgentTurn(integration, anchor, agent, {
           thread: [],
-          request: 'A task this one depends on is now complete, so this task is unblocked. Complete it using the context above and report your result.',
+          request: 'A task this one depends on is now complete, so this task is unblocked. Its results — text and any files/images it produced — are in the [DEPENDENCIES] section of your context above; build directly on them. Complete this task and report your result.',
           manageTaskStatus: true, how: 'dependency release',
         });
       }

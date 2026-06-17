@@ -243,7 +243,7 @@ describe('buildPrompt', () => {
     });
     expect(prompt).not.toContain('[TASK]');
     expect(prompt).not.toContain('[CONVERSATION SO FAR]');
-    expect(prompt).not.toContain('[AVAILABLE AGENTS]');
+    expect(prompt).not.toContain('[OTHER AGENTS]');
     expect(prompt).toContain('[REQUEST]\nhello');
   });
 });

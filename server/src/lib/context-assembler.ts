@@ -16,6 +16,7 @@ import { notionDatabases } from '../db/schema.js';
 import { notionGet, notionQuery } from './notion-client.js';
 import { getTitle, getRichText, getSelect, getRelationIds, getAnyTitle } from './notion-props.js';
 import { readPageMarkdown, listChildResources, normalizeId, type Anchor, type ResourceRef } from './notion-anchor.js';
+import { resolveDependencyContext, type DependencyContext } from './task-deps.js';
 import { tokenize, titleSimilarity } from './task-similarity.js';
 import { emitLog } from './logger.js';
 import type { AgentRef } from './notion-mentions.js';
@@ -81,6 +82,10 @@ export interface AssembledContext {
   projectBlock: ProjectBlock | null;
   companyBlocks: CompanyBlock[];
   relatedBlocks: RelatedBlock[];
+  /** Handed-off context from the task's "Depends On" predecessors (task anchors
+   * only) — each predecessor's summary, full body, and artifacts. Available at
+   * every clearance level: a dependency's result is intrinsic task input. */
+  dependencyBlocks: DependencyContext[];
   /** Sub-pages/databases under the anchor + project page, each with its id, so the
    * agent can pull any of them in full via /page?pageId=<id>. */
   projectResources: ResourceRef[];
@@ -193,6 +198,14 @@ export async function assembleContext(args: {
     ? await resolveRelatedBlocks(apiKey, projectProps)
     : [];
 
+  // Predecessor hand-off: what the task's "Depends On" tasks produced (summary +
+  // full body text + image/file artifacts). Always resolved for task anchors,
+  // regardless of clearance — a dependency's result is the task's own input, not
+  // project/strategic enrichment.
+  const dependencyBlocks = anchor.kind === 'task'
+    ? await resolveDependencyContext(apiKey, (anchor.page as Record<string, unknown>)['properties'])
+    : [];
+
   // The anchor page's actual written content — the single biggest context gain.
   // Best-effort: an unreadable body just yields properties-only context.
   let bodyMarkdown = '';
@@ -252,11 +265,13 @@ export async function assembleContext(args: {
     }
   }
 
-  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody });
+  const fingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, dependencyBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody });
   // Narrow fingerprint: durable framing only (no body/resources), so session reuse
   // survives task-body edits and rebuilds only when the agent's framing changes.
-  const sessionFingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks });
-  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody, fingerprint, sessionFingerprint };
+  // Dependency hand-off IS framing — a completed/changed predecessor should
+  // refresh the session, so it's included here.
+  const sessionFingerprint = fingerprintOf({ systemPrompt, contextLevel, projectBlock, companyBlocks, relatedBlocks, dependencyBlocks });
+  return { contextLevel, systemPrompt, taskBlock, projectBlock, companyBlocks, relatedBlocks, dependencyBlocks, projectResources, inlinedResources, bodyMarkdown, projectBody, fingerprint, sessionFingerprint };
 }
 
 /**
@@ -495,6 +510,17 @@ export function buildPrompt(args: {
     push(lines.join('\n'), 1);
   }
 
+  // What the task's predecessors handed off — text + images to build on. High
+  // keep-priority (it's required input), just below [TASK] itself.
+  if (ctx.dependencyBlocks && ctx.dependencyBlocks.length > 0) {
+    push(
+      `[DEPENDENCIES]\nResults handed off from the task(s) this one depends on — build directly on these. ` +
+      `Image/file URLs are fetchable (curl) and embeddable; Notion links are short-lived, so use them now ` +
+      `or re-fetch a fresh one via GET <api_base>/page?pageId=<id>.\n${dependencySection(ctx.dependencyBlocks)}`,
+      1,
+    );
+  }
+
   // The page's actual written body — rich but bulky, so a lower priority.
   if (ctx.bodyMarkdown && ctx.bodyMarkdown.trim()) {
     push(`[PAGE CONTENT]\n${ctx.bodyMarkdown.trim()}`, 5);
@@ -524,7 +550,13 @@ export function buildPrompt(args: {
 
   if (availableAgents.length > 0) {
     push(
-      `[AVAILABLE AGENTS]\nIf you need another agent, mention them in your reply and NORC will route:\n` +
+      `[OTHER AGENTS]\nDefault to doing this task yourself. Only if it genuinely needs a skill, tool, or ` +
+      `capability you don't have, hand that part to a better-suited teammate instead of forcing it or dropping ` +
+      `it: propose a task for it (POST <api_base>/propose-tasks) and NORC routes it to the agent whose ` +
+      `specialty/capabilities fit. Sequence work with "dependsOn" — a follow-up runs after the task it's ` +
+      `blocked by — so you can split a job across agents (see your NORC skill). Pull the full roster (each ` +
+      `peer's specialty + capabilities) with GET <api_base>/agents to pick the right one. Do this only when ` +
+      `you're genuinely stuck, not to offload work you can do. Peers here:\n` +
       availableAgents.map(n => `- ${n}`).join('\n'),
       2,
     );
@@ -567,6 +599,24 @@ export function assembleWithBudget(sections: Section[], budget: number): string 
     }
   }
   return kept.sort((a, b) => a.order - b.order).map(s => s.text).join('\n\n');
+}
+
+/** Render the predecessor hand-off: per dependency, summary + full body + files. */
+export function dependencySection(deps: DependencyContext[]): string {
+  const indent = (s: string, pad: string): string => s.split('\n').map(l => pad + l).join('\n');
+  return deps.map(d => {
+    const lines = [`▸ ${d.name || '(untitled)'} (${d.status || 'no status'}) — pageId: ${d.id}`];
+    if (d.summary && d.summary.trim()) lines.push(`summary: ${d.summary.trim()}`);
+    if (d.body && d.body.trim()) lines.push(`output:\n${indent(d.body.trim(), '  ')}`);
+    if (d.artifacts.length > 0) {
+      lines.push('files:');
+      for (const a of d.artifacts) {
+        const cap = a.caption && a.caption !== a.name ? ` (${a.caption})` : '';
+        lines.push(`  - ${a.kind === 'image' ? '🖼' : '📎'} ${a.name}${cap} → ${a.url}`);
+      }
+    }
+    return lines.join('\n');
+  }).join('\n\n');
 }
 
 export function projectSection(p: ProjectBlock): string {

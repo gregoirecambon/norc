@@ -15,7 +15,8 @@
 //     never release on uncertainty)
 
 import { notionGet } from './notion-client.js';
-import { getRelationIds, getSelect, getAnyTitle } from './notion-props.js';
+import { getRelationIds, getSelect, getAnyTitle, getRichText } from './notion-props.js';
+import { readPageMarkdown, listPageMedia, type MediaRef } from './notion-anchor.js';
 import { emitLog } from './logger.js';
 
 export interface UnmetDep {
@@ -58,6 +59,65 @@ export async function unmetDependencies(apiKey: string, props: unknown): Promise
     }
   }
   return unmet;
+}
+
+/** One artifact (image/file) a predecessor left, with a freshly-resolved URL. */
+export interface DependencyArtifact {
+  kind: 'image' | 'file';
+  name: string;
+  url: string;
+  caption: string;
+}
+
+/** The handed-off context from one completed predecessor task. */
+export interface DependencyContext {
+  id: string;
+  name: string;
+  status: string;
+  /** The concise "Agent Output" property the predecessor's agent set. */
+  summary: string;
+  /** The full page body: free-form text + inline image/file URLs, in order. */
+  body: string;
+  /** Distilled image/file list, so the dependent can embed each without parsing the body. */
+  artifacts: DependencyArtifact[];
+}
+
+const DEPENDENCY_BODY_MAX_CHARS = 3500;
+const MAX_DEPS_READ = 8;
+
+/**
+ * Build the handed-off context from a task's completed predecessors — what a
+ * dependent agent needs to build on. For each "Depends On" task (capped, best-
+ * effort): its name/status, the concise Agent Output summary, the FULL page body
+ * (free-form text + inline image/file URLs in document order — this is where a
+ * mix of images and text lives), and a distilled artifact list for easy
+ * embedding. Notion file URLs are signed + short-lived, so they're resolved
+ * FRESH here at dispatch time, never cached. Unreadable predecessors are skipped
+ * (the dependent still has its own context; unmetDependencies governs whether it
+ * runs at all).
+ */
+export async function resolveDependencyContext(apiKey: string, props: unknown): Promise<DependencyContext[]> {
+  const out: DependencyContext[] = [];
+  for (const id of getDependsOnIds(props).slice(0, MAX_DEPS_READ)) {
+    try {
+      const page = await notionGet<Record<string, unknown>>(apiKey, `/pages/${id}`);
+      const pp = page['properties'];
+      const name = getAnyTitle(pp) || '(untitled)';
+      const status = getSelect(pp, 'Status') ?? '';
+      const summary = getRichText(pp, 'Agent Output');
+      let body = '';
+      try { body = (await readPageMarkdown(apiKey, id, DEPENDENCY_BODY_MAX_CHARS)).trim(); }
+      catch { /* body is best-effort */ }
+      let media: MediaRef[] = [];
+      try { media = await listPageMedia(apiKey, id); }
+      catch { /* artifacts are best-effort */ }
+      const artifacts: DependencyArtifact[] = media.map(m => ({ kind: m.kind, name: m.name, url: m.url, caption: m.caption }));
+      out.push({ id, name, status, summary, body, artifacts });
+    } catch {
+      // Unreadable predecessor (deleted / unshared / transient) — skip it.
+    }
+  }
+  return out;
 }
 
 /**

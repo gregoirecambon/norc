@@ -14,7 +14,7 @@ import { runMigrations, db } from '../db/client.js';
 import { notionDatabases } from '../db/schema.js';
 import { notionGet, notionQuery } from '../lib/notion-client.js';
 import { readPageMarkdown } from '../lib/notion-anchor.js';
-import { parseOrgMember, resolveOrgMembers, listHumans, clearOrgMemberCache } from '../lib/org-members.js';
+import { parseOrgMember, resolveOrgMembers, listHumans, listAgentProfiles, clearOrgMemberCache } from '../lib/org-members.js';
 
 const ORG_DB_ID = 'aaaabbbb-cccc-dddd-eeee-ffff00001111';
 
@@ -28,6 +28,19 @@ function humanProps(over: Record<string, unknown> = {}): Record<string, unknown>
     'Capabilities': { type: 'multi_select', multi_select: [{ name: 'review' }, { name: 'design' }] },
     'Status': { type: 'select', select: { name: 'Available' } },
     'Owner': { type: 'people', people: [{ id: 'user-greg' }] },
+    ...over,
+  };
+}
+
+function agentProps(over: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    'Name': { type: 'title', title: rt('Designer Agent') },
+    'Type': { type: 'select', select: { name: 'AI Agent' } },
+    'Specialty': { type: 'rich_text', rich_text: rt('Brand & UI') },
+    'Capabilities': { type: 'multi_select', multi_select: [{ name: 'design' }] },
+    'Technology': { type: 'select', select: { name: 'Claude Code' } },
+    'Context Level': { type: 'select', select: { name: 'project' } },
+    'Status': { type: 'select', select: { name: 'Available' } },
     ...over,
   };
 }
@@ -153,5 +166,46 @@ describe('listHumans', () => {
     vi.advanceTimersByTime(5 * 60_000 + 1);
     await listHumans('key');
     expect(notionQuery).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('listAgentProfiles', () => {
+  beforeEach(() => { vi.useFakeTimers(); });
+  afterEach(() => vi.useRealTimers());
+
+  it('queries with the Type=AI Agent filter and returns each peer\'s capacities + bio', async () => {
+    vi.mocked(notionQuery).mockResolvedValue({ results: [orgPage('a-1', agentProps())], has_more: false });
+    vi.mocked(readPageMarkdown).mockResolvedValue('Ships on-brand visuals fast.');
+
+    const roster = await listAgentProfiles('key');
+    expect(roster).toEqual([{
+      name: 'Designer Agent',
+      specialty: 'Brand & UI',
+      capabilities: 'design',
+      technology: 'Claude Code',
+      contextLevel: 'project',
+      status: 'Available',
+      description: 'Ships on-brand visuals fast.',
+    }]);
+    const [, , body] = vi.mocked(notionQuery).mock.calls[0]!;
+    expect(body).toMatchObject({ filter: { property: 'Type', select: { equals: 'AI Agent' } } });
+  });
+
+  it('caches within the TTL and tolerates body-read failures', async () => {
+    vi.mocked(notionQuery).mockResolvedValue({ results: [orgPage('a-1', agentProps())], has_more: false });
+    vi.mocked(readPageMarkdown).mockRejectedValue(new Error('no body'));
+    const first = await listAgentProfiles('key');
+    expect(first[0]?.description).toBe('');
+    await listAgentProfiles('key');
+    expect(notionQuery).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(5 * 60_000 + 1);
+    await listAgentProfiles('key');
+    expect(notionQuery).toHaveBeenCalledTimes(2);
+  });
+
+  it('returns [] when the workspace has no Org DB', async () => {
+    db.delete(notionDatabases).run();
+    expect(await listAgentProfiles('key')).toEqual([]);
+    expect(notionQuery).not.toHaveBeenCalled();
   });
 });

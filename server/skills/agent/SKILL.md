@@ -34,6 +34,12 @@ NORC sends a prompt with these sections (some may be absent):
   sub-pages, each with its `pageId`. Fetch any in full with
   `GET <api_base>/page?pageId=<id>`.
 - **[TASK]** — the task name, status, success criteria, prior output.
+- **[DEPENDENCIES]** — the results handed off from the task(s) this one depends
+  on. Per predecessor: its `summary`, its full page `output` (text and inline
+  image/file URLs, in order), and a `files:` list of artifacts (each `→ <url>`).
+  **Build directly on these** — they are why this task was unblocked. The URLs are
+  fetchable (`curl`) and embeddable, but Notion links are short-lived, so use them
+  promptly or re-fetch a fresh one via `GET <api_base>/page?pageId=<id>`.
 - **[COMMENTED-ON TEXT]** — the exact text a comment is attached to (inline
   comments) — i.e. what the human is reacting to.
 - **[CONVERSATION SO FAR]** — earlier messages in the Notion thread.
@@ -85,14 +91,25 @@ curl -s -X POST <api_base>/assist -H 'Content-Type: application/json' \
   -d '{"question":"How many steps is the onboarding and what are they?"}'
 
 # Pull the structured context NORC assembled for this run (JSON: task, project,
-# company, related, projectResources, body, projectBody, contextLevel) — handy if
-# you'd rather not parse the prompt. `projectResources` lists every sub-page's
-# pageId; `projectBody` is the linked project page's full written body.
+# company, related, dependencies, projectResources, body, projectBody, contextLevel)
+# — handy if you'd rather not parse the prompt. `dependencies` is the hand-off from
+# the tasks this one depends on (each with summary, body, and an artifacts list);
+# `projectResources` lists every sub-page's pageId; `projectBody` is the linked
+# project page's full written body.
 curl -s <api_base>/context
 
 # Append content into the page body (Markdown → Notion blocks)
 curl -s -X POST <api_base>/blocks   -H 'Content-Type: application/json' \
   -d '{"markdown":"## Findings\n- point one\n- point two"}'
+
+# Attach a RESULT FILE (image / document) to this task in Notion — so a dependent
+# task can use it. Your file lives on YOUR machine, so ship the bytes base64; NORC
+# uploads it to Notion and attaches it as an image/file block on the task page.
+# The caption is what the next agent reads to know what it is. Limit 20 MB.
+# It then appears in that dependent task's [DEPENDENCIES] → files: list.
+curl -s -X POST <api_base>/artifact -H 'Content-Type: application/json' \
+  -d "{\"filename\":\"hero-shot.png\",\"caption\":\"Product hero on white bg, 2048px\",
+       \"contentBase64\":\"$(base64 < /path/to/hero-shot.png | tr -d '\n')\"}"
 
 # Update the task (task runs only)
 curl -s -X POST <api_base>/status   -H 'Content-Type: application/json' \
@@ -109,9 +126,17 @@ curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
 curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
   -d '{"status":"blocked","summary":"What I tried, and exactly what I need from a human to proceed"}'
 
+# See your teammates — the roster of AI agents from the Notion Org DB, each with its
+# specialty, capabilities, technology, context level and bio. Use it to find who can
+# do something you can't, then hand it off with /propose-tasks (see "Delegating" below).
+curl -s <api_base>/agents
+# → {"agents":[{"name":"Designer","specialty":"Brand & UI","capabilities":"design",
+#     "technology":"Claude Code","contextLevel":"project","status":"Available","description":"…"}]}
+
 # Propose follow-up tasks → NORC creates them (Backlog) and triages each
-# (auto-routes to an agent when confident, else asks a human). Great for a
-# planning/strategy agent that ends with "we should do X, Y, Z".
+# (auto-routes to the best-fit agent by specialty/capabilities when confident, else
+# asks a human). Great for a planning/strategy agent that ends with "we should do
+# X, Y, Z" — or to hand off a part of your own task you can't do (see "Delegating").
 # To SEQUENCE the plan, add "dependsOn": indices of EARLIER tasks in the same
 # batch — those tasks are created on hold and start automatically when their
 # predecessors are Done (here, task 2 waits for tasks 0 and 1).
@@ -272,8 +297,45 @@ started this way.
 
 ## Delegating to another agent
 
-The `[AVAILABLE AGENTS]` section lists peers. To hand off, mention the agent by
-name in your reply; NORC routing for delegation is expanding over time.
+Do your task yourself. But if it genuinely needs a skill, tool, or capability you
+**don't have** — or part of it clearly belongs to a different specialist — hand
+that part off instead of forcing a bad result or silently dropping it. Do this
+**only when you're actually stuck**, not to offload work you can do.
+
+**1. Find the right teammate.** The `[OTHER AGENTS]` block names your peers. Pull
+their full profiles — specialty, capabilities, technology, and bio — straight from
+the Notion Org DB, and match the missing skill to an agent's capabilities:
+
+```bash
+curl -s <api_base>/agents
+# → {"agents":[{"name":"Designer","specialty":"Brand & UI","capabilities":"design",
+#     "technology":"Claude Code","contextLevel":"project","status":"Available","description":"…bio…"}]}
+```
+
+**2. Hand the work off by proposing a task.** You don't message the agent directly —
+you create the work and NORC routes it. NORC triages each proposed task and
+auto-routes it to the agent whose specialty/capabilities fit, so **write the
+description so the needed skills are obvious** (e.g. "needs a designer: …"):
+
+```bash
+curl -s -X POST <api_base>/propose-tasks -H 'Content-Type: application/json' \
+  -d '{"tasks":[{"title":"Design the hero image","description":"Need a designer — 2048px hero on white bg","kpis":"on-brand, 2048px"}]}'
+```
+
+**3. Order it relative to your own work with `dependsOn` ("blocked by").**
+`dependsOn` is a list of indices of EARLIER tasks **in the same batch** that a task
+is blocked by: it's created on hold and starts automatically once those are Done.
+
+- **Follow-up that comes AFTER your work** → finish your task, then propose the
+  follow-up(s). Chain a multi-step plan in one batch: task `2` with `dependsOn:[0,1]`
+  starts only once tasks `0` and `1` complete.
+- **A prerequisite you can't produce yourself** → propose it for the teammate who
+  can, do as much of your own task as you can without it, and report your result.
+  If you genuinely **cannot proceed at all** without it, report `blocked` (see
+  "Before you give up") so the owner sees the gap — don't report "done".
+
+Either way the hand-off becomes a normal NORC task: the next agent picks it up with
+full context, your proposed `description`, and any files you attached via `/artifact`.
 
 ## Staying current
 

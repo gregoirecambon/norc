@@ -160,8 +160,97 @@ function blockToText(block: Record<string, unknown>): string {
       const t = body?.['title'];
       return typeof t === 'string' && t ? `- 🗄 ${t}` : '';
     }
+    case 'image': {
+      const m = mediaBlockInfo(block);
+      return m ? `![${m.caption || 'image'}](${m.url})` : '';
+    }
+    case 'file': {
+      const m = mediaBlockInfo(block);
+      if (!m) return '';
+      const extra = m.caption && m.caption !== m.name ? ` — ${m.caption}` : '';
+      return `[file: ${m.name}](${m.url})${extra}`;
+    }
     default: return text;
   }
+}
+
+/** A media block (image/file) reduced to its URL + labels. */
+export interface MediaRef {
+  kind: 'image' | 'file';
+  url: string;
+  /** Display name — the file block's name, else the caption, else the kind. */
+  name: string;
+  /** Caption rich-text flattened (empty when none). */
+  caption: string;
+}
+
+/**
+ * Pull {kind, url, name, caption} from an image/file block, resolving the URL
+ * whether it's Notion-hosted (`file.url` — a FRESH signed URL on every read),
+ * externally linked (`external.url`), or freshly uploaded (`file_upload` resolves
+ * to a Notion-hosted `file` on read). Returns null for non-media blocks or when
+ * no URL is present.
+ */
+export function mediaBlockInfo(block: Record<string, unknown>): MediaRef | null {
+  const type = block['type'];
+  if (type !== 'image' && type !== 'file') return null;
+  const body = block[type] as Record<string, unknown> | undefined;
+  if (!body) return null;
+  const src = (body['type'] === 'external' ? body['external'] : body['file']) as Record<string, unknown> | undefined;
+  const url = src && typeof src['url'] === 'string' ? src['url'] : '';
+  if (!url) return null;
+  const caption = richTextToPlain(body['caption']);
+  const name = typeof body['name'] === 'string' && body['name'] ? (body['name'] as string) : (caption || type);
+  return { kind: type, url, name, caption };
+}
+
+/**
+ * Scan a page's block subtree for image/file blocks — the artifacts an agent
+ * left behind — resolving each to a fresh URL. Descends layout blocks to
+ * `maxDepth` (never into sub-pages), capped at `cap`, best-effort.
+ */
+export async function listPageMedia(apiKey: string, pageId: string, maxDepth = 2, cap = 12): Promise<MediaRef[]> {
+  const out: MediaRef[] = [];
+  await walkForMedia(apiKey, pageId, 0, maxDepth, cap, out);
+  return out;
+}
+
+async function walkForMedia(
+  apiKey: string,
+  blockId: string,
+  depth: number,
+  maxDepth: number,
+  cap: number,
+  out: MediaRef[],
+): Promise<void> {
+  let cursor: string | undefined;
+  do {
+    const qs = new URLSearchParams({ page_size: '100' });
+    if (cursor) qs.set('start_cursor', cursor);
+    let res: Record<string, unknown>;
+    try {
+      res = await notionGet<Record<string, unknown>>(apiKey, `/blocks/${blockId}/children?${qs.toString()}`);
+    } catch {
+      return; // unreadable subtree → keep what we already collected
+    }
+    const results = Array.isArray(res['results']) ? res['results'] as Record<string, unknown>[] : [];
+    for (const block of results) {
+      const media = mediaBlockInfo(block);
+      if (media) {
+        out.push(media);
+        if (out.length >= cap) return;
+      }
+      const type = block['type'];
+      if (depth < maxDepth && block['has_children'] === true && type !== 'child_page' && type !== 'child_database') {
+        const id = String(block['id'] ?? '');
+        if (id) {
+          await walkForMedia(apiKey, id, depth + 1, maxDepth, cap, out);
+          if (out.length >= cap) return;
+        }
+      }
+    }
+    cursor = res['has_more'] === true && typeof res['next_cursor'] === 'string' ? res['next_cursor'] : undefined;
+  } while (cursor);
 }
 
 /**

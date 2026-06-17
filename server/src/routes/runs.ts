@@ -16,10 +16,12 @@ import {
   type TaskStatus,
 } from '../lib/notion-writeback.js';
 import { markdownToBlocks } from '../lib/notion-blocks-md.js';
+import { uploadFileToNotion, appendArtifactBlock } from '../lib/notion-files.js';
 import { readPageMarkdown, resolveAnchor, listChildResources, normalizeId } from '../lib/notion-anchor.js';
 import { getAnyTitle, getSelect, getRelationIds } from '../lib/notion-props.js';
 import { notionGet, notionPost, notionQuery } from '../lib/notion-client.js';
 import { assembleContext, collectProjectRelationRefs, type ContextLevel } from '../lib/context-assembler.js';
+import { listAgentProfiles } from '../lib/org-members.js';
 import { proposeTasks, releaseDependents, finalizeAgentReport } from '../lib/orchestrator.js';
 import { titleSimilarity, normalizedTitle } from '../lib/task-similarity.js';
 import { getNorcSettings } from '../lib/norc-settings.js';
@@ -151,6 +153,27 @@ const SlackFileBody = z.object({
   threadTs: z.string().optional(),
 });
 const MAX_SLACK_FILE_BYTES = 10 * 1024 * 1024;
+const ArtifactBody = z.object({
+  filename: z.string().min(1).max(200),
+  contentBase64: z.string().min(1),
+  mimeType: z.string().optional(),
+  caption: z.string().optional(),
+});
+// Notion single-part file upload caps at 20 MB.
+const MAX_ARTIFACT_FILE_BYTES = 20 * 1024 * 1024;
+const IMAGE_EXT = /\.(png|jpe?g|gif|webp|svg|bmp|tiff?|heic)$/i;
+
+/** Best-effort content type from an explicit hint, else the filename extension. */
+function guessContentType(filename: string, mime?: string): string {
+  if (mime && mime.trim()) return mime.trim();
+  const ext = (filename.match(/\.([a-z0-9]+)$/i)?.[1] ?? '').toLowerCase();
+  const map: Record<string, string> = {
+    png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+    webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', tiff: 'image/tiff', heic: 'image/heic',
+    pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
+  };
+  return map[ext] ?? 'application/octet-stream';
+}
 
 export function makeRunsRouter(): ExpressRouter {
   const r: ExpressRouter = Router({ mergeParams: true });
@@ -362,10 +385,29 @@ export function makeRunsRouter(): ExpressRouter {
         project: ctx.projectBlock,
         company: ctx.companyBlocks,
         related: ctx.relatedBlocks,
+        dependencies: ctx.dependencyBlocks,
         projectResources: ctx.projectResources,
         body: ctx.bodyMarkdown,
         projectBody: ctx.projectBody,
       });
+    } catch (err) {
+      res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // GET /api/runs/:token/agents  → the roster of AI-agent peers, read live from the
+  // Notion Org DB: each one's specialty, capabilities, technology, context level,
+  // status and bio. This is how an agent that lacks a skill/tool for its task finds
+  // the right teammate to hand follow-up work to (POST /propose-tasks). The
+  // requesting agent is excluded. Available to all clearances; best-effort.
+  r.get('/:token/agents', async (req, res) => {
+    const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
+    const agentRef = agentRefForRun(run);
+    try {
+      const all = await listAgentProfiles(apiKey);
+      const roster = agentRef ? all.filter(a => a.name && a.name !== agentRef.name) : all;
+      emitLog(`agent API: agent roster pulled (${roster.length} peers) (run ${run.id})`, agentRef?.name);
+      res.json({ agents: roster });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
     }
@@ -556,6 +598,43 @@ export function makeRunsRouter(): ExpressRouter {
       markActed(run.id);
       emitLog(`agent API: ${blocks.length} block(s) appended to page ${target} (run ${run.id})`, agentTag(run));
       res.json({ ok: true, blocks: blocks.length });
+    } catch (err) {
+      res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
+    }
+  });
+
+  // POST /api/runs/:token/artifact  { filename, contentBase64, mimeType?, caption? }
+  // Store a result file (image / document) in Notion and attach it to this run's
+  // task page as an image/file block — durable, human-visible, and surfaced to any
+  // dependent task via its [DEPENDENCIES] context. The agent's file lives on ITS
+  // machine, so it ships the bytes base64-encoded; NORC runs Notion's two-step
+  // File Upload + block attach. Single-part, <20 MB.
+  r.post('/:token/artifact', zodMiddleware(ArtifactBody), async (req, res) => {
+    const { run, apiKey } = req as unknown as { run: TaskRun; apiKey: string };
+    const { filename, contentBase64, mimeType, caption } = req.body as z.infer<typeof ArtifactBody>;
+    const target = run.taskPageId ?? run.pageId;
+    if (isSlackAnchor(target)) {
+      res.status(409).json({ error: 'slack_chat_run', message: 'This run is a Slack conversation — there is no Notion page to attach to. Use /slack-file to share a file in Slack.' });
+      return;
+    }
+    const bytes = Buffer.from(contentBase64.replace(/\s+/g, ''), 'base64');
+    if (bytes.length === 0) {
+      res.status(400).json({ error: 'invalid_content', message: 'contentBase64 did not decode to any bytes.' });
+      return;
+    }
+    if (bytes.length > MAX_ARTIFACT_FILE_BYTES) {
+      res.status(413).json({ error: 'too_large', message: `File is ${bytes.length} bytes — the limit is ${MAX_ARTIFACT_FILE_BYTES} (20 MB).` });
+      return;
+    }
+    const safeName = path.basename(filename).replace(/[^\w.\- ]+/g, '_') || 'file';
+    const contentType = guessContentType(safeName, mimeType);
+    const kind: 'image' | 'file' = contentType.startsWith('image/') || IMAGE_EXT.test(safeName) ? 'image' : 'file';
+    try {
+      const { fileUploadId } = await uploadFileToNotion(apiKey, { filename: safeName, bytes, contentType });
+      await appendArtifactBlock(apiKey, target, { fileUploadId, kind, caption: caption ?? '' });
+      markActed(run.id);
+      emitLog(`agent API: artifact "${safeName}" (${Math.max(1, Math.round(bytes.length / 1024))} KB, ${kind}) attached to page ${target} (run ${run.id})`, agentTag(run), run.pageId);
+      res.json({ ok: true, filename: safeName, kind });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });
     }

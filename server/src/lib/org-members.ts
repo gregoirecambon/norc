@@ -16,6 +16,25 @@ import { notionGet, notionQuery } from './notion-client.js';
 import { readPageMarkdown } from './notion-anchor.js';
 import { getTitle, getAnyTitle, getSelect, getPeople, propertyPlainText } from './notion-props.js';
 
+/** An AI-agent peer's roster entry — its capacities, as curated in the Org DB.
+ * Returned to agents (via the run API) so one that lacks a skill for its task can
+ * pick the right teammate to hand follow-up work to. */
+export interface AgentRosterEntry {
+  name: string;
+  /** Free-text "Specialty" — what this agent is for. */
+  specialty: string;
+  /** "Capabilities" multi-select, comma-joined (e.g. "code, review"). */
+  capabilities: string;
+  /** "Technology" select (Claude Code, Codex, …) — empty when unset. */
+  technology: string;
+  /** "Context Level" select (task | project | strategic) — empty when unset. */
+  contextLevel: string;
+  /** Org DB "Status" (Available | Busy | Offline). */
+  status: string;
+  /** Page-body bio excerpt (the richest capability signal), best-effort. */
+  description: string;
+}
+
 export type OrgMemberType = 'human' | 'ai_agent' | 'orchestrator' | 'unknown';
 
 export interface OrgMember {
@@ -76,10 +95,12 @@ const NOT_A_MEMBER: Omit<OrgMember, 'pageId'> = {
 
 const memberCache = new Map<string, { at: number; member: OrgMember }>();
 let humansCache: { at: number; humans: OrgMember[] } | null = null;
+let agentsCache: { at: number; agents: AgentRosterEntry[] } | null = null;
 
 export function clearOrgMemberCache(): void {
   memberCache.clear();
   humansCache = null;
+  agentsCache = null;
 }
 
 /**
@@ -154,4 +175,52 @@ export async function listHumans(apiKey: string): Promise<OrgMember[]> {
 
   humansCache = { at: Date.now(), humans };
   return humans;
+}
+
+/**
+ * Every Org DB page with Type = AI Agent, as a roster of capacities (specialty,
+ * capabilities, technology, context level, status + a bio excerpt). The source of
+ * truth for delegation: an agent stuck for lack of a skill reads this to find the
+ * teammate who has it. TTL-cached like listHumans (bios change rarely). Caller
+ * filters out the requesting agent.
+ */
+export async function listAgentProfiles(apiKey: string): Promise<AgentRosterEntry[]> {
+  if (agentsCache && Date.now() - agentsCache.at < HUMANS_TTL_MS) return agentsCache.agents;
+  const org = orgDbId();
+  if (!org) return [];
+
+  const out: AgentRosterEntry[] = [];
+  let cursor: string | undefined;
+  do {
+    const res = await notionQuery<Record<string, unknown>>(apiKey, org, {
+      filter: { property: 'Type', select: { equals: 'AI Agent' } },
+      page_size: 100,
+      ...(cursor ? { start_cursor: cursor } : {}),
+    });
+    const results = Array.isArray(res['results']) ? res['results'] as Array<Record<string, unknown>> : [];
+    for (const page of results) {
+      const id = typeof page['id'] === 'string' ? page['id'] : null;
+      if (!id) continue;
+      const props = page['properties'];
+      const name = (getTitle(props, 'Name') || getAnyTitle(props)).trim();
+      // Depth 1 like the triage profiles — an agent bio page is flat prose.
+      const body = await readPageMarkdown(apiKey, id, MEMBER_BODY_MAX_CHARS, 1).catch(() => '');
+      out.push({
+        name,
+        specialty: props && typeof props === 'object'
+          ? propertyPlainText((props as Record<string, unknown>)['Specialty']).trim() : '',
+        capabilities: props && typeof props === 'object'
+          ? propertyPlainText((props as Record<string, unknown>)['Capabilities']).trim() : '',
+        technology: (getSelect(props, 'Technology') ?? '').trim(),
+        contextLevel: (getSelect(props, 'Context Level') ?? '').trim(),
+        status: getSelect(props, 'Status') ?? '',
+        description: body.trim().slice(0, MEMBER_BODY_MAX_CHARS),
+      });
+    }
+    cursor = res['has_more'] === true && typeof res['next_cursor'] === 'string'
+      ? res['next_cursor'] as string : undefined;
+  } while (cursor);
+
+  agentsCache = { at: Date.now(), agents: out };
+  return out;
 }
