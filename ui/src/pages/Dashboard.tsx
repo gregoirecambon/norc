@@ -64,11 +64,54 @@ function RunTitle({ run }: { run: DashboardRun }) {
   );
 }
 
+// A labelled command line with a one-click copy button.
+function CopyRow({ label, command }: { label: string; command: string }) {
+  const [copied, setCopied] = useState(false);
+  const copy = () => navigator.clipboard?.writeText(command).then(
+    () => { setCopied(true); setTimeout(() => setCopied(false), 1200); },
+    () => {},
+  );
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--text-dim)', textTransform: 'uppercase', letterSpacing: '0.5px', marginBottom: 6 }}>{label}</div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'stretch' }}>
+        <code style={{ flex: 1, fontFamily: 'var(--font-mono)', fontSize: 12, background: 'var(--surface1)', border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px', whiteSpace: 'pre-wrap', wordBreak: 'break-all', color: 'var(--text-primary)' }}>{command}</code>
+        <button onClick={copy} style={{ flexShrink: 0, padding: '0 14px', borderRadius: 6, border: 'none', background: copied ? 'var(--tint-mint)' : 'var(--primary)', color: copied ? 'var(--tint-mint-text)' : 'var(--on-primary)', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>{copied ? '✓ Copied' : 'Copy'}</button>
+      </div>
+    </div>
+  );
+}
+
+// Popup with the exact steps to resume a remote Claude Code session on its machine.
+function ResumeModal({ run, onClose }: { run: DashboardRun; onClose: () => void }) {
+  const r = run.resume!;
+  const sshCmd = r.sshHost ? `ssh ${r.sshHost}` : 'ssh <your-user>@<your-host>';
+  const resumeCmd = `cd ${r.cwd} && claude --resume ${r.sessionId}`;
+  return (
+    <div onClick={onClose} style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', width: '100%', maxWidth: 560, boxShadow: '0 24px 64px rgba(0,0,0,0.3)', overflow: 'hidden' }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 18px', borderBottom: '1px solid var(--border)' }}>
+          <span style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>Resume this Claude Code session</span>
+          <button onClick={onClose} style={{ background: 'none', border: 'none', fontSize: 20, lineHeight: 1, color: 'var(--text-dim)', cursor: 'pointer' }}>×</button>
+        </div>
+        <div style={{ padding: 18 }}>
+          <p style={{ marginTop: 0, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+            This session lives on the worker machine. SSH onto it, then resume from the directory the task ran in — <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>claude --resume</code> only finds the session from that directory.
+          </p>
+          <CopyRow label="1 · SSH onto the machine" command={sshCmd} />
+          <CopyRow label="2 · Resume the session" command={resumeCmd} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Session id (copyable) + optional deep-link into the agent's own tool. Debug aid
 // on the active-run view: the id is shown for any adapter that has one, and becomes
 // an "open session" link only when the agent is configured with a console URL.
 function SessionId({ run }: { run: DashboardRun }) {
   const [copied, setCopied] = useState(false);
+  const [showResume, setShowResume] = useState(false);
   if (!run.sessionId) return null;
   const sessionId = run.sessionId;
   const copy = () => {
@@ -94,7 +137,15 @@ function SessionId({ run }: { run: DashboardRun }) {
       >
         {copied ? 'copied ✓' : sessionId}
       </span>
-      {run.sessionUrl && (
+      {run.resume ? (
+        <button
+          onClick={() => setShowResume(true)}
+          title="Show how to resume this session on the worker machine"
+          style={{ ...pillBase, fontWeight: 600, color: 'var(--text-secondary)', cursor: 'pointer' }}
+        >
+          resume ↗
+        </button>
+      ) : run.sessionUrl ? (
         <a
           href={run.sessionUrl} target="_blank" rel="noreferrer"
           title="Open this session in the agent's tool"
@@ -102,7 +153,8 @@ function SessionId({ run }: { run: DashboardRun }) {
         >
           open session ↗
         </a>
-      )}
+      ) : null}
+      {showResume && run.resume && <ResumeModal run={run} onClose={() => setShowResume(false)} />}
     </span>
   );
 }

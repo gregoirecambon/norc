@@ -68,6 +68,13 @@ const ADAPTER_LABEL: Record<string, string> = {
   'codex-local': 'Codex',
 };
 
+/** Display label for an agent's adapter — a self-registered remote Claude Code worker
+ * uses the 'http' adapter but should read "Remote Claude Code" (via metadata.kind). */
+function adapterLabel(a: AgentRow): string {
+  if ((a.metadata as { kind?: unknown })?.kind === 'remote-claude-code') return 'Remote Claude Code';
+  return ADAPTER_LABEL[a.adapterType] ?? a.adapterType;
+}
+
 function ConfigDetail({ config }: { config: Record<string, unknown> }) {
   const entries = Object.entries(config);
   if (entries.length === 0) return <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>No config</span>;
@@ -341,7 +348,7 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                       {a.name}
                     </span>
                   </td>
-                  <td style={{ padding: '9px 12px', color: 'var(--text-secondary)' }}>{ADAPTER_LABEL[a.adapterType] ?? a.adapterType}</td>
+                  <td style={{ padding: '9px 12px', color: 'var(--text-secondary)' }}>{adapterLabel(a)}</td>
                   <td style={{ padding: '9px 12px' }}><StatusBadge status={a.status} /></td>
                   <td style={{ padding: '9px 12px', color: 'var(--text-secondary)', fontFamily: 'var(--font-mono)', fontSize: 11 }}>
                     {a.lastLatencyMs != null ? `${a.lastLatencyMs}ms` : '—'}

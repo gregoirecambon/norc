@@ -31,7 +31,7 @@ const router: ExpressRouter = Router();
  * Push an agent to the Notion Org DB if the workspace is provisioned.
  * Best-effort: never throws, never blocks the caller.
  */
-async function syncAgentBestEffort(agent: { id: string; name: string; adapterType: string; status: string; orgDbPageId: string | null }): Promise<void> {
+async function syncAgentBestEffort(agent: { id: string; name: string; adapterType: string; status: string; orgDbPageId: string | null; kind?: string }): Promise<void> {
   const ctx = getOrgContext();
   if (!ctx) return;
   try {
@@ -237,7 +237,7 @@ router.post('/create', zodMiddleware(AgentBodySchema), (req, res) => {
   };
   emitLog(`agent ${name} created via dashboard (adapter: ${adapterType})`);
   emitEvent({ type: 'agent.registered', data: agentRow });
-  void syncAgentBestEffort({ id, name, adapterType, status: 'untested', orgDbPageId: null });
+  void syncAgentBestEffort({ id, name, adapterType, status: 'untested', orgDbPageId: null, kind: typeof metadata['kind'] === 'string' ? metadata['kind'] : undefined });
   res.status(201).json({ ...agentRow, ...(generatedAuthToken ? { authToken: generatedAuthToken } : {}) });
 });
 
@@ -301,7 +301,7 @@ router.post('/register', zodMiddleware(RegisterSchema), (req, res) => {
   };
   emitLog(`agent ${name} registered (adapter: ${adapterType})`);
   emitEvent({ type: 'agent.registered', data: agentRow });
-  void syncAgentBestEffort({ id, name, adapterType, status: 'untested', orgDbPageId: null });
+  void syncAgentBestEffort({ id, name, adapterType, status: 'untested', orgDbPageId: null, kind: typeof metadata['kind'] === 'string' ? metadata['kind'] : undefined });
   res.status(201).json({
     registered: true,
     agentId: id,
@@ -413,7 +413,12 @@ router.post('/:id/sync-notion', async (req, res) => {
   }
 
   try {
-    const { pageId, url } = await upsertAgentPage(ctx.apiKey, ctx.orgDbId, row, row.orgDbPageId ?? undefined);
+    const meta = parseJson(row.metadata);
+    const { pageId, url } = await upsertAgentPage(
+      ctx.apiKey, ctx.orgDbId,
+      { name: row.name, adapterType: row.adapterType, status: row.status, kind: typeof meta['kind'] === 'string' ? meta['kind'] : undefined },
+      row.orgDbPageId ?? undefined,
+    );
     db.update(agents).set({ orgDbPageId: pageId }).where(eq(agents.id, id)).run();
     // Mirror the page icon while we're here, so Slack + the dashboard have it.
     const { hasAvatar } = await refreshAgentAvatar(id);

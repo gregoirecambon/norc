@@ -99,7 +99,14 @@ export async function resolveIdentity(config: WorkerConfig): Promise<{ sharedSec
     const result = await postRegister(config.norcUrl!, config.registerToken!, {
       name,
       adapterType: 'http',
-      adapterConfig: { url, sharedSecret },
+      // workDir/defaultCwd let NORC reconstruct the per-task cwd for the dashboard's
+      // "resume" helper (cd <cwd> && claude --resume <id>). Not secrets.
+      adapterConfig: {
+        url,
+        sharedSecret,
+        workDir: config.workDir,
+        ...(config.defaultCwd ? { defaultCwd: config.defaultCwd } : {}),
+      },
       metadata: { kind: 'remote-claude-code', host: os.hostname() },
     });
     if (result.ok) {

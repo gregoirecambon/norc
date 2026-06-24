@@ -54,6 +54,9 @@ export interface AgentLike {
   name: string;
   adapterType: string;
   status: string;
+  /** Agent metadata.kind — distinguishes a remote Claude Code worker from a generic
+   * 'http' adapter so the Org DB Technology reads "Remote Claude Code". */
+  kind?: string;
 }
 
 function buildProps(agent: AgentLike, opts: { isCreate: boolean }): Record<string, unknown> {
@@ -62,7 +65,7 @@ function buildProps(agent: AgentLike, opts: { isCreate: boolean }): Record<strin
     'Type': { select: { name: 'AI Agent' } },
     'Status': { select: { name: statusToNotion(agent.status) } },
   };
-  const tech = TECHNOLOGY[agent.adapterType];
+  const tech = agent.kind === 'remote-claude-code' ? 'Remote Claude Code' : TECHNOLOGY[agent.adapterType];
   if (tech) props['Technology'] = { select: { name: tech } };
   // Context Level is NORC-seeded once on create, then owned by the human in Notion.
   if (opts.isCreate) props['Context Level'] = { select: { name: 'project' } };
