@@ -10,7 +10,7 @@ import { zodMiddleware } from '../lib/validate.js';
 import { db } from '../db/client.js';
 import { notionIntegration, agents, orchestratorComments } from '../db/schema.js';
 import { emitLog } from '../lib/logger.js';
-import { getActiveRunByToken, markActed, touchRun, type TaskRun } from '../lib/runs.js';
+import { getActiveRunByToken, markActed, touchRun, setRunSessionId, type TaskRun } from '../lib/runs.js';
 import {
   postComment, postCommentReply, appendBlocks, setTaskStatus, setTaskFields,
   type TaskStatus,
@@ -138,6 +138,9 @@ const ProposeTasksBody = z.object({
 const CompleteBody = z.object({
   status: z.string().optional(),
   summary: z.string().optional(),
+  // The agent's own resumable session id (e.g. a Claude Code `session_id`), recorded
+  // on the run so the dashboard shows the id you actually pass to `claude --resume`.
+  sessionId: z.string().optional(),
 });
 const SlackBody = z.object({
   channel: z.string().min(1),
@@ -717,8 +720,11 @@ export function makeRunsRouter(): ExpressRouter {
   // (so a "can't do it" report never silently flips the task to Done).
   r.post('/:token/complete', zodMiddleware(CompleteBody), async (req, res) => {
     const { run } = req as unknown as { run: TaskRun; apiKey: string };
-    const { status, summary } = req.body as z.infer<typeof CompleteBody>;
+    const { status, summary, sessionId } = req.body as z.infer<typeof CompleteBody>;
     markActed(run.id);
+    // Record the agent's resumable session id (overwrites NORC's internal session key)
+    // so the dashboard surfaces the id you actually pass to `claude --resume`.
+    if (sessionId) setRunSessionId(run.id, sessionId);
     try {
       await finalizeAgentReport(run, { status, summary });
       res.json({ ok: true });
