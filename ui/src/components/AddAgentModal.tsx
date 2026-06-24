@@ -51,28 +51,34 @@ function buildInvitePrompt(invite: InviteData, kind: AgentKind): string {
   const { norcUrl, token } = invite;
 
   if (kind === 'remote-worker') {
-    return `# Norc — Remote Claude Code (autonomous)
+    return `You are being enrolled as an agent in NORC, an orchestrator that assigns tasks to AI agents from a team's Notion + Slack workspace. Your job right now is to set up the NORC "worker" on THIS machine so NORC can send you tasks here. The worker is a tiny background service that receives a task from NORC, runs you (Claude Code) on it with full tools and \`--dangerously-skip-permissions\`, and reports the result back. It self-registers with NORC over Tailscale, so there are no URLs, ports, or secrets for you to invent.
 
-Paste-and-go. Run this on ANY machine on your Tailscale network where Claude Code is
-installed and logged in (laptop, VPS — anything). It downloads the Norc worker, starts
-it, and registers itself. Nothing to configure — no URL, port, or secret.
+Do the following:
 
+1. Download the worker into ~/.norc:
 \`\`\`bash
-curl -fsSL ${norcUrl}/api/worker -o ~/.norc-worker.mjs && \\
-NORC_URL=${norcUrl} NORC_REGISTER_TOKEN=${token} \\
-  nohup node ~/.norc-worker.mjs > ~/.norc-worker.log 2>&1 &
+mkdir -p ~/.norc && curl -fsSL ${norcUrl}/api/worker -o ~/.norc/worker.mjs
 \`\`\`
 
-The worker detects this machine's Tailscale address, generates its own secret, and
-registers with Norc. It appears here as a connected agent within ~a minute. Assign it a
-Notion task and it runs Claude Code autonomously (\`--dangerously-skip-permissions\`),
-reporting results back here.
+2. Run it as a DURABLE background service that survives logout and reboots — it must keep running for all future sessions, not just this one. Choose the right mechanism for this OS and set it up:
+   - Linux with systemd: a user service (\`systemctl --user enable --now norc-worker\`) plus \`loginctl enable-linger "$USER"\` so it runs without an active login.
+   - macOS: a launchd LaunchAgent (\`~/Library/LaunchAgents\`, \`RunAtLoad\` true, \`KeepAlive\` true).
+   - Fallback: \`nohup … &\`, and add it to a startup mechanism so it comes back on reboot.
+   The service must run \`node ~/.norc/worker.mjs\` with these two environment variables set:
+   \`\`\`
+   NORC_URL=${norcUrl}
+   NORC_REGISTER_TOKEN=${token}
+   \`\`\`
+   If you want it up immediately first, this works (not reboot-persistent on its own):
+   \`\`\`bash
+   NORC_URL=${norcUrl} NORC_REGISTER_TOKEN=${token} nohup node ~/.norc/worker.mjs > ~/.norc/worker.log 2>&1 &
+   \`\`\`
 
-Requirements: Node 22+, Claude Code installed & logged in (subscription), and this
-machine on the same Tailscale network as Norc.
+3. Verify it registered. The log (\`~/.norc/worker.log\` or the service journal) should show \`registered with NORC as "…"\` and \`listening on :8080\`, and \`curl -s localhost:8080/\` should return \`{"ok":true,...}\`. The worker saves its identity to \`~/.norc/credentials.json\`, so every future run and reboot reuses the same agent automatically — you only do this setup once.
 
-Keep it running across reboots with systemd/pm2 (see worker/README.md). Logs:
-\`~/.norc-worker.log\`. The token is single-use and auto-rotates after registration.`;
+4. Reply with: the agent name it registered as, that it is listening, and how you made it persist (the service name + the command to check or restart it).
+
+Prerequisites that should already be true on this machine: Node 22+, the \`claude\` CLI installed and logged in to your subscription, and this machine on the same Tailscale network as NORC. The token above is single-use and is consumed on first registration; the saved credentials handle everything after that, so don't request a new one for this machine.`;
   }
 
   if (kind === 'openclaw') {
@@ -153,7 +159,7 @@ After running these once, the agent is visible in the Norc dashboard and ready t
 }
 
 const KIND_TIP: Record<AgentKind, { heading: string; body: string }> = {
-  'remote-worker': { heading: 'Terminal (or paste to Claude Code)', body: 'Run on the target machine — a laptop or VPS on your Tailscale network. It self-installs, generates its own secret, detects its Tailscale address, and registers with Norc. Nothing else to configure.' },
+  'remote-worker': { heading: 'Paste into Claude Code', body: 'Copy this and send it as a message to Claude Code on the machine you want to enlist (laptop or VPS on your Tailscale network). Claude sets up the worker and registers itself — you don\'t run anything by hand. The machine needs Node 22+ and Claude Code logged in.' },
   'claude-code': { heading: 'CLAUDE.md', body: 'Paste this into your project\'s CLAUDE.md — Claude Code runs the commands on first run, including downloading the NORC skill.' },
   'codex':       { heading: 'Instructions file', body: 'Paste this into your ~/.codex/instructions.md or a project-level instructions file. It registers the agent and downloads the NORC skill.' },
   'openclaw':    { heading: 'Terminal', body: 'Run these commands in your terminal. Step 2 is required (auth) and Step 3 downloads the NORC skill.' },
