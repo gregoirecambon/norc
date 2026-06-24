@@ -79,6 +79,24 @@ on the same task in Notion (or reply in its Slack thread), NORC re-dispatches to
 for the same page; the worker runs `claude -p --resume <sessionId>`, continuing with full
 prior context.
 
+## Resuming a task's session by hand
+
+Each task is a real Claude Code session, kept on the worker machine (not deleted). The
+worker reports the **real Claude session id** to NORC on completion, so the dashboard
+session pill shows the id you pass to `claude --resume` (previously it showed NORC's
+internal key, which `claude --resume` rejects with "No conversation found").
+
+`claude --resume <id>` is **scoped to the directory the session ran in**, so you must run
+it there. The completion comment NORC posts includes the exact command, e.g.:
+
+```bash
+cd ~/.norc/<notion-page-id> && claude --resume <session-id>
+```
+
+You can also look any session up directly in `~/.norc/sessions.json` (maps Notion page id
+→ `{ sessionId, cwd }`). Sessions persist per Claude Code's own retention
+(`cleanupPeriodDays`, default 30); the worker never deletes them.
+
 ## Notes / limits
 
 - **Long jobs:** the worker pings `POST /status` every `HEARTBEAT_MS` to keep the run off

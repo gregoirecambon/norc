@@ -49,8 +49,9 @@ export class NorcRun {
     return this.post('artifact', body);
   }
 
-  /** Terminal report. NORC posts a visible comment, drives task status, releases dependents. */
-  complete(body: { status?: string; summary?: string }): Promise<boolean> {
+  /** Terminal report. NORC posts a visible comment, drives task status, releases dependents.
+   * `sessionId` is the Claude Code session id so the dashboard shows a resumable id. */
+  complete(body: { status?: string; summary?: string; sessionId?: string }): Promise<boolean> {
     return this.post('complete', body);
   }
 }

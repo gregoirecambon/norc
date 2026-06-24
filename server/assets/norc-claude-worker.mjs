@@ -111,7 +111,8 @@ var NorcRun = class {
   artifact(body) {
     return this.post("artifact", body);
   }
-  /** Terminal report. NORC posts a visible comment, drives task status, releases dependents. */
+  /** Terminal report. NORC posts a visible comment, drives task status, releases dependents.
+   * `sessionId` is the Claude Code session id so the dashboard shows a resumable id. */
   complete(body) {
     return this.post("complete", body);
   }
@@ -270,12 +271,17 @@ var Dispatcher = class {
       if (result.sessionId && job.pageId) {
         this.store.set(job.pageId, { sessionId: result.sessionId, cwd, updatedAt: Date.now() });
       }
+      const resumeHint = result.sessionId ? `
+
+\u21A9\uFE0E Resume this Claude Code session on the worker machine:
+\`cd ${cwd} && claude --resume ${result.sessionId}\`` : "";
+      const sessionField = result.sessionId ? { sessionId: result.sessionId } : {};
       if (result.ok) {
         const summary = result.text.trim() || "(Claude Code finished but returned no text.)";
-        await run.complete({ status: "done", summary });
-        log(`job done (page ${job.pageId ?? "?"}) \u2014 ${summary.length} chars`);
+        await run.complete({ status: "done", summary: summary + resumeHint, ...sessionField });
+        log(`job done (page ${job.pageId ?? "?"}) \u2014 ${summary.length} chars, session ${result.sessionId ?? "none"}`);
       } else {
-        await run.complete({ status: "failed", summary: result.error || "Claude Code failed." });
+        await run.complete({ status: "failed", summary: (result.error || "Claude Code failed.") + resumeHint, ...sessionField });
         log(`job failed (page ${job.pageId ?? "?"}): ${result.error ?? "unknown"}`);
       }
     } catch (err) {
