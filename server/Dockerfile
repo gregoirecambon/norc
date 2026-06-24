@@ -18,6 +18,8 @@ COPY --from=builder /app/dist ./dist
 # The agent/connect skill markdown served at /api/skill & /api/agents/invite.
 # Resolved at runtime as ../../skills from dist/lib & dist/routes (→ /app/skills).
 COPY skills ./skills
+# The bundled norc-claude-worker served at GET /api/worker (→ /app/assets).
+COPY assets ./assets
 RUN mkdir -p /data
 ENV DATABASE_PATH=/data/norc.db
 EXPOSE 3001

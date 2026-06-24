@@ -1,0 +1,22 @@
+{
+  "name": "@norc/claude-worker",
+  "version": "0.12.7",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "description": "Runs Claude Code on a VPS/server and reports results back to NORC via its Agent API. Registered in NORC as an 'http' adapter agent.",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "build": "tsc",
+    "serve": "node dist/index.js",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --target=node22 --format=esm --outfile=../server/assets/norc-claude-worker.mjs --banner:js=\"// Generated from @norc/claude-worker — do not edit. Regenerate: pnpm --filter @norc/claude-worker bundle\"",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "esbuild": "^0.25.12",
+    "tsx": "^4.19.3",
+    "typescript": "^5.7.3"
+  }
+}

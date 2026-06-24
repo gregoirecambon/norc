@@ -98,6 +98,21 @@ importers:
         specifier: ^6.3.5
         version: 6.4.3(@types/node@25.9.1)(tsx@4.22.4)
 
+  worker:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.21
+        version: 22.19.19
+      esbuild:
+        specifier: ^0.25.12
+        version: 0.25.12
+      tsx:
+        specifier: ^4.19.3
+        version: 4.22.4
+      typescript:
+        specifier: ^5.7.3
+        version: 5.9.3
+
 packages:
 
   '@anthropic-ai/sdk@0.100.1':
@@ -2234,7 +2249,7 @@ snapshots:
 
   '@types/connect@3.4.38':
     dependencies:
-      '@types/node': 25.9.1
+      '@types/node': 22.19.19
 
   '@types/cors@2.8.19':
     dependencies:
@@ -2285,7 +2300,7 @@ snapshots:
 
   '@types/send@1.2.1':
     dependencies:
-      '@types/node': 25.9.1
+      '@types/node': 22.19.19
 
   '@types/serve-static@2.2.0':
     dependencies:

@@ -51,7 +51,7 @@ const SKILL_PATH = path.join(
   '../../skills/connect/SKILL.md',
 );
 
-const SECRET_FIELDS = new Set(['apiKey', 'authToken', 'token', 'password', 'secret', 'wsPrivateKey', 'wsPublicKey']);
+const SECRET_FIELDS = new Set(['apiKey', 'authToken', 'token', 'password', 'secret', 'sharedSecret', 'wsPrivateKey', 'wsPublicKey']);
 
 function redactConfig(raw: string): Record<string, unknown> {
   let config: Record<string, unknown>;

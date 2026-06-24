@@ -3,7 +3,7 @@ import { getInvite, createAgent, type AgentRow, type AdapterType, type InviteDat
 import { microLabelStyle } from './ui.js';
 
 type Tab = 'invite' | 'manual';
-type AgentKind = 'claude-code' | 'codex' | 'openclaw';
+type AgentKind = 'remote-worker' | 'claude-code' | 'codex' | 'openclaw';
 
 interface Props {
   onClose: () => void;
@@ -34,7 +34,8 @@ const MANUAL_FIELDS: Record<AdapterType, FieldSpec[]> = {
     ['model', 'Model', false, 'text', 'claude-opus-4-6'],
   ],
   'http': [
-    ['url', 'Endpoint URL', false, 'text', 'https://...'],
+    ['url', 'Worker URL', false, 'text', 'https://your-vps.example.com:8080/'],
+    ['sharedSecret', 'Shared Secret', true, 'password', 'matches NORC_SHARED_SECRET on the worker'],
   ],
 };
 
@@ -43,11 +44,36 @@ const ADAPTER_OPTIONS: { value: AdapterType; label: string; description: string 
   { value: 'codex-local', label: 'Codex (local)', description: 'OpenAI Codex CLI running on this machine' },
   { value: 'openclaw', label: 'OpenClaw', description: 'Agent connected via OpenClaw WebSocket gateway' },
   { value: 'claude-api', label: 'Claude API', description: 'Direct Claude API integration' },
-  { value: 'http', label: 'HTTP', description: 'Generic HTTP endpoint' },
+  { value: 'http', label: 'Remote Claude Code (HTTP worker)', description: 'Claude Code on a VPS via the norc-claude-worker HTTP service (also any generic HTTP endpoint)' },
 ];
 
 function buildInvitePrompt(invite: InviteData, kind: AgentKind): string {
   const { norcUrl, token } = invite;
+
+  if (kind === 'remote-worker') {
+    return `# Norc — Remote Claude Code (autonomous)
+
+Paste-and-go. Run this on ANY machine on your Tailscale network where Claude Code is
+installed and logged in (laptop, VPS — anything). It downloads the Norc worker, starts
+it, and registers itself. Nothing to configure — no URL, port, or secret.
+
+\`\`\`bash
+curl -fsSL ${norcUrl}/api/worker -o ~/.norc-worker.mjs && \\
+NORC_URL=${norcUrl} NORC_REGISTER_TOKEN=${token} \\
+  nohup node ~/.norc-worker.mjs > ~/.norc-worker.log 2>&1 &
+\`\`\`
+
+The worker detects this machine's Tailscale address, generates its own secret, and
+registers with Norc. It appears here as a connected agent within ~a minute. Assign it a
+Notion task and it runs Claude Code autonomously (\`--dangerously-skip-permissions\`),
+reporting results back here.
+
+Requirements: Node 22+, Claude Code installed & logged in (subscription), and this
+machine on the same Tailscale network as Norc.
+
+Keep it running across reboots with systemd/pm2 (see worker/README.md). Logs:
+\`~/.norc-worker.log\`. The token is single-use and auto-rotates after registration.`;
+  }
 
   if (kind === 'openclaw') {
     return `# Norc Registration — OpenClaw Agent
@@ -127,6 +153,7 @@ After running these once, the agent is visible in the Norc dashboard and ready t
 }
 
 const KIND_TIP: Record<AgentKind, { heading: string; body: string }> = {
+  'remote-worker': { heading: 'Terminal (or paste to Claude Code)', body: 'Run on the target machine — a laptop or VPS on your Tailscale network. It self-installs, generates its own secret, detects its Tailscale address, and registers with Norc. Nothing else to configure.' },
   'claude-code': { heading: 'CLAUDE.md', body: 'Paste this into your project\'s CLAUDE.md — Claude Code runs the commands on first run, including downloading the NORC skill.' },
   'codex':       { heading: 'Instructions file', body: 'Paste this into your ~/.codex/instructions.md or a project-level instructions file. It registers the agent and downloads the NORC skill.' },
   'openclaw':    { heading: 'Terminal', body: 'Run these commands in your terminal. Step 2 is required (auth) and Step 3 downloads the NORC skill.' },
@@ -150,7 +177,7 @@ function InviteTab({
           Agent Type
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
-          {([['claude-code', 'Claude Code'], ['codex', 'Codex'], ['openclaw', 'OpenClaw']] as [AgentKind, string][]).map(([kind, label]) => (
+          {([['remote-worker', 'Remote Claude Code'], ['claude-code', 'Claude Code (local)'], ['codex', 'Codex'], ['openclaw', 'OpenClaw']] as [AgentKind, string][]).map(([kind, label]) => (
             <button
               key={kind}
               onClick={() => onKindChange(kind)}
@@ -328,7 +355,7 @@ export function AddAgentModal({ onClose, onCreated }: Props) {
   const [tab, setTab] = useState<Tab>('invite');
 
   // Invite tab state
-  const [agentKind, setAgentKind] = useState<AgentKind>('claude-code');
+  const [agentKind, setAgentKind] = useState<AgentKind>('remote-worker');
   const [invite, setInvite] = useState<InviteData | null>(null);
   const [inviteLoading, setInviteLoading] = useState(true);
   const [copied, setCopied] = useState(false);
