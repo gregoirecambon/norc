@@ -14,7 +14,7 @@ function strEnv(name) {
   return v || null;
 }
 function loadConfig() {
-  const workDir = strEnv("WORK_DIR") ?? path.join(os.tmpdir(), "norc-claude-worker");
+  const workDir = strEnv("WORK_DIR") ?? path.join(os.homedir(), ".norc");
   const extraRaw = strEnv("CLAUDE_EXTRA_ARGS");
   return {
     port: intEnv("PORT", 8080),

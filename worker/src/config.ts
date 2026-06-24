@@ -54,7 +54,10 @@ function strEnv(name: string): string | null {
 }
 
 export function loadConfig(): WorkerConfig {
-  const workDir = strEnv('WORK_DIR') ?? path.join(os.tmpdir(), 'norc-claude-worker');
+  // ~/.norc by default (NOT os.tmpdir — many systems wipe /tmp on reboot, which would
+  // destroy credentials.json and, since the registration token is single-use, leave the
+  // worker unable to re-register). A stable home dir keeps its identity across reboots.
+  const workDir = strEnv('WORK_DIR') ?? path.join(os.homedir(), '.norc');
   const extraRaw = strEnv('CLAUDE_EXTRA_ARGS');
   return {
     port: intEnv('PORT', 8080),
