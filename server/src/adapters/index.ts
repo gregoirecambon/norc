@@ -1,7 +1,7 @@
 import type { Agent, PingResult, AdapterType } from '../types.js';
 import { pingOpenclaw, sendOpenclawMessage, dispatchOpenclaw } from './openclaw.js';
 import { pingClaudeApi, dispatchClaudeApi } from './claude-api.js';
-import { pingHttp, dispatchHttp } from './http.js';
+import { pingHttp, dispatchHttp, httpHeaders } from './http.js';
 import { pingLocalCli, dispatchLocalCli } from './local.js';
 
 export async function pingAgent(agent: Agent): Promise<PingResult> {
@@ -101,7 +101,7 @@ export async function notifySkillUpdate(
       if (!url) return { pushed: false, reason: 'no url configured' };
       const res = await fetch(url, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: httpHeaders(agent.adapterConfig),
         body: JSON.stringify({ type: 'norc_skill_update', skillUrl, version }),
         signal: AbortSignal.timeout(10_000),
       });

@@ -145,6 +145,8 @@ const PUBLIC_API: { method: string; test: (p: string) => boolean }[] = [
   { method: '*', test: p => p === '/api/me' || p.startsWith('/api/me/') },
   // Protocol doc — agents re-fetch it autonomously.
   { method: 'GET', test: p => p === '/api/skill' || p === '/api/skill/version' },
+  // Worker bundle — the copy-paste invite downloads this before it has any credentials.
+  { method: 'GET', test: p => p === '/api/worker' },
   // Public health check (login page reachability + container healthchecks).
   { method: 'GET', test: p => p === '/api/health' },
   // The auth flow itself.

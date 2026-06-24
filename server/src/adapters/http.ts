@@ -1,16 +1,30 @@
 import type { PingResult } from '../types.js';
 import type { DispatchResult } from './index.js';
 
-/** Dispatch an agent turn to a generic HTTP endpoint. */
+/**
+ * Build request headers for an http-adapter call. Merges any operator-supplied
+ * `config.headers`, then adds the `X-Norc-Secret` shared secret (when set) so the
+ * remote worker can authenticate that the dispatch genuinely came from NORC. The
+ * worker (e.g. norc-claude-worker) runs Claude Code with --dangerously-skip-permissions,
+ * so an unauthenticated dispatch endpoint would be dangerous — the secret is the gate.
+ */
+export function httpHeaders(config: Record<string, unknown>): Record<string, string> {
+  const extra = (typeof config['headers'] === 'object' && config['headers'] !== null)
+    ? config['headers'] as Record<string, string>
+    : {};
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extra };
+  const secret = typeof config['sharedSecret'] === 'string' ? config['sharedSecret'].trim() : '';
+  if (secret) headers['X-Norc-Secret'] = secret;
+  return headers;
+}
+
+/** Dispatch an agent turn to a generic HTTP endpoint (e.g. the norc-claude-worker). */
 export async function dispatchHttp(
   config: Record<string, unknown>,
   system: string,
   prompt: string,
 ): Promise<DispatchResult> {
   const url = typeof config['url'] === 'string' ? config['url'].trim() : '';
-  const headers = (typeof config['headers'] === 'object' && config['headers'] !== null)
-    ? config['headers'] as Record<string, string>
-    : {};
   if (!url) return { ok: false, supported: true, error: 'adapterConfig.url is required' };
 
   const controller = new AbortController();
@@ -18,16 +32,25 @@ export async function dispatchHttp(
   try {
     const res = await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...headers },
+      headers: httpHeaders(config),
       body: JSON.stringify({ type: 'norc_dispatch', system, prompt }),
       signal: controller.signal,
     });
     clearTimeout(timeout);
     if (!res.ok) return { ok: false, supported: true, error: `HTTP ${res.status}` };
 
+    // Async worker: a 202 — or a JSON ack of {async:true}/{accepted:true} — means the
+    // job runs in the background and the reply arrives later via the Agent API, the
+    // same contract as the openclaw adapter. Leave the run in-flight; don't wait for
+    // the (multi-minute) Claude Code job inside the 120s dispatch window.
+    if (res.status === 202) return { ok: true, supported: true, async: true };
+
     const contentType = res.headers.get('content-type') ?? '';
     if (contentType.includes('application/json')) {
       const body = await res.json() as Record<string, unknown>;
+      if (body['async'] === true || body['accepted'] === true) {
+        return { ok: true, supported: true, async: true };
+      }
       const text = typeof body['text'] === 'string' ? body['text']
         : typeof body['output'] === 'string' ? body['output']
         : JSON.stringify(body);
@@ -58,7 +81,7 @@ export async function sendHttpChallenge(
   try {
     await fetch(url, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: httpHeaders(config),
       body: JSON.stringify({ type: 'norc_challenge', handshakeId, nonce, callbackUrl }),
       signal: controller.signal,
     });
@@ -70,9 +93,6 @@ export async function sendHttpChallenge(
 export async function pingHttp(config: Record<string, unknown>, start: number): Promise<PingResult> {
   const url = typeof config['url'] === 'string' ? config['url'].trim() : '';
   const method = typeof config['method'] === 'string' ? config['method'].toUpperCase() : 'GET';
-  const headers = (typeof config['headers'] === 'object' && config['headers'] !== null)
-    ? config['headers'] as Record<string, string>
-    : {};
 
   if (!url) return { ok: false, latencyMs: 0, error: 'adapterConfig.url is required for http adapter' };
 
@@ -80,7 +100,7 @@ export async function pingHttp(config: Record<string, unknown>, start: number): 
   const timeout = setTimeout(() => controller.abort(), 5000);
 
   try {
-    const res = await fetch(url, { method, headers, signal: controller.signal });
+    const res = await fetch(url, { method, headers: httpHeaders(config), signal: controller.signal });
     clearTimeout(timeout);
     return { ok: res.ok, latencyMs: Date.now() - start, ...(res.ok ? {} : { error: `HTTP ${res.status}` }) };
   } catch (err: unknown) {

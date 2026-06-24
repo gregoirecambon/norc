@@ -1,6 +1,7 @@
 packages:
   - server
   - ui
+  - worker
 allowBuilds:
   better-sqlite3: true
   esbuild: true
