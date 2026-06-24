@@ -44,8 +44,38 @@ router.get('/', (_req, res) => {
     try { consoleTemplates.set(a.id, (JSON.parse(a.adapterConfig) as Record<string, unknown>)['consoleUrlTemplate']); }
     catch { /* malformed config → no template */ }
   }
-  const withSessionUrl = <T extends { agentId: string; sessionId: string | null }>(run: T) =>
-    ({ ...run, sessionUrl: sessionUrlFor(consoleTemplates.get(run.agentId), run.sessionId) });
+  // Per-agent metadata for the dashboard "resume" helper on remote Claude Code workers:
+  // ssh host (from the worker URL / reported hostname) + how to reconstruct the cwd a
+  // task ran in (defaultCwd, else <workDir>/<pageId>, else ~/.norc/<pageId>).
+  const resumeMeta = new Map<string, { kind: string | null; sshHost: string | null; workDir: string | null; defaultCwd: string | null }>();
+  for (const a of allAgents) {
+    let cfg: Record<string, unknown> = {};
+    let meta: Record<string, unknown> = {};
+    try { cfg = JSON.parse(a.adapterConfig); } catch { /* malformed */ }
+    try { meta = JSON.parse(a.metadata); } catch { /* malformed */ }
+    let sshHost: string | null = null;
+    const url = typeof cfg['url'] === 'string' ? cfg['url'] : '';
+    if (url) { try { sshHost = new URL(url).hostname; } catch { /* not a url */ } }
+    if (!sshHost && typeof meta['host'] === 'string') sshHost = meta['host'];
+    resumeMeta.set(a.id, {
+      kind: typeof meta['kind'] === 'string' ? meta['kind'] : null,
+      sshHost,
+      workDir: typeof cfg['workDir'] === 'string' ? cfg['workDir'] : null,
+      defaultCwd: typeof cfg['defaultCwd'] === 'string' ? cfg['defaultCwd'] : null,
+    });
+  }
+  const resumeFor = (agentId: string, pageId: string, sessionId: string | null) => {
+    const m = resumeMeta.get(agentId);
+    if (!m || m.kind !== 'remote-claude-code' || !sessionId) return null;
+    const cwd = m.defaultCwd ?? (m.workDir ? `${m.workDir.replace(/\/+$/, '')}/${pageId}` : `~/.norc/${pageId}`);
+    return { sshHost: m.sshHost, cwd, sessionId };
+  };
+  const withSessionUrl = <T extends { agentId: string; sessionId: string | null; pageId: string }>(run: T) =>
+    ({
+      ...run,
+      sessionUrl: sessionUrlFor(consoleTemplates.get(run.agentId), run.sessionId),
+      resume: resumeFor(run.agentId, run.pageId, run.sessionId),
+    });
 
   const activeRuns = db.select(runSelection).from(taskRuns)
     .innerJoin(agents, eq(taskRuns.agentId, agents.id))

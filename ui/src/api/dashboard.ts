@@ -15,6 +15,9 @@ export interface DashboardRun {
   /** Deep-link into the agent's own tool, when it's configured with a console URL
    * template. NULL for adapters with no session UI (most). */
   sessionUrl: string | null;
+  /** Remote Claude Code only: how to resume this session on the worker machine
+   * (SSH there, then `cd <cwd> && claude --resume <sessionId>`). NULL otherwise. */
+  resume?: { sshHost: string | null; cwd: string; sessionId: string } | null;
   createdAt: number;
   completedAt: number | null;
 }
