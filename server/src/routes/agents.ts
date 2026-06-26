@@ -12,7 +12,7 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { generateWsKeypair, initiateWsPairing } from '../adapters/openclaw.js';
-import { notifySkillUpdate } from '../adapters/index.js';
+import { notifySkillUpdate, requestWorkerUninstall } from '../adapters/index.js';
 import { getOrgContext, upsertAgentPage, archiveAgentPage } from '../lib/notion-orgdb.js';
 import { NORC_SKILL_VERSION } from '../lib/skill.js';
 import { pendingItems } from '../lib/dispatch-queue.js';
@@ -428,6 +428,20 @@ router.post('/:id/sync-notion', async (req, res) => {
   } catch (err) {
     res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
   }
+});
+
+// POST /api/agents/:id/uninstall — push a teardown to a remote Claude Code worker so
+// it stops+disables its service and deletes its files. Best-effort: the dashboard then
+// removes the agent from NORC (DELETE) regardless. Does NOT delete the agent here.
+router.post('/:id/uninstall', async (req, res) => {
+  const { id } = req.params;
+  const row = db.select().from(agents).where(eq(agents.id, id)).all()[0];
+  if (!row) { res.status(404).json({ error: 'not_found' }); return; }
+  let config: Record<string, unknown>;
+  try { config = JSON.parse(row.adapterConfig); } catch { config = {}; }
+  const result = await requestWorkerUninstall({ adapterType: row.adapterType as AdapterType, adapterConfig: config });
+  emitLog(`uninstall pushed to "${row.name}": ${result.pushed ? 'accepted' : `failed — ${result.reason}`}`);
+  res.json(result);
 });
 
 // DELETE /api/agents/:id

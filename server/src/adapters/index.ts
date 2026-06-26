@@ -75,6 +75,34 @@ export async function dispatch(args: DispatchArgs): Promise<DispatchResult> {
   }
 }
 
+// --- Worker uninstall (one-click Remove) -----------------------------------
+
+export interface UninstallResult {
+  pushed: boolean;
+  reason?: string;
+}
+
+/** Tell a remote Claude Code worker to tear itself down (stop+disable its service,
+ * delete its files). Only the http worker has this push channel. */
+export async function requestWorkerUninstall(
+  agent: { adapterType: AdapterType; adapterConfig: Record<string, unknown> },
+): Promise<UninstallResult> {
+  if (agent.adapterType !== 'http') return { pushed: false, reason: 'not a remote worker' };
+  const url = typeof agent.adapterConfig['url'] === 'string' ? agent.adapterConfig['url'].trim() : '';
+  if (!url) return { pushed: false, reason: 'no url configured' };
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: httpHeaders(agent.adapterConfig),
+      body: JSON.stringify({ type: 'norc_uninstall' }),
+      signal: AbortSignal.timeout(10_000),
+    });
+    return res.ok ? { pushed: true } : { pushed: false, reason: `HTTP ${res.status}` };
+  } catch (err) {
+    return { pushed: false, reason: err instanceof Error ? err.message : 'unreachable' };
+  }
+}
+
 // --- Skill update notification --------------------------------------------
 
 export interface SkillNotifyResult {

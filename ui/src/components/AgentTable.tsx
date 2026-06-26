@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { StatusBadge } from './StatusBadge.js';
 import { HandshakeButton } from './HandshakeButton.js';
-import { deleteAgent, updateAgentConfig, updateAgentLimits, toggleAgentSlack, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
+import { deleteAgent, uninstallWorker, updateAgentConfig, updateAgentLimits, toggleAgentSlack, initiateWsPairing, verifyWsPairing, syncAgentToNotion, updateAgentSkills, type AgentRow } from '../api/agents.js';
 
 interface Props {
   agents: AgentRow[];
@@ -440,7 +440,7 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                       <SkillUpdatePanel agent={a} />
                       <DispatchLimitPanel agent={a} />
                       <SlackTogglePanel agent={a} />
-                      {isRemoteClaude(a) && <RemoveWorkerPanel agent={a} />}
+                      {isRemoteClaude(a) && <RemoveWorkerPanel agent={a} onDeleted={onDeleted} />}
                       <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
                         ID: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{a.id}</span>
                         &nbsp;&nbsp;Registered: <span style={{ color: 'var(--text-secondary)' }}>{new Date(a.registeredAt).toLocaleString()}</span>
@@ -578,15 +578,45 @@ function SlackTogglePanel({ agent }: { agent: AgentRow }) {
   );
 }
 
-function RemoveWorkerPanel({ agent }: { agent: AgentRow }) {
-  const [show, setShow] = useState(false);
+function workerHost(agent: AgentRow): string {
+  const url = agent.adapterConfig['url'];
+  if (typeof url === 'string') { try { return new URL(url).hostname; } catch { /* not a url */ } }
+  const host = (agent.metadata as { host?: unknown })?.host;
+  return typeof host === 'string' ? host : 'the worker machine';
+}
+
+function RemoveWorkerPanel({ agent, onDeleted }: { agent: AgentRow; onDeleted: (id: string) => void }) {
+  const [showPrompt, setShowPrompt] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [phase, setPhase] = useState<'closed' | 'confirm' | 'busy' | 'pushfailed'>('closed');
+  const [error, setError] = useState('');
   const prompt = buildUninstallPrompt(agent.name);
+  const host = workerHost(agent);
 
   const copy = () => navigator.clipboard?.writeText(prompt).then(
     () => { setCopied(true); setTimeout(() => setCopied(false), 1500); },
     () => {},
   );
+
+  const removeFromNorc = async () => { await deleteAgent(agent.id); onDeleted(agent.id); };
+
+  const doRemove = async () => {
+    setPhase('busy'); setError('');
+    try {
+      const r = await uninstallWorker(agent.id);
+      if (r.pushed) { await removeFromNorc(); return; } // component unmounts
+      setPhase('pushfailed');
+      setError(`Couldn't reach the worker (${r.reason ?? 'unreachable'}). It may still be running — paste the manual prompt on the machine. You can still remove it from NORC.`);
+    } catch (e) {
+      setPhase('pushfailed');
+      setError(e instanceof Error ? e.message : 'Failed to reach the worker.');
+    }
+  };
+
+  const forceRemove = async () => {
+    setPhase('busy'); setError('');
+    try { await removeFromNorc(); } catch (e) { setPhase('pushfailed'); setError(e instanceof Error ? e.message : 'Delete failed.'); }
+  };
 
   return (
     <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
@@ -595,18 +625,26 @@ function RemoveWorkerPanel({ agent }: { agent: AgentRow }) {
           Remove worker
         </span>
         <button
-          onClick={() => setShow(s => !s)}
-          title="A prompt that teaches the remote Claude Code to uninstall the worker"
+          onClick={() => { setError(''); setPhase('confirm'); }}
+          title="Tell the worker to uninstall itself, then remove it from NORC"
+          style={{ fontSize: 11, padding: '2px 10px', borderRadius: 4, border: '1px solid var(--accent-red)', background: 'var(--accent-red)', color: '#fff', fontWeight: 600, cursor: 'pointer' }}
+        >
+          Remove worker
+        </button>
+        <button
+          onClick={() => setShowPrompt(s => !s)}
+          title="Manual fallback: a prompt that teaches the remote Claude Code to uninstall the worker"
           style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text-secondary)', cursor: 'pointer' }}
         >
-          {show ? 'Hide removal prompt' : 'Show removal prompt'}
+          {showPrompt ? 'Hide manual prompt' : 'Manual prompt'}
         </button>
-        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
-          paste into Claude Code on the worker machine — then delete from NORC with ×
-        </span>
       </div>
-      {show && (
+
+      {showPrompt && (
         <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 6 }}>
+            Fallback for non-standard installs or an offline box — paste into Claude Code on the worker machine.
+          </div>
           <textarea
             readOnly
             value={prompt}
@@ -624,6 +662,40 @@ function RemoveWorkerPanel({ agent }: { agent: AgentRow }) {
           >
             {copied ? '✓ Copied' : 'Copy prompt'}
           </button>
+        </div>
+      )}
+
+      {phase !== 'closed' && (
+        <div
+          onClick={() => phase !== 'busy' && setPhase('closed')}
+          style={{ position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.45)', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}
+        >
+          <div onClick={e => e.stopPropagation()} style={{ background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: 'var(--radius-lg)', width: '100%', maxWidth: 480, boxShadow: '0 24px 64px rgba(0,0,0,0.3)', overflow: 'hidden' }}>
+            <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>
+              Remove “{agent.name}”?
+            </div>
+            <div style={{ padding: 18, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+              {phase === 'pushfailed' ? (
+                <span style={{ color: 'var(--accent-red)' }}>{error}</span>
+              ) : (
+                <>This tells the worker on <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>{host}</code> to uninstall itself — stop and disable its background service and delete its files in <code style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>~/.norc</code> — then removes the agent from NORC. Your Claude Code data (<code style={{ fontFamily: 'var(--font-mono)', fontSize: 12 }}>~/.claude</code>) is left untouched. This can't be undone.</>
+              )}
+            </div>
+            <div style={{ padding: '0 18px 18px', display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
+              <button onClick={() => setPhase('closed')} disabled={phase === 'busy'} style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface1)', color: 'var(--text-secondary)', cursor: phase === 'busy' ? 'default' : 'pointer' }}>
+                Cancel
+              </button>
+              {phase === 'pushfailed' ? (
+                <button onClick={forceRemove} style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: 'none', background: 'var(--accent-red)', color: '#fff', fontWeight: 600, cursor: 'pointer' }}>
+                  Remove from NORC anyway
+                </button>
+              ) : (
+                <button onClick={doRemove} disabled={phase === 'busy'} style={{ fontSize: 13, padding: '7px 14px', borderRadius: 6, border: 'none', background: 'var(--accent-red)', color: '#fff', fontWeight: 600, cursor: phase === 'busy' ? 'default' : 'pointer', opacity: phase === 'busy' ? 0.7 : 1 }}>
+                  {phase === 'busy' ? 'Removing…' : 'Remove worker'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
