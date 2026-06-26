@@ -75,6 +75,29 @@ function adapterLabel(a: AgentRow): string {
   return ADAPTER_LABEL[a.adapterType] ?? a.adapterType;
 }
 
+function isRemoteClaude(a: AgentRow): boolean {
+  return (a.metadata as { kind?: unknown })?.kind === 'remote-claude-code';
+}
+
+/** A prompt addressed to Claude Code on the worker machine: cleanly tear down the
+ * norc-claude-worker (stop+disable the service, delete its files), then verify. */
+function buildUninstallPrompt(name: string): string {
+  return `You are the NORC remote worker named "${name}" on this machine, and you're being decommissioned. Cleanly and completely remove the NORC worker so it stops now and never restarts. Adapt to how it was actually installed here, and do all of the following:
+
+1. Stop and disable the background service. Check each mechanism and use whichever applies:
+   - systemd user service: \`systemctl --user stop norc-worker\` then \`systemctl --user disable norc-worker\`, remove its unit file (e.g. ~/.config/systemd/user/norc-worker.service) and \`systemctl --user daemon-reload\`. If lingering was enabled only for this worker, \`loginctl disable-linger "$USER"\` (skip it if other user services rely on it).
+   - macOS launchd: \`launchctl bootout gui/$(id -u)/<label>\` (or \`launchctl unload <plist>\`), then delete the LaunchAgent plist in ~/Library/LaunchAgents.
+   - plain background process: \`pkill -f norc-worker.mjs\` (confirm with \`ps aux | grep norc-worker.mjs\`).
+
+2. Delete the worker's files: \`rm -f ~/.norc/worker.mjs ~/.norc/credentials.json ~/.norc/sessions.json\`. Also remove any per-task working directories it created under ~/.norc (e.g. ~/.norc/<notion-page-id>) and a custom WORK_DIR if one was set. Do NOT touch ~/.claude — that's your own Claude Code data and session history.
+
+3. Verify removal: \`curl -s localhost:8080/\` should fail to connect, and \`ps aux | grep -i norc-worker\` should show nothing.
+
+4. Report back: confirm the service is stopped and disabled, the files are gone, and flag anything you could not remove.
+
+Note: you can't remove yourself from the NORC dashboard — after you confirm teardown, the operator deletes the agent there. Once the files and service are gone, this machine won't reconnect to NORC.`;
+}
+
 function ConfigDetail({ config }: { config: Record<string, unknown> }) {
   const entries = Object.entries(config);
   if (entries.length === 0) return <span style={{ color: 'var(--text-dim)', fontSize: 11 }}>No config</span>;
@@ -417,6 +440,7 @@ export function AgentTable({ agents, loading, provisioned, onPingResult, onDelet
                       <SkillUpdatePanel agent={a} />
                       <DispatchLimitPanel agent={a} />
                       <SlackTogglePanel agent={a} />
+                      {isRemoteClaude(a) && <RemoveWorkerPanel agent={a} />}
                       <div style={{ marginTop: 8, fontSize: 11, color: 'var(--text-dim)' }}>
                         ID: <span style={{ fontFamily: 'var(--font-mono)', color: 'var(--text-secondary)' }}>{a.id}</span>
                         &nbsp;&nbsp;Registered: <span style={{ color: 'var(--text-secondary)' }}>{new Date(a.registeredAt).toLocaleString()}</span>
@@ -549,6 +573,58 @@ function SlackTogglePanel({ agent }: { agent: AgentRow }) {
         <span style={{ fontSize: 11, color: state === 'error' ? 'var(--accent-red)' : 'var(--text-dim)' }}>
           {msg}
         </span>
+      )}
+    </div>
+  );
+}
+
+function RemoveWorkerPanel({ agent }: { agent: AgentRow }) {
+  const [show, setShow] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const prompt = buildUninstallPrompt(agent.name);
+
+  const copy = () => navigator.clipboard?.writeText(prompt).then(
+    () => { setCopied(true); setTimeout(() => setCopied(false), 1500); },
+    () => {},
+  );
+
+  return (
+    <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          Remove worker
+        </span>
+        <button
+          onClick={() => setShow(s => !s)}
+          title="A prompt that teaches the remote Claude Code to uninstall the worker"
+          style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, border: '1px solid var(--border)', background: 'var(--surface2)', color: 'var(--text-secondary)', cursor: 'pointer' }}
+        >
+          {show ? 'Hide removal prompt' : 'Show removal prompt'}
+        </button>
+        <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          paste into Claude Code on the worker machine — then delete from NORC with ×
+        </span>
+      </div>
+      {show && (
+        <div style={{ marginTop: 8 }}>
+          <textarea
+            readOnly
+            value={prompt}
+            onFocus={e => e.currentTarget.select()}
+            style={{
+              width: '100%', height: 200, boxSizing: 'border-box',
+              fontFamily: 'var(--font-mono)', fontSize: 11, lineHeight: 1.5,
+              background: 'var(--surface1)', color: 'var(--text-primary)',
+              border: '1px solid var(--border)', borderRadius: 6, padding: '8px 10px', resize: 'vertical',
+            }}
+          />
+          <button
+            onClick={copy}
+            style={{ marginTop: 6, fontSize: 12, padding: '5px 14px', borderRadius: 6, border: 'none', background: copied ? 'var(--tint-mint)' : 'var(--primary)', color: copied ? 'var(--tint-mint-text)' : 'var(--on-primary)', fontWeight: 600, cursor: 'pointer' }}
+          >
+            {copied ? '✓ Copied' : 'Copy prompt'}
+          </button>
+        </div>
       )}
     </div>
   );
