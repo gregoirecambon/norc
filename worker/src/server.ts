@@ -56,8 +56,10 @@ export function createWorkerServer(opts: {
   port: number;
   sharedSecret: string;
   dispatcher: Dispatcher;
+  /** Called on a `norc_uninstall` push — tear the worker down from the inside. */
+  onUninstall: () => void;
 }): http.Server {
-  const { sharedSecret, dispatcher } = opts;
+  const { sharedSecret, dispatcher, onUninstall } = opts;
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
     // Health/ping — NORC's heartbeat does a bare GET. No auth (exposes no secrets).
@@ -92,6 +94,12 @@ export function createWorkerServer(opts: {
       case 'norc_skill_update':
         // The worker carries the NORC contract in code — nothing to re-download.
         send(res, 200, { ok: true });
+        return;
+      case 'norc_uninstall':
+        // One-click Remove from the dashboard: ack, then tear ourselves down.
+        send(res, 202, { accepted: true });
+        log('received norc_uninstall — tearing down');
+        onUninstall();
         return;
       default:
         send(res, 400, { error: 'unknown_type', type: payload.type ?? null });

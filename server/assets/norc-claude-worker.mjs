@@ -344,7 +344,7 @@ async function respondChallenge(payload) {
   }
 }
 function createWorkerServer(opts) {
-  const { sharedSecret: sharedSecret2, dispatcher: dispatcher2 } = opts;
+  const { sharedSecret: sharedSecret2, dispatcher: dispatcher2, onUninstall } = opts;
   async function handle(req, res) {
     if (req.method === "GET") {
       send(res, 200, { ok: true, service: "norc-claude-worker" });
@@ -376,6 +376,11 @@ function createWorkerServer(opts) {
         return;
       case "norc_skill_update":
         send(res, 200, { ok: true });
+        return;
+      case "norc_uninstall":
+        send(res, 202, { accepted: true });
+        log("received norc_uninstall \u2014 tearing down");
+        onUninstall();
         return;
       default:
         send(res, 400, { error: "unknown_type", type: payload.type ?? null });
@@ -480,11 +485,89 @@ async function resolveIdentity(config2) {
   throw new Error("registration failed: could not find a free agent name after 3 tries.");
 }
 
+// src/uninstall.ts
+import { spawn as spawn2, execFileSync as execFileSync2 } from "node:child_process";
+import { writeFileSync as writeFileSync3 } from "node:fs";
+import path5 from "node:path";
+function systemdRunAvailable() {
+  if (process.platform !== "linux") return false;
+  try {
+    execFileSync2("systemd-run", ["--version"], { stdio: "ignore", timeout: 3e3 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+function startSelfUninstall(config2) {
+  const workerMjs = path5.join(config2.workDir, "worker.mjs");
+  const selfEntry = process.argv[1] && process.argv[1].endsWith("worker.mjs") ? process.argv[1] : "";
+  const scriptPath = path5.join(config2.workDir, "uninstall-run.sh");
+  const q = (s) => `"${s.replace(/(["$`\\])/g, "\\$1")}"`;
+  const script = [
+    "#!/bin/bash",
+    "set +e",
+    "sleep 2",
+    // let the worker flush its 202 response and start exiting
+    "# systemd user service (the conventional name from the install prompt)",
+    "if command -v systemctl >/dev/null 2>&1; then",
+    "  systemctl --user stop norc-worker 2>/dev/null",
+    "  systemctl --user disable norc-worker 2>/dev/null",
+    '  rm -f "$HOME/.config/systemd/user/norc-worker.service"',
+    "  systemctl --user daemon-reload 2>/dev/null",
+    "fi",
+    "# macOS launchd: unload + remove any norc LaunchAgent",
+    "if command -v launchctl >/dev/null 2>&1; then",
+    '  for p in "$HOME/Library/LaunchAgents/"*norc*; do',
+    '    [ -e "$p" ] || continue',
+    '    launchctl unload "$p" 2>/dev/null',
+    '    rm -f "$p"',
+    "  done",
+    "fi",
+    "# kill any stray worker process (match its actual entry path)",
+    `pkill -f ${q(workerMjs)} 2>/dev/null`,
+    selfEntry && selfEntry !== workerMjs ? `pkill -f ${q(selfEntry)} 2>/dev/null` : "",
+    "# remove worker files (leave ~/.claude \u2014 that is Claude Code's own data)",
+    `rm -f ${q(workerMjs)} ${q(config2.credentialsFile)} ${q(config2.sessionsFile)}`,
+    selfEntry ? `rm -f ${q(selfEntry)}` : "",
+    `rm -f ${q(scriptPath)}`,
+    ""
+  ].filter(Boolean).join("\n");
+  try {
+    writeFileSync3(scriptPath, script, { mode: 448 });
+  } catch (err) {
+    log(`uninstall: failed to write teardown script: ${err instanceof Error ? err.message : "unknown"}`);
+    return;
+  }
+  const useSystemdRun = systemdRunAvailable();
+  let cmd;
+  let args;
+  if (useSystemdRun) {
+    cmd = "systemd-run";
+    args = ["--user", "--scope", "--quiet", "--collect", "/bin/bash", scriptPath];
+  } else {
+    cmd = "/bin/bash";
+    args = [scriptPath];
+  }
+  try {
+    const child = spawn2(cmd, args, { detached: true, stdio: "ignore", env: { ...process.env } });
+    child.unref();
+    log(`uninstall: launched teardown (${useSystemdRun ? "systemd-run scope" : "detached"}) \u2014 exiting shortly`);
+  } catch (err) {
+    log(`uninstall: failed to launch teardown: ${err instanceof Error ? err.message : "unknown"}`);
+  }
+  setTimeout(() => process.exit(0), 4e3);
+}
+
 // src/index.ts
 var config = loadConfig();
 var dispatcher = new Dispatcher(config);
 var { sharedSecret, selfRegistered } = await resolveIdentity(config);
-var server = createWorkerServer({ port: config.port, sharedSecret, dispatcher });
+var server = createWorkerServer({
+  port: config.port,
+  sharedSecret,
+  dispatcher,
+  onUninstall: () => startSelfUninstall(config)
+});
 server.listen(config.port, () => {
   log(`listening on :${config.port} (claudeBin=${config.claudeBin}, maxConcurrency=${config.maxConcurrency}, workDir=${config.workDir})`);
   if (selfRegistered) log("self-registered with NORC \u2014 should appear connected in the dashboard shortly");

@@ -141,3 +141,14 @@ export async function toggleAgentSlack(id: string, enabled: boolean): Promise<{ 
 export async function deleteAgent(id: string): Promise<void> {
   await fetch(`/api/agents/${encodeURIComponent(id)}`, { method: 'DELETE' });
 }
+
+/** Push a teardown to a remote Claude Code worker (stop+disable service, delete files).
+ * Best-effort — the caller still deletes the agent from NORC afterwards. */
+export async function uninstallWorker(id: string): Promise<{ pushed: boolean; reason?: string }> {
+  const res = await fetch(`/api/agents/${encodeURIComponent(id)}/uninstall`, { method: 'POST' });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({})) as { message?: string; error?: string };
+    throw new Error(body.message ?? body.error ?? `${res.status}`);
+  }
+  return res.json() as Promise<{ pushed: boolean; reason?: string }>;
+}
