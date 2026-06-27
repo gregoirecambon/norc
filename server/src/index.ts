@@ -28,6 +28,7 @@ import { iconsRouter } from './routes/icons.js';
 import { makeRunsRouter } from './routes/runs.js';
 import { makeTasksRouter } from './routes/tasks.js';
 import { skillRouter } from './routes/skill.js';
+import { choresRouter } from './routes/chores.js';
 import { workerRouter } from './routes/worker.js';
 import { settingsRouter } from './routes/settings.js';
 import { authRouter } from './routes/auth.js';
@@ -45,6 +46,7 @@ import { dropPendingForAgentPage, agentsWithPending } from './lib/dispatch-queue
 import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
 import { ensureNorcAgent } from './lib/norc-identity.js';
 import { expireStaleChanges } from './lib/self-changes.js';
+import { expireStaleCasts, reconcile as reconcileChores } from './chores/index.js';
 
 const app = express();
 app.use(cors());
@@ -93,6 +95,7 @@ app.use('/api/me', meRouter);
 app.use('/api/notion', notionRouter);
 app.use('/api/slack', slackRouter);
 app.use('/api/skill', skillRouter);
+app.use('/api/chores', choresRouter);
 app.use('/api/worker', workerRouter);
 app.use('/api/settings', settingsRouter);
 app.use('/api/runs', makeRunsRouter());
@@ -144,6 +147,9 @@ setInterval(() => {
   // Pending NORC self-change proposals expire after 7 days (cheap sqlite update).
   const expired = expireStaleChanges();
   if (expired > 0) emitLog(`expired ${expired} stale NORC self-change proposal(s)`);
+  // Pending chore casts awaiting approval expire on the same TTL.
+  const expiredCasts = expireStaleCasts();
+  if (expiredCasts > 0) emitLog(`expired ${expiredCasts} stale chore cast(s)`);
 }, 60_000);
 
 // Resolve one timeout candidate. Idle OpenClaw runs with a known run handle get a
@@ -236,6 +242,20 @@ async function autoProposeLoop(): Promise<void> {
   setTimeout(() => { void autoProposeLoop(); }, intervalMs);
 }
 
+// Chore ↔ Notion reconcile — self-rescheduling so the enable/sync toggles take
+// effect live. Disk stays canonical; this mirrors chore.md files to the Notion
+// Chores DB (and pulls human Notion edits back to disk). No-op unless both chores
+// and Notion sync are on.
+async function choreSyncLoop(): Promise<void> {
+  const settings = getNorcSettingsOrDefault();
+  if (settings.choresEnabled && settings.choresNotionSync) {
+    try { await reconcileChores(); } catch (err) {
+      emitLog(`chore sync error: ${err instanceof Error ? err.message : 'unknown'}`, 'NORC');
+    }
+  }
+  setTimeout(() => { void choreSyncLoop(); }, 5 * 60_000);
+}
+
 // Startup
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 
@@ -260,6 +280,8 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   setTimeout(() => { void deepHeartbeatLoop(); }, 20_000);
   // Recurring co-CEO analysis (first check a bit later; runs only when enabled).
   setTimeout(() => { void autoProposeLoop(); }, 30_000);
+  // Chore ↔ Notion reconcile (runs only when chores + sync are enabled).
+  setTimeout(() => { void choreSyncLoop(); }, 12_000);
   // Update check against GitHub releases (re-checks every ~6h).
   setTimeout(() => { void startVersionLoop(); }, 10_000);
 });

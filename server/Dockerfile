@@ -18,6 +18,8 @@ COPY --from=builder /app/dist ./dist
 # The agent/connect skill markdown served at /api/skill & /api/agents/invite.
 # Resolved at runtime as ../../skills from dist/lib & dist/routes (→ /app/skills).
 COPY skills ./skills
+# Chore process definitions, resolved at runtime as ../../chores (→ /app/chores).
+COPY chores ./chores
 # The bundled norc-claude-worker served at GET /api/worker (→ /app/assets).
 COPY assets ./assets
 RUN mkdir -p /data

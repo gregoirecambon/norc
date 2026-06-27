@@ -183,6 +183,11 @@ export const norcSettings = sqliteTable('norc_settings', {
   // Phase 2: gated live progress probes — only stale/under-covered projects, rate-limited.
   autoProposeProbeEnabled:       integer('auto_propose_probe_enabled', { mode: 'boolean' }).notNull().default(false),
   autoProposeProbeCooldownHours: integer('auto_propose_probe_cooldown_hours').notNull().default(48),
+  // Chores: reusable multi-agent process definitions read by triage (see chores/).
+  // choresEnabled gates the whole feature; choresNotionSync is the kill-switch for
+  // the Notion mirror (off = run chores purely from server files on disk).
+  choresEnabled:            integer('chores_enabled', { mode: 'boolean' }).notNull().default(false),
+  choresNotionSync:         integer('chores_notion_sync', { mode: 'boolean' }).notNull().default(true),
   // Outgoing email (team invites). DB values win; SMTP_* env vars are the
   // fallback. host…from columns predate this feature (0013_notifications.sql,
   // unused until now) — smtp_port is nullable there, so the 587 default lives
@@ -352,4 +357,26 @@ export const projectMemo = sqliteTable('project_memo', {
   signalHash:  text('signal_hash'),                   // hash of last cycle's signals → skip-if-unchanged
   lastProbeAt: integer('last_probe_at'),              // Phase 2: last live progress probe dispatched
   updatedAt:   integer('updated_at').notNull(),
+});
+
+// A chore whose cast (the resolved step→agent plan) is awaiting human approval
+// (chore frontmatter `approval: cast`, or a step that couldn't be confidently
+// cast even under `approval: auto`). Mirrors pending_self_changes: the proposal
+// comment's discussion id is the lookup key for the "approve"/"reject" reply;
+// payloadJson holds the full resolved cast + inputs so an approval can build the
+// task DAG without re-resolving. Same-(chore,page) pending rows are superseded.
+export const pendingChoreCasts = sqliteTable('pending_chore_casts', {
+  id:                text('id').primaryKey(),
+  choreId:           text('chore_id').notNull(),       // which chore this cast is for
+  sourcePageId:      text('source_page_id').notNull(), // the triggering task/anchor page
+  payloadJson:       text('payload_json').notNull(),   // { cast, inputs, projectId } — enough to compile on approve
+  castText:          text('cast_text').notNull(),      // rendered step·agent·confidence list (display/audit)
+  status:            text('status').notNull().default('pending'), // pending|approved|rejected|expired|superseded
+  discussionId:      text('discussion_id'),            // Notion thread to watch for the verdict
+  pageId:            text('page_id').notNull(),        // where the cast comment was posted
+  proposedCommentId: text('proposed_comment_id'),
+  proposedByUserId:  text('proposed_by_user_id'),
+  createdAt:         integer('created_at').notNull(),
+  resolvedAt:        integer('resolved_at'),
+  resolvedByUserId:  text('resolved_by_user_id'),
 });

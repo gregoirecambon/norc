@@ -18,6 +18,8 @@ export interface NorcSettings {
   schedulerEnabled: boolean;
   autoProposeEnabled: boolean;
   autoProposeIntervalHours: number;
+  choresEnabled: boolean;
+  choresNotionSync: boolean;
   smtpHost: string | null;
   smtpPort: number;
   smtpUser: string | null;
@@ -46,6 +48,8 @@ export interface NorcSettingsPatch {
   schedulerEnabled?: boolean;
   autoProposeEnabled?: boolean;
   autoProposeIntervalHours?: number;
+  choresEnabled?: boolean;
+  choresNotionSync?: boolean;
   smtpHost?: string | null;
   smtpPort?: number;
   smtpUser?: string | null;

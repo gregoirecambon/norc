@@ -8,7 +8,7 @@ import { emitLog } from '../lib/logger.js';
 import { emitEvent } from '../lib/events.js';
 import { zodMiddleware } from '../lib/validate.js';
 import { validateNotionKey } from '../lib/notion-api.js';
-import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus, provisionSlackChannelField } from '../lib/notion-provision.js';
+import { parsePageId, checkPageAccess, provisionWorkspace, provisionCompanyDb, provisionChoresDb, provisionSchedulingFields, provisionDependencyFields, provisionBlockedStatus, provisionSlackChannelField } from '../lib/notion-provision.js';
 import { ensureNorcAgent, getNorcOrgPageId } from '../lib/norc-identity.js';
 import { listHumans, resolveOrgMembers } from '../lib/org-members.js';
 import { norcBaseUrl } from '../lib/base-url.js';
@@ -252,6 +252,61 @@ router.post('/provision/company', async (_req, res) => {
   }).run();
 
   emitLog('Company DB provisioned (strategic context enabled)');
+  emitEvent({
+    type: 'notion.workspace.updated',
+    data: { workspaceStatus: 'provisioned', parentPageId: integration.parentPageId, databases: getDatabases() },
+  });
+  res.status(201).json({ created: true, database: created });
+});
+
+// POST /api/notion/provision/chores — provide the Chores DB (the Notion mirror of
+// the on-disk chore.md files). Reuses the dormant "Pipeline Config" DB by renaming
+// it in place when present; otherwise creates a fresh "Chores" DB. Idempotent.
+router.post('/provision/chores', async (_req, res) => {
+  const integration = getIntegration();
+  if (!integration || integration.status !== 'active' || integration.workspaceStatus !== 'provisioned') {
+    res.status(400).json({ error: 'not_ready', message: 'Provision the workspace first.' });
+    return;
+  }
+  const existing = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'chores')).all()[0];
+  if (existing) {
+    res.status(200).json({ created: false, database: { kind: 'chores', notionDatabaseId: existing.notionDatabaseId, title: existing.title, url: existing.url } });
+    return;
+  }
+  if (!integration.parentPageId) {
+    res.status(400).json({ error: 'no_parent', message: 'No parent page recorded; re-provision the workspace.' });
+    return;
+  }
+  // Reuse the dormant Pipeline Config DB (rename in place) when it exists.
+  const pipeline = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'pipeline')).all()[0];
+
+  let created;
+  try {
+    created = await provisionChoresDb(integration.apiKey, integration.parentPageId, pipeline?.notionDatabaseId ?? null);
+  } catch (err) {
+    res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'Notion API error' });
+    return;
+  }
+
+  if (pipeline) {
+    // Upgrade the existing row in place (keep its id + url).
+    db.update(notionDatabases)
+      .set({ kind: 'chores', title: 'Chores' })
+      .where(eq(notionDatabases.id, pipeline.id))
+      .run();
+    created = { ...created, url: pipeline.url };
+  } else {
+    db.insert(notionDatabases).values({
+      id: randomUUID(),
+      kind: created.kind,
+      notionDatabaseId: created.notionDatabaseId,
+      title: created.title,
+      url: created.url,
+      createdAt: Date.now(),
+    }).run();
+  }
+
+  emitLog('Chores DB provisioned (chore.md ↔ Notion sync enabled)');
   emitEvent({
     type: 'notion.workspace.updated',
     data: { workspaceStatus: 'provisioned', parentPageId: integration.parentPageId, databases: getDatabases() },

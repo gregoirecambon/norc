@@ -86,6 +86,10 @@ export function notionPatch<T = Record<string, unknown>>(apiKey: string, path: s
   return request<T>(apiKey, 'PATCH', path, body);
 }
 
+export function notionDelete<T = Record<string, unknown>>(apiKey: string, path: string): Promise<T> {
+  return request<T>(apiKey, 'DELETE', path);
+}
+
 /** Query a Notion database (POST /databases/:id/query) with an optional filter/sort body. */
 export function notionQuery<T = Record<string, unknown>>(apiKey: string, databaseId: string, body: unknown = {}): Promise<T> {
   return request<T>(apiKey, 'POST', `/databases/${databaseId}/query`, body);

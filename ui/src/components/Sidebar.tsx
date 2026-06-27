@@ -30,6 +30,18 @@ function OperationsIcon() {
   );
 }
 
+function ChoresIcon() {
+  // A multi-step flow: linked nodes
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <circle cx="3.5" cy="7.5" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+      <circle cx="11.5" cy="4" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+      <circle cx="11.5" cy="11" r="1.8" stroke="currentColor" strokeWidth="1.3"/>
+      <path d="M5.2 6.7 9.8 4.6M5.2 8.3 9.8 10.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
 function DashboardIcon() {
   // 2x2 grid of rounded squares
   return (
@@ -161,6 +173,7 @@ export default function Sidebar({ currentPage, onNavigate, user, onLogout }: Pro
         <div style={sectionLabel}>Workspace</div>
         <NavItem id="agents" Icon={AgentsIcon} label="AI Agents" />
         <NavItem id="operations" Icon={OperationsIcon} label="Operations" />
+        <NavItem id="chores" Icon={ChoresIcon} label="Chores" />
 
         <div style={{ ...sectionLabel, marginTop: 16 }}>Monitor</div>
         <NavItem id="dashboard" Icon={DashboardIcon} label="Dashboard" />

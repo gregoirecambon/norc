@@ -32,6 +32,8 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   autoProposeSummaryModel: null,
   autoProposeProbeEnabled: false,
   autoProposeProbeCooldownHours: 48,
+  choresEnabled: false,
+  choresNotionSync: true,
   smtpHost: null,
   smtpPort: null,
   smtpUser: null,

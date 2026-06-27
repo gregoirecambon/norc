@@ -27,8 +27,8 @@ import {
   matchAgents,
   type AgentRef,
 } from './notion-mentions.js';
-import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, userDisplayName, type Anchor, type ThreadComment } from './notion-anchor.js';
-import { getAnyTitle, getRelationIds, getDate, getSelect } from './notion-props.js';
+import { resolveAnchor, listThreadComments, collectBlockMentionPageIds, readBlockText, readPageMarkdown, userDisplayName, type Anchor, type ThreadComment } from './notion-anchor.js';
+import { getAnyTitle, getRelationIds, getDate, getSelect, getNumber, getRichText } from './notion-props.js';
 import { isInertTaskStatus } from './notion-provision.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
@@ -36,9 +36,9 @@ import { createRun, getRun, finalizeRun, setOpenclawRunId, setRunSessionId, hasP
 import { resolveSession } from './agent-sessions.js';
 import { enqueueTurn, nextEligible, claimAndCheck, dropItem, dropPendingForAgentPage, agentsWithPending, pendingCount, type QueuedTurn, type DispatchQueueRow } from './dispatch-queue.js';
 import { unmetDependencies, detectDependencyCycle, getDependsOnIds } from './task-deps.js';
-import { notionQuery } from './notion-client.js';
+import { notionQuery, notionPatch } from './notion-client.js';
 import { getNorcSettings } from './norc-settings.js';
-import { triage, assessOutcome, classifyTaskWorthy, type TriageCandidate, type TaskWorthy } from './orchestrator-agent.js';
+import { triage, assessOutcome, validateReturns, classifyTaskWorthy, type TriageCandidate, type TaskWorthy } from './orchestrator-agent.js';
 import { enrichCandidates, buildTaskContext } from './triage-context.js';
 import { resolveOrgMembers, listHumans, type OrgMember } from './org-members.js';
 import { norcDecide, type NorcAction, type NorcDecision, type NorcOpenTask } from './norc-agent.js';
@@ -59,6 +59,11 @@ import {
   setTaskStatus, setTaskAssignee, setTaskFields, setAgentStatus, touchLastActive, createTaskPage,
 } from './notion-writeback.js';
 import { markdownToBlocks } from './notion-blocks-md.js';
+import {
+  buildChoreIndex, getChore, detectForcedChore, compileChore, buildTasksFromCast,
+  findPendingCastByDiscussion, resolveCast as resolveCastRow, readCastPayload, reconcileFromNotion,
+  type CompileDeps, type ResolvedCastStep, type ChoreDoc, type PendingChoreCast,
+} from '../chores/index.js';
 
 /**
  * The compact per-task run block. The static protocol (how to use the API) lives
@@ -347,6 +352,32 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
       await handleSelfChangeVerdict(integration, pendingChange, triggering);
       return;
     }
+    // A reply in a pending chore-cast thread is an approve/reject verdict, too.
+    const pendingCast = findPendingCastByDiscussion(triggering.discussionId);
+    if (pendingCast) {
+      markProcessed(triggerKey);
+      await handleChoreCastVerdict(integration, pendingCast, triggering);
+      return;
+    }
+  }
+
+  // A forced chore reference ("/chore <id>") compiles that whole process —
+  // deterministic, before any mention/triage handling. Cheap id-scan first; resolve
+  // the anchor only on a hit so chore-off (and tokenless) comments pay nothing.
+  if (choresConfigured(getNorcSettings())) {
+    const text = (triggering?.plainText ?? '').trim();
+    const forced = text ? detectForcedChore(text, buildChoreIndex().map(c => c.id)) : null;
+    const chore = forced ? getChore(forced.id) : null;
+    if (forced && chore) {
+      markProcessed(triggerKey);
+      const anchor = await resolveAnchor(apiKey, pageId);
+      await compileChoreFromTrigger(
+        integration, anchor, chore,
+        inferInputs(chore, getAnyTitle((anchor.page as Record<string, unknown>)['properties']), '', forced.inputs),
+        'forced', triggering?.authorId ?? triggeringUserId,
+      );
+      return;
+    }
   }
 
   const mentionIds = extractMentionedPageIds(triggering?.richText ?? []);
@@ -501,6 +532,18 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
   const anchor = await resolveAnchor(apiKey, pageId);
   const properties = (anchor.page as Record<string, unknown>)['properties'];
 
+  // A row in the Chores DB is a chore DEFINITION, not a task — reconcile it to disk
+  // and never let it fall through to triage. NORC's own writes are bot-authored and
+  // already dropped upstream, so this only fires on human edits.
+  const choresDbRow = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'chores')).all()[0];
+  if (choresDbRow && anchor.parentDatabaseId && normId(anchor.parentDatabaseId) === normId(choresDbRow.notionDatabaseId)) {
+    if (getNorcSettings()?.choresNotionSync) {
+      await reconcileFromNotion(pageId).catch(err =>
+        emitLog(`chore reconcile failed for ${pageId}: ${err instanceof Error ? err.message : 'error'}`, 'NORC', pageId));
+    }
+    return;
+  }
+
   // A task with an inert Status (empty / Draft / Proposed) is still being written
   // or validated by a human — don't dispatch or triage it, even if an agent is
   // already in "Assigned To". Return BEFORE any markProcessed so no idempotency
@@ -561,6 +604,15 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
       await holdForDependencies(integration, anchor, unmet);
       return;
     }
+  }
+
+  // A forced chore reference ("/chore <id>") in the task title/body compiles that
+  // process — deterministic, before assignment/triage. Body is read only when
+  // chores are enabled. compileChoreFromTrigger is idempotent per (chore, page).
+  if (choresConfigured(getNorcSettings())) {
+    const title = getAnyTitle(properties);
+    const body = await readPageMarkdown(apiKey, pageId, 2000).catch(() => '');
+    if (await tryForcedChore(integration, anchor, `${title}\n${body}`, title, body, triggeringUserId)) return;
   }
 
   const candidateIds = [
@@ -672,6 +724,11 @@ export function triageConfigured(settings: ReturnType<typeof getNorcSettings>): 
   return settings.orchestratorProvider === 'openai' ? !!settings.orchestratorBaseUrl : !!settings.orchestratorApiKey;
 }
 
+/** Chores require triage (the same LLM does the matching + casting) AND the flag. */
+export function choresConfigured(settings: ReturnType<typeof getNorcSettings>): boolean {
+  return triageConfigured(settings) && !!settings?.choresEnabled;
+}
+
 /** The agent roster (name/specialty/capabilities/technology + current load) for
  * triage/assessment, excluding the given names. Mirrors the Org DB metadata the
  * agents registered with; load lets triage route around saturated agents. */
@@ -748,7 +805,7 @@ interface TriageCtx {
   triggeringUserId?: string | null;
 }
 
-export type TriageOutcome = 'routed' | 'suggested' | 'asked' | 'no-agents' | 'error' | 'disabled';
+export type TriageOutcome = 'routed' | 'suggested' | 'asked' | 'no-agents' | 'error' | 'disabled' | 'chore';
 
 /** The Notion user who created a page (fallback @mention target on escalation). */
 function pageCreatedById(page: Record<string, unknown>): string | null {
@@ -824,6 +881,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       systemPrompt: settings!.orchestratorSystemPrompt ?? undefined,
       kind: anchor.kind, title, text: ctx.text,
       commentedText: ctx.commentedText, conversation, candidates,
+      chores: choresConfigured(settings) ? buildChoreIndex() : [],
       taskContext, retriageNote,
     });
   } catch (err) {
@@ -837,6 +895,23 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
     await announce(msg, true);
     emitLog(`triage: no clear owner (${decision.message || 'asked'})`, 'Triage');
     return 'asked';
+  }
+
+  // Chore match: the task IS a known multi-step process. Compile it (auto-route
+  // gated, same threshold as routing + the chore's own min_confidence). Below the
+  // bar, ask the human rather than silently compiling.
+  if (decision.decision === 'chore') {
+    const chore = getChore(decision.chore);
+    if (chore && decision.confidence >= settings!.autoRouteThreshold && decision.confidence >= chore.minConfidence) {
+      await announce(decision.message?.trim() || `This matches the “${chore.id}” process — setting it up now.`);
+      emitLog(`triage: matched chore "${chore.id}" (confidence ${decision.confidence.toFixed(2)})`, 'Triage', anchor.pageId);
+      const body = await readPageMarkdown(apiKey, anchor.pageId).catch(() => '');
+      await compileChoreFromTrigger(integration, anchor, chore, inferInputs(chore, title, `${ctx.text}\n${body}`), 'triage', ctx.triggeringUserId ?? null);
+      return 'chore';
+    }
+    await announce(decision.message?.trim() || `This might fit the “${decision.chore}” process, but I'm not confident — reply to confirm and I'll run it.`, true);
+    emitLog(`triage: chore "${decision.chore}" below confidence (${decision.confidence.toFixed(2)}) — asked human`, 'Triage', anchor.pageId);
+    return 'suggested';
   }
 
   const routed = decision.agent ? matchAgentByName(decision.agent) : null;
@@ -888,6 +963,130 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
   }
   await announce(decision.message?.trim() || 'No one is assigned and no registered agent clearly fits. Who should take this?', true);
   return 'suggested';
+}
+
+// ─── Chores: compile a selected process into a pre-assigned task DAG ──────────
+
+/** Fill a chore's declared inputs from a forced-reference seed + the task's title
+ * and body (`name: value` / `name = value`). A single-input chore falls back to the
+ * task title. Unfilled inputs surface later as a "missing input" ask (never guessed). */
+function inferInputs(chore: ChoreDoc, title: string, body: string, seed: Record<string, string> = {}): Record<string, string> {
+  const inputs: Record<string, string> = { ...seed };
+  const hay = `${title}\n${body}`;
+  for (const name of chore.inputs) {
+    if (inputs[name]) continue;
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const m = new RegExp(`(?:^|\\b)${esc}\\s*[:=]\\s*("[^"]*"|[^\\n,]+)`, 'i').exec(hay);
+    if (m) inputs[name] = m[1]!.replace(/^["']|["']$/g, '').trim();
+  }
+  const only = chore.inputs.length === 1 ? chore.inputs[0]! : null;
+  if (only && !inputs[only] && title.trim()) inputs[only] = title.trim();
+  return inputs;
+}
+
+/** The orchestrator primitives the chore compiler needs, wired for one anchor —
+ * passed in so chores/compile.ts never imports orchestrator.ts (one-way edge). */
+function buildCompileDeps(integration: Integration, anchor: Anchor): CompileDeps {
+  const apiKey = integration.apiKey;
+  const settings = getNorcSettings();
+  return {
+    // Cast one step: run the SAME triage matcher (no chores passed, so a step can't
+    // recursively match another chore) and resolve the agent to its Org DB page.
+    resolveCast: async (needs, title) => {
+      const empty: ResolvedCastStep = { stepIndex: 0, number: 0, capability: needs, agentName: null, orgDbPageId: null, confidence: 0 };
+      if (!triageConfigured(settings)) return empty;
+      const candidates = await enrichCandidates(apiKey, rosterCandidates([]));
+      if (candidates.length === 0) return empty;
+      let decision;
+      try {
+        decision = await triage({
+          provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+          apiKey: settings!.orchestratorApiKey ?? '', baseUrl: settings!.orchestratorBaseUrl,
+          model: settings!.orchestratorModel, systemPrompt: settings!.orchestratorSystemPrompt ?? undefined,
+          kind: 'task', title, text: needs, candidates,
+        });
+      } catch { return empty; }
+      const name = (decision.decision === 'route' || decision.decision === 'suggest') ? decision.agent : null;
+      const ref = name ? matchAgentByName(name) : null;
+      return { stepIndex: 0, number: 0, capability: needs, agentName: ref?.name ?? null, orgDbPageId: ref?.orgDbPageId ?? null, confidence: decision.confidence };
+    },
+    createDag: (tasks) => proposeTasks({ sourcePageId: anchor.pageId, proposerName: 'NORC', tasks }),
+    announce: async (text) => { await safeWrite('chore note', () => postAgentComment(apiKey, anchor.pageId, `🧭 **NORC**\n${text}`)); },
+    postCast: async (text) => {
+      const res = await postComment(apiKey, anchor.pageId, text);
+      recordOurComment(res.commentId);
+      return { commentId: res.commentId, discussionId: res.discussionId };
+    },
+  };
+}
+
+/** Compile a selected chore (from triage auto-match or a forced reference) into a
+ * pre-assigned, held task DAG. Idempotent per (chore, page); a blocked compile
+ * (missing inputs) releases the dedup key so a later edit can retry. */
+async function compileChoreFromTrigger(
+  integration: Integration, anchor: Anchor, chore: ChoreDoc,
+  inputs: Record<string, string>, via: 'forced' | 'triage', proposedByUserId: string | null,
+): Promise<void> {
+  const dedupKey = `chore:${chore.id}:${anchor.pageId}`;
+  if (alreadyProcessed(dedupKey)) {
+    emitLog(`chore "${chore.id}" already compiled for ${anchor.pageId} — skipping`, 'Triage', anchor.pageId);
+    return;
+  }
+  markProcessed(dedupKey);
+  try {
+    const outcome = await compileChore(buildCompileDeps(integration, anchor), {
+      chore, inputs, sourcePageId: anchor.pageId, pageId: anchor.pageId, via, proposedByUserId,
+    });
+    emitLog(`chore "${chore.id}" (${via}) on ${anchor.pageId} → ${outcome}`, 'Triage', anchor.pageId);
+    if (outcome === 'blocked') unmarkProcessed(dedupKey); // retry once the human adds inputs
+  } catch (err) {
+    unmarkProcessed(dedupKey);
+    emitLog(`chore "${chore.id}" compile failed: ${err instanceof Error ? err.message : 'error'}`, 'Triage', anchor.pageId);
+  }
+}
+
+/** Try to compile a forced chore named in `text` (e.g. `/chore ship-blog-post`).
+ * Returns true when a known chore was named (so the caller stops normal handling),
+ * even if the compile was deferred/blocked. */
+async function tryForcedChore(integration: Integration, anchor: Anchor, text: string, seedTitle: string, seedBody: string, triggeringUserId: string | null): Promise<boolean> {
+  if (!choresConfigured(getNorcSettings())) return false;
+  const ids = buildChoreIndex().map(c => c.id);
+  const forced = detectForcedChore(text, ids);
+  if (!forced) return false;
+  const chore = getChore(forced.id);
+  if (!chore) return false;
+  emitLog(`chore "${chore.id}" forced on ${anchor.pageId}`, 'Triage', anchor.pageId);
+  await compileChoreFromTrigger(integration, anchor, chore, inferInputs(chore, seedTitle, seedBody, forced.inputs), 'forced', triggeringUserId);
+  return true;
+}
+
+/** A reply in a pending chore-cast thread is an approve/reject verdict — apply it. */
+async function handleChoreCastVerdict(integration: Integration, cast: PendingChoreCast, triggering: ThreadComment): Promise<void> {
+  const apiKey = integration.apiKey;
+  const did = cast.discussionId;
+  const reply = (text: string) => did
+    ? safeWrite('cast verdict', () => postAgentReply(apiKey, did, `🧭 **NORC**\n${text}`))
+    : safeWrite('cast verdict', () => postAgentComment(apiKey, cast.pageId, `🧭 **NORC**\n${text}`));
+  const verdict = parseApprovalReply(triggering.plainText);
+  if (verdict === 'unclear') {
+    await reply(`Reply **approve** to run the “${cast.choreId}” plan, or **reject** to discard it.`);
+    return;
+  }
+  if (verdict === 'reject') {
+    resolveCastRow(cast.id, 'rejected', triggering.authorId ?? null);
+    await reply(`OK — I won't run the “${cast.choreId}” process.`);
+    return;
+  }
+  resolveCastRow(cast.id, 'approved', triggering.authorId ?? null);
+  const chore = getChore(cast.choreId);
+  if (!chore) { await reply(`The “${cast.choreId}” chore no longer exists, so I can't run it.`); return; }
+  const payload = readCastPayload(cast);
+  try {
+    await proposeTasks({ sourcePageId: cast.sourcePageId, proposerName: 'NORC', tasks: buildTasksFromCast(chore, payload.inputs, payload.cast) });
+    await reply(`Approved — the “${chore.id}” process is running now.`);
+  } catch (err) {
+    await reply(`I couldn't start the process: ${err instanceof Error ? err.message : 'error'}.`);
+  }
 }
 
 /**
@@ -1099,7 +1298,100 @@ export async function finalizeAgentReport(run: TaskRun, report: { status?: strin
  * the Done webhook branch). Idempotent across hooks: one release attempt per
  * (dependent, completed-dep) pair.
  */
+// ─── Chore step output validation (the `returns:` contract gate) ────────────────
+
+/** Pull a step's output contract out of a task body — the "Expected output:" section
+ * compile.ts writes. Empty when the task carries no contract (i.e. not a chore step).
+ * Captures the contiguous block after the marker (so trailing agent edits don't leak). */
+export function extractExpectedOutput(body: string): string {
+  const m = /Expected output:\s*\n?([^\n]+(?:\n(?!\n)[^\n]+)*)/i.exec(body);
+  return m ? m[1]!.trim() : '';
+}
+
+async function setRetryCount(apiKey: string, taskPageId: string, n: number): Promise<void> {
+  await notionPatch(apiKey, `/pages/${taskPageId}`, { properties: { 'Retry Count': { number: n } } });
+}
+
+const RETURNS_MAX_RETRIES = 3;
+
+/**
+ * Before a chore step's dependents are released, validate its output against the
+ * step's `returns:` contract — read from the TASK BODY, so no chore↔task linkage is
+ * needed. On PASS → proceed. On FAIL → re-dispatch the same step to its assignee
+ * (bounded by the Tasks DB 'Retry Count' field), else park it Blocked for a human.
+ * Returns true when it INTERCEPTED (caller must NOT release). Dedup'd per (task,
+ * attempt) since /status and /complete can both fire one completion.
+ */
+async function validateChoreStepOutput(integration: Integration, taskPageId: string): Promise<boolean> {
+  const apiKey = integration.apiKey;
+  const settings = getNorcSettings();
+  let anchor: Anchor;
+  try { anchor = await resolveAnchor(apiKey, taskPageId); } catch { return false; }
+  if (anchor.kind !== 'task') return false;
+  const props = (anchor.page as Record<string, unknown>)['properties'];
+  const body = await readPageMarkdown(apiKey, taskPageId).catch(() => '');
+  const contract = extractExpectedOutput(body);
+  if (!contract) return false; // no contract → not a chore step → proceed
+
+  const retry = getNumber(props, 'Retry Count') ?? 0;
+  const passKey = `returns-pass:${taskPageId}:${retry}`;
+  const failKey = `returns-fail:${taskPageId}:${retry}`;
+  if (alreadyProcessed(passKey)) return false;
+  if (alreadyProcessed(failKey)) return true;
+
+  const output = `${getRichText(props, 'Agent Output')}\n\n${body}`.trim();
+  const verdict = await validateReturns({
+    provider: settings!.orchestratorProvider === 'openai' ? 'openai' : 'anthropic',
+    apiKey: settings!.orchestratorApiKey ?? '', baseUrl: settings!.orchestratorBaseUrl, model: settings!.orchestratorModel,
+    task: getAnyTitle(props), contract, output,
+  });
+  if (verdict.pass) { markProcessed(passKey); return false; }
+  markProcessed(failKey);
+
+  const assigned = matchAgents(getRelationIds(props, 'Assigned To'));
+  const feedback = verdict.feedback?.trim() || 'the output did not meet the expected result';
+  if (retry < RETURNS_MAX_RETRIES && assigned.length > 0) {
+    await setRetryCount(apiKey, taskPageId, retry + 1);
+    await safeWrite('revalidate status', () => setTaskStatus(apiKey, taskPageId, 'In Progress'));
+    await safeWrite('revalidate note', () => postAgentComment(apiKey, taskPageId,
+      `🧭 **NORC** — this step's output didn't meet its requirement yet, so I asked ${assigned.map(a => `@${a.name}`).join(', ')} to revise (attempt ${retry + 1}/${RETURNS_MAX_RETRIES}).\n\n_Expected:_ ${contract}\n_What to fix:_ ${feedback}`));
+    for (const agent of assigned) {
+      await requestAgentTurn(integration, anchor, agent, {
+        thread: [],
+        request: `Your previous output did NOT satisfy this step's required output.\nRequired: ${contract}\nWhat to fix: ${feedback}\nRevise and report the corrected result.`,
+        manageTaskStatus: true, how: 'returns revalidation',
+      });
+    }
+    emitLog(`returns check FAILED for ${taskPageId} — re-dispatched (attempt ${retry + 1}/${RETURNS_MAX_RETRIES})`, 'Triage', taskPageId);
+    return true;
+  }
+  // Exhausted (or nobody to retry) → park for a human, hold the chain.
+  await safeWrite('returns blocked status', () => setTaskStatus(apiKey, taskPageId, 'Blocked'));
+  const who = pageCreatedById(anchor.page as Record<string, unknown>);
+  await safeWrite('returns blocked note', () => postAgentComment(apiKey, taskPageId,
+    `🚧 **NORC** — this step still doesn't meet its required output after ${retry} attempt(s), so I've parked it for you.\n\n_Expected:_ ${contract}\n_Issue:_ ${feedback}`, who));
+  emitLog(`returns check FAILED for ${taskPageId} — exhausted, parked Blocked`, 'Triage', taskPageId);
+  return true;
+}
+
+/**
+ * Validate a completed chore step's output (against its `returns:` contract) before
+ * unblocking its dependents, then release. A thin wrapper around releaseUnblocked so
+ * EVERY Done path — agent API /complete & /status, the human-Done webhook, the sync
+ * completion paths, and NORC's own set_task_status — gets the check for free.
+ */
 export async function releaseDependents(integration: Integration, completedTaskPageId: string): Promise<void> {
+  if (choresConfigured(getNorcSettings())) {
+    try {
+      if (await validateChoreStepOutput(integration, completedTaskPageId)) return; // failed → retried or held
+    } catch (err) {
+      emitLog(`returns validation error for ${completedTaskPageId}: ${err instanceof Error ? err.message : 'error'}`, 'Triage', completedTaskPageId);
+    }
+  }
+  return releaseUnblocked(integration, completedTaskPageId);
+}
+
+async function releaseUnblocked(integration: Integration, completedTaskPageId: string): Promise<void> {
   const apiKey = integration.apiKey;
   const tasksDb = db.select().from(notionDatabases).where(eq(notionDatabases.kind, 'tasks')).all()[0];
   if (!tasksDb) return;
@@ -1159,30 +1451,46 @@ export async function releaseDependents(integration: Integration, completedTaskP
     try { anchor = await resolveAnchor(apiKey, depTaskId); } catch { continue; }
     const assigned = matchAgents(getRelationIds(props, 'Assigned To'));
     const humans = await humanAssignees(apiKey, props);
-    const to = [...assigned.map(a => a.name), ...humans.map(h => `${h.name || h.pageId} (human)`)];
+    // Runtime reassign fallback: a pre-assigned agent that's gone unreachable would
+    // stall the step — drop it so an all-dead assignment falls through to re-triage.
+    // Gated on chores: when chores are off, behavior is byte-identical to before
+    // (dispatch to whoever is assigned) — and chores-on guarantees triage is
+    // configured, so the re-triage fallback always has somewhere to route.
+    const liveAssigned = choresConfigured(getNorcSettings())
+      ? assigned.filter(a => isAgentReachable(a.agentId))
+      : assigned;
+    if (liveAssigned.length === 0 && assigned.length > 0) {
+      emitLog(`dependent task ${depTaskId}: pre-assigned ${assigned.map(a => a.name).join(', ')} unreachable — re-triaging to a live agent`, 'Triage', depTaskId);
+    }
+    const to = [...liveAssigned.map(a => a.name), ...humans.map(h => `${h.name || h.pageId} (human)`)];
     emitLog(`dependencies met for task ${depTaskId} — releasing${to.length ? ` to ${to.join(', ')}` : ' via triage'}`, 'Triage', depTaskId);
-    if (assigned.length > 0) {
-      for (const agent of assigned) {
-        markProcessed(`page:${depTaskId}:${agent.agentId}`); // handled here — later edits must not double-fire
-        await requestAgentTurn(integration, anchor, agent, {
-          thread: [],
-          request: 'A task this one depends on is now complete, so this task is unblocked. Its results — text and any files/images it produced — are in the [DEPENDENCIES] section of your context above; build directly on them. Complete this task and report your result.',
-          manageTaskStatus: true, how: 'dependency release',
-        });
-      }
+    for (const agent of liveAssigned) {
+      markProcessed(`page:${depTaskId}:${agent.agentId}`); // handled here — later edits must not double-fire
+      await requestAgentTurn(integration, anchor, agent, {
+        thread: [],
+        request: 'A task this one depends on is now complete, so this task is unblocked. Its results — text and any files/images it produced — are in the [DEPENDENCIES] section of your context above; build directly on them. Complete this task and report your result.',
+        manageTaskStatus: true, how: 'dependency release',
+      });
     }
     for (const human of humans) {
       await notifyHumanAssignee(integration, anchor, human,
         `dep-release-human:${depTaskId}:${normId(human.pageId)}`,
         { intro: 'A task this one depends on is complete — this task is now unblocked. Over to' });
     }
-    if (assigned.length === 0 && humans.length === 0) {
+    if (liveAssigned.length === 0 && humans.length === 0) {
       // runTriage directly (not triageUnhandled): propose-tasks pre-consumes
       // the `triage:<id>` key at creation, which would short-circuit the hold→release path.
       await runTriage(integration, anchor, { text: getAnyTitle(props), thread: [] }, [],
         'A dependency just completed — this task is now unblocked.');
     }
   }
+}
+
+/** A pre-assigned agent is reachable unless the heartbeat marked it 'unreachable'
+ * (unknown/connected/untested all get the benefit of the doubt). */
+function isAgentReachable(agentId: string): boolean {
+  const row = db.select().from(agents).where(eq(agents.id, agentId)).all()[0];
+  return !row || row.status !== 'unreachable';
 }
 
 export interface ProposedTask {
@@ -1192,6 +1500,10 @@ export interface ProposedTask {
   /** Indices of EARLIER tasks in the same batch this one depends on (validated
    * by the route: always < this task's index, so the batch is a DAG). */
   dependsOn?: number[];
+  /** Org DB page ids to pre-assign (e.g. a chore's resolved cast). A pre-assigned
+   * root step dispatches directly (skips triage); a held step is dispatched to its
+   * assignee by releaseDependents when its chain completes. */
+  assigneeIds?: string[];
 }
 
 /**
@@ -1242,9 +1554,10 @@ export async function proposeTasks(opts: {
     const dependsOn = (t.dependsOn ?? [])
       .map(idx => createdIdByIndex[idx])
       .filter((id): id is string => !!id);
+    const assigneeIds = (t.assigneeIds ?? []).filter(Boolean);
     let pageId = '';
     try {
-      ({ pageId } = await createTaskPage(apiKey, tasksDb.notionDatabaseId, { title, kpis: t.kpis, projectId, dependsOn }));
+      ({ pageId } = await createTaskPage(apiKey, tasksDb.notionDatabaseId, { title, kpis: t.kpis, projectId, dependsOn, assigneeIds }));
     } catch (err) {
       emitLog(`propose-tasks: failed to create "${title}": ${err instanceof Error ? err.message : 'error'}`, 'Triage');
       continue;
@@ -1259,8 +1572,27 @@ export async function proposeTasks(opts: {
 
     let disposition: TriageOutcome | 'created' | 'held' = 'created';
     if (dependsOn.length > 0) {
-      // Held: releaseDependents triages/dispatches it when its chain completes.
+      // Held: releaseDependents triages/dispatches it (to its pre-assigned agent,
+      // if any) when its chain completes.
       disposition = 'held';
+    } else if (assigneeIds.length > 0) {
+      // Pre-assigned root step (e.g. a chore's first step): dispatch directly to the
+      // assignee(s) and consume the assignment key so the creation webhook doesn't
+      // double-dispatch. Mirrors createTaskFromWork's named-assignee path.
+      try {
+        const taskAnchor = await resolveAnchor(apiKey, pageId);
+        for (const orgPageId of assigneeIds) {
+          const ref = matchAgents([orgPageId])[0];
+          if (!ref) continue;
+          markProcessed(`page:${pageId}:${ref.agentId}`);
+          await requestAgentTurn(integration, taskAnchor, ref, {
+            thread: [], request: t.description?.trim() || title,
+            manageTaskStatus: true, how: 'chore compile',
+          });
+        }
+      } catch (err) {
+        emitLog(`propose-tasks: dispatch failed for "${title}": ${err instanceof Error ? err.message : 'error'}`, 'Triage');
+      }
     } else if (triageConfigured(getNorcSettings())) {
       try {
         const anchor = await resolveAnchor(apiKey, pageId);

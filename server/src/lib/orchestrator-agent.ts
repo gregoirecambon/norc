@@ -7,6 +7,7 @@
 // OpenAI-compatible chat/completions endpoint, e.g. a LiteLLM proxy).
 
 import { dispatch } from '../adapters/index.js';
+import type { ChoreIndexEntry } from '../chores/types.js';
 
 export type TriageProvider = 'anthropic' | 'openai';
 
@@ -52,6 +53,9 @@ export interface TriageInput {
   conversation?: string[];
   candidates: TriageCandidate[];
   taskContext?: TriageTaskContext;
+  /** Available chore processes (id + short description only) — when present, triage
+   * may also return a `chore` decision to compile that whole process. */
+  chores?: ChoreIndexEntry[];
   /** Machine-facing re-triage note, e.g. "agent X already timed out on this". */
   retriageNote?: string;
 }
@@ -59,6 +63,7 @@ export interface TriageInput {
 export type TriageDecision =
   | { decision: 'route'; agent: string; confidence: number; message: string }
   | { decision: 'suggest'; agent: string | null; confidence: number; message: string }
+  | { decision: 'chore'; chore: string; confidence: number; message: string }
   | { decision: 'ignore'; agent: null; confidence: number; message: string };
 
 const DEFAULT_SYSTEM =
@@ -134,6 +139,20 @@ export function buildTriagePrompt(input: TriageInput): string {
     taskContext = lines.join('\n');
   }
 
+  // Chores: a description-only index. When present, triage may also pick "chore"
+  // (compile a whole multi-step process). Gated so prompts are byte-identical when
+  // no chores are configured.
+  const chores = input.chores ?? [];
+  const choreBlock = chores.length
+    ? ['', 'AVAILABLE CHORES (multi-step processes — pick "chore" only when the task IS this whole process, not a single action):',
+       chores.map(c => `- ${c.id}: ${c.description}`).join('\n')].join('\n')
+    : '';
+  const decisionEnum = chores.length ? `"route"|"suggest"|"ignore"|"chore"` : `"route"|"suggest"|"ignore"`;
+  const choreField = chores.length ? `,"chore":"<exact chore id from the list, or null>"` : '';
+  const choreBullet = chores.length
+    ? `- chore: the task IS one of the listed multi-step processes — compile it. Prefer route/suggest for single-agent work; only pick chore when the whole process clearly applies.`
+    : '';
+
   return [
     `A Notion ${input.kind} has no agent assigned and needs triage.`,
     `Title: ${input.title || '(untitled)'}`,
@@ -146,12 +165,14 @@ export function buildTriagePrompt(input: TriageInput): string {
     `AVAILABLE AGENTS:`,
     roster,
     humanRoster,
+    ...(chores.length ? [choreBlock] : []),
     ``,
     `Respond with ONLY a JSON object, no prose or code fences:`,
-    `{"decision":"route"|"suggest"|"ignore","agent":"<exact agent name from the list, or null>","confidence":<number 0..1>,"message":"<one short sentence shown to the user in Notion>"}`,
+    `{"decision":${decisionEnum},"agent":"<exact agent name from the list, or null>"${choreField},"confidence":<number 0..1>,"message":"<one short sentence shown to the user in Notion>"}`,
     `- route: a listed agent's capabilities clearly and confidently match — dispatch now.`,
     `- suggest: a listed agent likely fits, but a human should confirm.`,
     `- ignore: NO listed agent has the needed capability (ask the human), or no agent action is needed.`,
+    ...(chores.length ? [choreBullet] : []),
     ...humanRules,
     `Only pick an agent whose listed specialty/capabilities/technology actually cover this task. Do NOT guess or invent a fit, and never name an agent not in the list above.`,
     `Each agent shows its current load (running/queued/cap). When two candidates fit comparably, prefer the less-loaded one — work routed to a saturated agent waits in its queue. Capability fit always comes first.`,
@@ -168,7 +189,7 @@ export async function triage(input: TriageInput): Promise<TriageDecision> {
   if (!res.ok || !res.text) {
     return { decision: 'ignore', agent: null, confidence: 0, message: res.error ?? 'no response' };
   }
-  return parseDecision(res.text, input.candidates);
+  return parseDecision(res.text, input.candidates, (input.chores ?? []).map(c => c.id));
 }
 
 export interface LLMConfig {
@@ -559,6 +580,47 @@ export function parseAssessment(text: string): AssessResult {
   return { outcome, ...(need ? { need } : {}), ...(message ? { message } : {}) };
 }
 
+// ─── Chore step output validation (the `returns:` contract check) ───────────────
+
+export interface ValidateReturnsInput extends LLMConfig {
+  task: string;
+  contract: string;   // the step's `returns:` clause
+  output: string;     // the agent's Agent Output + page body
+}
+export type ReturnsVerdict = { pass: boolean; feedback?: string };
+
+const RETURNS_SYSTEM =
+  'You check whether an AI agent\'s output satisfies the REQUIRED output a task step must produce. Be ' +
+  'pragmatic: pass anything that meets the intent of the requirement; fail only a clear miss — the output ' +
+  'is missing, wrong, a refusal, or a placeholder. When failing, say in one sentence what is missing.';
+
+/** Judge an output against its step's `returns:` contract. Safe default PASS when
+ * the LLM is unavailable, so an outage never blocks a pipeline or spins retries. */
+export async function validateReturns(input: ValidateReturnsInput): Promise<ReturnsVerdict> {
+  const prompt = [
+    `Task: ${input.task || '(untitled)'}`,
+    `REQUIRED output (the contract this step must satisfy):`, `"""`, input.contract.slice(0, 1000), `"""`,
+    ``,
+    `The agent's actual output:`, `"""`, input.output.slice(0, 3000), `"""`,
+    ``,
+    `Does the output satisfy the required output?`,
+    `Respond with ONLY JSON, no prose:`,
+    `{"pass":true|false,"feedback":"<if false, what is missing or wrong, one sentence>"}`,
+  ].join('\n');
+  const res = await callTriageLLM(input, RETURNS_SYSTEM, prompt);
+  if (!res.ok || !res.text) return { pass: true };
+  return parseReturnsVerdict(res.text);
+}
+
+/** Parse the verdict JSON; default PASS unless `pass` is explicitly false. */
+export function parseReturnsVerdict(text: string): ReturnsVerdict {
+  const obj = extractJson(text);
+  if (!obj) return { pass: true };
+  const pass = obj['pass'] === false ? false : true;
+  const feedback = typeof obj['feedback'] === 'string' ? obj['feedback'] : undefined;
+  return { pass, ...(feedback ? { feedback } : {}) };
+}
+
 // ─── Resource assist: NORC answers a stuck agent's lookup from workspace pages ───
 
 export interface AssistSource { title: string; pageId: string; url?: string | null; body: string }
@@ -652,14 +714,23 @@ function extractChatText(body: unknown): string {
   return typeof content === 'string' ? content : '';
 }
 
-/** Parse the LLM's JSON decision; validate the agent against the roster. */
-export function parseDecision(text: string, candidates: TriageCandidate[]): TriageDecision {
+/** Parse the LLM's JSON decision; validate the agent against the roster (and, when
+ * provided, a `chore` decision against the known chore ids). */
+export function parseDecision(text: string, candidates: TriageCandidate[], choreIds: string[] = []): TriageDecision {
   const obj = extractJson(text);
   if (!obj) return { decision: 'ignore', agent: null, confidence: 0, message: '' };
 
   const confidence = typeof obj['confidence'] === 'number' ? Math.max(0, Math.min(1, obj['confidence'] as number)) : 0;
   const message = typeof obj['message'] === 'string' ? obj['message'] : '';
   const rawAgent = typeof obj['agent'] === 'string' ? obj['agent'] : null;
+
+  // A "chore" verdict is honored only when the named id is actually a known chore.
+  if (obj['decision'] === 'chore' && choreIds.length) {
+    const rawChore = typeof obj['chore'] === 'string' ? obj['chore'].replace(/^@/, '').trim().toLowerCase() : '';
+    const chore = choreIds.find(id => id.toLowerCase() === rawChore);
+    if (chore) return { decision: 'chore', chore, confidence, message };
+    return { decision: 'ignore', agent: null, confidence, message };
+  }
 
   let matched: TriageCandidate | undefined;
   if (rawAgent) {

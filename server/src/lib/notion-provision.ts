@@ -5,7 +5,9 @@
 const NOTION_API = 'https://api.notion.com/v1';
 const NOTION_VERSION = '2022-06-28';
 
-export type DbKind = 'org' | 'tasks' | 'projects' | 'pipeline' | 'company';
+// 'pipeline' is the dormant legacy kind (the old "Pipeline Config" DB); kept in
+// the union so existing rows still type-check until they're upgraded to 'chores'.
+export type DbKind = 'org' | 'tasks' | 'projects' | 'pipeline' | 'chores' | 'company';
 
 export interface ProvisionedDb {
   kind: DbKind;
@@ -79,14 +81,24 @@ async function updateDatabase(
   databaseId: string,
   properties: Record<string, unknown>,
 ): Promise<void> {
+  await patchDatabase(apiKey, databaseId, { properties });
+}
+
+/** PATCH a database's title and/or properties. Property entries can add (new key →
+ * type), rename (existing key → `{name}`), or remove (key → null). */
+async function patchDatabase(
+  apiKey: string,
+  databaseId: string,
+  body: { title?: unknown; properties?: Record<string, unknown> },
+): Promise<void> {
   const res = await fetch(`${NOTION_API}/databases/${databaseId}`, {
     method: 'PATCH',
     headers: headers(apiKey),
-    body: JSON.stringify({ properties }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as Record<string, unknown>;
-    const msg = typeof body['message'] === 'string' ? body['message'] : 'Failed to add database relations';
+    const b = await res.json().catch(() => ({})) as Record<string, unknown>;
+    const msg = typeof b['message'] === 'string' ? b['message'] : 'Failed to update database';
     throw new Error(msg);
   }
 }
@@ -171,10 +183,23 @@ const projectsProps: Record<string, unknown> = {
   'Slack Channel ID': text(),
 };
 
-const pipelineProps: Record<string, unknown> = {
-  'Pipeline Name': { title: {} },
-  'Steps': text(),
-  'Trigger Type': sel('mention', 'status-change', 'scheduled'),
+// Chores DB — the Notion mirror of the on-disk chore.md process definitions. The
+// full step spec lives in the page BODY (one fenced code block, a faithful
+// round-trip); these properties mirror the frontmatter for human filtering, plus
+// two sync-bookkeeping columns (Sync State display + Sync Hash baseline) so the
+// reconciler keeps state in Notion, not a SQLite table.
+const choresExtraProps: Record<string, unknown> = {
+  'Description':    text(),
+  'Trigger':        sel('mention', 'status-change', 'scheduled'),
+  'Approval':       sel('auto', 'cast'),
+  'Min Confidence': num(),
+  'Inputs':         text(),
+  'Sync State':     sel('synced', 'conflict', 'disk-only'),
+  'Sync Hash':      text(),
+};
+const choresProps: Record<string, unknown> = {
+  'Chore': { title: {} },   // = the chore id
+  ...choresExtraProps,
 };
 
 // Company context — vision / values / strategy. Read-only background that only
@@ -196,7 +221,7 @@ export async function provisionWorkspace(apiKey: string, parentPageId: string): 
   const org = await createDatabase(apiKey, parentPageId, 'Org DB', orgProps);
   const tasks = await createDatabase(apiKey, parentPageId, 'Tasks', tasksProps);
   const projects = await createDatabase(apiKey, parentPageId, 'Projects', projectsProps);
-  const pipeline = await createDatabase(apiKey, parentPageId, 'Pipeline Config', pipelineProps);
+  const chores = await createDatabase(apiKey, parentPageId, 'Chores', choresProps);
   const company = await createDatabase(apiKey, parentPageId, 'Company', companyProps);
 
   // Phase 2 — add cross-database relations now that all IDs exist.
@@ -216,7 +241,7 @@ export async function provisionWorkspace(apiKey: string, parentPageId: string): 
     { kind: 'org', notionDatabaseId: org.id, title: 'Org DB', url: org.url },
     { kind: 'tasks', notionDatabaseId: tasks.id, title: 'Tasks', url: tasks.url },
     { kind: 'projects', notionDatabaseId: projects.id, title: 'Projects', url: projects.url },
-    { kind: 'pipeline', notionDatabaseId: pipeline.id, title: 'Pipeline Config', url: pipeline.url },
+    { kind: 'chores', notionDatabaseId: chores.id, title: 'Chores', url: chores.url },
     { kind: 'company', notionDatabaseId: company.id, title: 'Company', url: company.url },
   ];
 }
@@ -236,6 +261,34 @@ export async function provisionCompanyDb(
     await updateDatabase(apiKey, projectsDatabaseId, { 'Company': relation(company.id) });
   }
   return { kind: 'company', notionDatabaseId: company.id, title: 'Company', url: company.url };
+}
+
+/**
+ * Provide the Chores DB (the Notion mirror of the on-disk chore.md files). For a
+ * workspace whose dormant "Pipeline Config" DB still exists, RENAME it in place →
+ * "Chores": rename its title property ('Pipeline Name' → 'Chore'), drop the unused
+ * legacy props, and add the chore columns — so the dormant DB is reused, not
+ * orphaned. Otherwise create a fresh "Chores" DB. Idempotent at the caller.
+ */
+export async function provisionChoresDb(
+  apiKey: string,
+  parentPageId: string,
+  existingPipelineDbId?: string | null,
+): Promise<ProvisionedDb> {
+  if (existingPipelineDbId) {
+    await patchDatabase(apiKey, existingPipelineDbId, {
+      title: [{ type: 'text', text: { content: 'Chores' } }],
+      properties: {
+        'Pipeline Name': { name: 'Chore' }, // rename the title property
+        'Steps': null,                      // drop the unused legacy columns
+        'Trigger Type': null,
+        ...choresExtraProps,
+      },
+    });
+    return { kind: 'chores', notionDatabaseId: existingPipelineDbId, title: 'Chores', url: null };
+  }
+  const chores = await createDatabase(apiKey, parentPageId, 'Chores', choresProps);
+  return { kind: 'chores', notionDatabaseId: chores.id, title: 'Chores', url: chores.url };
 }
 
 /**

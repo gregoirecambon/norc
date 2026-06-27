@@ -413,8 +413,11 @@ async function routeViaTriage(botToken: string, channel: string, threadRoot: str
       text: request, conversation: thread.map(l => `${l.author}: ${l.text}`),
       candidates,
     });
-    const routed = decision.agent ? matchAgentByName(decision.agent) : null;
-    if (routed && (decision.decision === 'route' || decision.decision === 'suggest')) {
+    // Slack triage passes no chores, so the decision is route/suggest/ignore; narrow
+    // before reading .agent (the 'chore' variant has no agent field).
+    const routed = (decision.decision === 'route' || decision.decision === 'suggest') && decision.agent
+      ? matchAgentByName(decision.agent) : null;
+    if (routed) {
       // Chat is low-stakes — a suggested agent answers too (no confirm round-trip).
       return routed;
     }

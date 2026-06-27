@@ -6,12 +6,13 @@ import OperationsPage from './pages/Operations.js';
 import DashboardPage from './pages/Dashboard.js';
 import LogsPage from './pages/Logs.js';
 import SettingsPage from './pages/Settings.js';
+import ChoresPage from './pages/Chores.js';
 import NotionPage from './pages/Notion.js';
 import TeamPage from './pages/Team.js';
 import LoginPage from './pages/Login.js';
 import { getSession, logout, type SessionUser } from './api/auth.js';
 
-export type Page = 'agents' | 'operations' | 'dashboard' | 'logs' | 'team' | 'settings' | 'notion';
+export type Page = 'agents' | 'operations' | 'chores' | 'dashboard' | 'logs' | 'team' | 'settings' | 'notion';
 
 export default function App() {
   const [page, setPage] = useState<Page>('agents');
@@ -48,6 +49,7 @@ export default function App() {
       <main style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', background: 'var(--surface2)' }}>
         {page === 'agents'     && <AgentsPage />}
         {page === 'operations' && <OperationsPage />}
+        {page === 'chores'     && <ChoresPage />}
         {page === 'dashboard'  && <DashboardPage />}
         {page === 'logs'       && <LogsPage />}
         {page === 'team'     && <TeamPage user={user} />}
