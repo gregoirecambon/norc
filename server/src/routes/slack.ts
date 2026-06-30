@@ -66,6 +66,7 @@ function appManifest(): Record<string, unknown> {
           'app_mentions:read',
           'chat:write',
           'chat:write.customize',
+          'reactions:write',
           'files:write',
           'channels:history', 'groups:history', 'im:history', 'mpim:history',
           'channels:read', 'groups:read',

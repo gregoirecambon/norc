@@ -30,6 +30,7 @@ import type { AgentRef } from '../lib/notion-mentions.js';
 import { getSlack as getSlackIntegration, isSlackActive, isSlackAnchor, parseSlackAnchor } from '../lib/slack-integration.js';
 import path from 'node:path';
 import { ensureChannelMembership, resolveChannelRef, postAsAgent, uploadFileAsAgent } from '../lib/slack-client.js';
+import { ackResolved } from '../lib/slack-ack.js';
 import { notifySlackOnCompletion } from '../lib/slack-notify.js';
 import { slackChatContext } from '../lib/slack-orchestrator.js';
 import { agentSlackIcon } from '../lib/slack-agents.js';
@@ -222,6 +223,9 @@ export function makeRunsRouter(): ExpressRouter {
             iconUrl: await agentSlackIcon(run.agentId),
           });
           markActed(run.id);
+          // The agent's reply is in the thread — flip the human's ⏳ to ✅ now
+          // (the async chat lane left it pending for exactly this).
+          await ackResolved(botToken, where.channel, where.threadTs);
           emitLog(`agent API: reply posted in Slack thread ${where.channel} (run ${run.id})`, agentTag(run));
           res.json({ ok: true });
           return;

@@ -239,6 +239,24 @@ export async function uploadFileAsAgent(token: string, opts: {
   return { fileId, permalink };
 }
 
+/**
+ * reactions.add / reactions.remove — needs the `reactions:write` scope. Used
+ * for the ⏳→✅ acknowledgement NORC leaves on the message that triggered it, so
+ * a human sees "received" the instant they tag an agent (the orchestration
+ * thinking happens after). Best-effort: an app installed before the scope was
+ * added just won't react (the caller swallows the missing_scope throw).
+ */
+export async function addReaction(token: string, channel: string, timestamp: string, name: string): Promise<void> {
+  // 'dm' was a legacy synthetic thread root, never a real message ts.
+  if (timestamp === 'dm') return;
+  await request(token, 'reactions.add', { channel, timestamp, name });
+}
+
+export async function removeReaction(token: string, channel: string, timestamp: string, name: string): Promise<void> {
+  if (timestamp === 'dm') return;
+  await request(token, 'reactions.remove', { channel, timestamp, name });
+}
+
 export interface SlackMessage {
   ts: string;
   threadTs: string | null;

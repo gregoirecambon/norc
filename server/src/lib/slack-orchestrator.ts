@@ -20,6 +20,7 @@ import { emitLog } from './logger.js';
 import { emitEvent } from './events.js';
 import { getSlack, isSlackActive, slackAnchorId, parseSlackAnchor } from './slack-integration.js';
 import { postAsAgent, fetchThreadReplies, fetchChannelHistory, conversationsInfo, slackUserName, type SlackMessage } from './slack-client.js';
+import { ackReceived, ackResolved } from './slack-ack.js';
 import { createRun, finalizeRun, getRun, setOpenclawRunId, setRunSessionId, type TaskRun } from './runs.js';
 import { resolveSession } from './agent-sessions.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
@@ -244,6 +245,11 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
 
   if (!target && !parsed.norc) return;
 
+  // Acknowledge instantly — ⏳ on the triggering message — so the human sees the
+  // tag landed while NORC triages/routes (the part with the visible delay). It's
+  // swapped to ✅ once NORC or the agent replies in the thread.
+  ackReceived(slack.botToken, ev.channel, threadRoot, ev.ts);
+
   emitLog(`slack ${isDm ? 'DM' : `message in ${ev.channel}`}${target ? ` → @${target.name}` : parsed.norc ? ' → NORC' : ''}: ${request.slice(0, 140)}`, 'Slack');
 
   // Thread replies carry their thread as context; a top-level message stands
@@ -272,19 +278,26 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   }
 
   if (taskVerdict.task) {
-    await handleTaskAsk({
-      botToken: slack.botToken, channel: ev.channel, threadRoot,
-      target, request, asker, thread,
-      title: taskVerdict.title || request.slice(0, 80),
-      kpis: taskVerdict.kpis ?? '',
-    });
+    try {
+      await handleTaskAsk({
+        botToken: slack.botToken, channel: ev.channel, threadRoot,
+        target, request, asker, thread,
+        title: taskVerdict.title || request.slice(0, 80),
+        kpis: taskVerdict.kpis ?? '',
+      });
+    } finally {
+      // The task was created + handed off (or parked, or errored) — NORC has
+      // posted its orchestration message, so the ⏳ becomes ✅. The task's own
+      // completion still arrives later via slack-notify.
+      await ackResolved(slack.botToken, ev.channel, threadRoot);
+    }
     return;
   }
 
   // ── chat lane ──
   if (!target) {
     target = await routeViaTriage(slack.botToken, ev.channel, threadRoot, request, thread);
-    if (!target) return; // triage already answered in-thread
+    if (!target) { await ackResolved(slack.botToken, ev.channel, threadRoot); return; } // triage already answered in-thread
   }
   await runSlackChatTurn({
     botToken: slack.botToken, agentRef: target,
@@ -465,17 +478,22 @@ async function runSlackChatTurn(args: {
   thread: SlackThreadLine[];
 }): Promise<void> {
   const { botToken, agentRef, channel, threadRoot, request, asker, thread } = args;
+  // Flip the human's ⏳ to ✅ once this turn concludes in the thread. The async
+  // (openclaw) branch is the lone exception — it stays ⏳ until the Agent-API
+  // reply lands, where finalizeAgentReport flips it.
+  const concluded = () => ackResolved(botToken, channel, threadRoot);
   const integration = db.select().from(notionIntegration).all()[0];
   const apiKey = integration?.status === 'active' ? integration.apiKey : null;
 
   const agentRow = db.select().from(agents).where(eq(agents.id, agentRef.agentId)).all()[0];
-  if (!agentRow) return;
+  if (!agentRow) { await concluded(); return; }
   const adapterType = agentRow.adapterType as AdapterType;
   if (!dispatchSupported(adapterType)) {
     await postAsAgent(botToken, {
       channel, threadTs: threadRoot, agentName: 'NORC',
       text: `@${agentRef.name} uses the "${adapterType}" adapter, which isn't dispatchable yet — try another agent.`,
     }).catch(() => undefined);
+    await concluded();
     return;
   }
   let config: Record<string, unknown>;
@@ -539,6 +557,7 @@ async function runSlackChatTurn(args: {
       channel, threadTs: threadRoot, agentName: 'NORC',
       text: `⚠️ Couldn't reach @${agentRef.name}: ${err instanceof Error ? err.message : 'unknown error'}`,
     }).catch(() => undefined);
+    await concluded();
     return;
   }
   setRunSessionId(runId, result.sessionKey ?? sessionId);
@@ -549,6 +568,7 @@ async function runSlackChatTurn(args: {
       channel, threadTs: threadRoot, agentName: 'NORC',
       text: `⚠️ @${agentRef.name} failed to answer: ${result.error ?? 'unknown error'}`,
     }).catch(() => undefined);
+    await concluded();
     return;
   }
 
@@ -565,6 +585,7 @@ async function runSlackChatTurn(args: {
   const run = getRun(runId);
   if (run?.agentActed) {
     if (run.status === 'in_flight') finalizeRun(runId, 'done');
+    await concluded();
     return;
   }
   const text = (result.text ?? '').trim() || '(no reply)';
@@ -574,6 +595,7 @@ async function runSlackChatTurn(args: {
   }).catch(err =>
     emitLog(`slack reply post failed: ${err instanceof Error ? err.message : 'unknown'}`, agentRef.name));
   finalizeRun(runId, 'done');
+  await concluded();
   emitLog(`"${agentRef.name}" replied in Slack ${channelLabel} (run ${runId})`, agentRef.name);
 }
 
