@@ -1,6 +1,6 @@
 {
   "name": "norc",
-  "version": "0.12.7",
+  "version": "0.13.0",
   "description": "Notion Orchestration for AI Agents",
   "private": true,
   "scripts": {
