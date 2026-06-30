@@ -116,6 +116,23 @@ function setTaskAnchor(pageId: string, opts: Parameters<typeof taskProps>[0] = {
   anchors.set(pageId, { kind: 'task', pageId, parentDatabaseId: 'tasks-db', page: { properties: taskProps({ title: pageId, ...opts }) } });
 }
 
+/** A project page (row in the Projects DB). Optionally carries an explicit
+ * @-mention of an agent in its title, and/or a structural relation to one
+ * (e.g. a "Team" relation — reference data, not a command). */
+function projectProps(opts: { title?: string; mentionOrg?: string; relationOrg?: string } = {}) {
+  const title = opts.mentionOrg
+    ? [{ type: 'mention', mention: { type: 'page', page: { id: opts.mentionOrg } }, plain_text: '@agent' }]
+    : rt(opts.title ?? 'a project');
+  return {
+    'Name': { type: 'title', title },
+    ...(opts.relationOrg ? { 'Team': { type: 'relation', relation: [{ id: opts.relationOrg }] } } : {}),
+  };
+}
+
+function setProjectAnchor(pageId: string, opts: Parameters<typeof projectProps>[0] = {}) {
+  anchors.set(pageId, { kind: 'project', pageId, parentDatabaseId: 'projects-db', page: { properties: projectProps(opts) } });
+}
+
 /** Register a human's Org DB page so resolveOrgMembers finds it via notionGet. */
 function addHumanPage(pageId: string, name = 'Greg', ownerUserId: string | null = 'user-greg') {
   notionPages.set(pageId, {
@@ -267,6 +284,53 @@ describe('triage guard — human-assigned tasks', () => {
     await processWebhookEvent(commentEvent('cm-2', 't-free'));
 
     expect(dispatchMock).toHaveBeenCalled(); // the triage LLM call
+  });
+});
+
+// ─── Triage stays away from project pages (reference data, not a work surface) ──
+
+describe('triage guard — project pages', () => {
+  it('a project edit with no @mention does NOT triage or dispatch', async () => {
+    enableTriage();
+    addAgent('a1', 'alpha');
+    setProjectAnchor('p-edit');
+
+    await processWebhookEvent(pageEvent('p-edit'));
+
+    expect(dispatchMock).not.toHaveBeenCalled();          // no triage LLM, no agent turn
+    expect(db.select().from(taskRuns).all()).toHaveLength(0);
+  });
+
+  it('an agent in a project RELATION (structural) does NOT dispatch — only a clear @mention counts', async () => {
+    enableTriage();
+    addAgent('a1', 'alpha');
+    setProjectAnchor('p-rel', { relationOrg: 'org-a1' });
+
+    await processWebhookEvent(pageEvent('p-rel'));
+
+    expect(dispatchMock).not.toHaveBeenCalled();
+    expect(db.select().from(taskRuns).all()).toHaveLength(0);
+  });
+
+  it('contrast: an explicit @mention of an agent on a project page DOES dispatch', async () => {
+    enableTriage();
+    addAgent('a1', 'alpha');
+    setProjectAnchor('p-mention', { mentionOrg: 'org-a1' });
+
+    await processWebhookEvent(pageEvent('p-mention'));
+
+    expect(dispatchMock).toHaveBeenCalledTimes(1);        // the agent's turn
+    expect((dispatchMock.mock.calls[0]![0] as { adapterType: string }).adapterType).toBe('http');
+  });
+
+  it('a no-mention comment on a project page does NOT trigger triage', async () => {
+    enableTriage();
+    addAgent('a1', 'alpha');
+    setProjectAnchor('p-comment');
+
+    await processWebhookEvent(commentEvent('cm-proj', 'p-comment'));
+
+    expect(dispatchMock).not.toHaveBeenCalled();
   });
 });
 

@@ -46,6 +46,7 @@ import { getNorcOrgPageId } from './norc-identity.js';
 import { notifySlackOnCompletion, projectForChannel } from './slack-notify.js';
 import { isSlackAnchor, parseSlackAnchor, getSlack as getSlackCreds } from './slack-integration.js';
 import { postAsAgent } from './slack-client.js';
+import { ackResolved } from './slack-ack.js';
 import { agentSlackIcon } from './slack-agents.js';
 import {
   createPendingChange, attachProposalComment, findPendingByDiscussion, resolveChange,
@@ -385,6 +386,13 @@ async function handleCommentEvent(integration: Integration, event: NotionWebhook
   const matched = matchAgents(mentionIds);
   if (matched.length === 0 && !norcMentioned) {
     const anchor = await resolveAnchor(apiKey, pageId);
+    // Same rule as project edits: a project page is a reference record, so an
+    // unmentioned comment on it must not pull NORC in to triage/route work. An
+    // explicit @agent / @NORC comment (matched above) still acts normally.
+    if (anchor.kind === 'project') {
+      emitLog(`webhook ignored: comment on project page ${pageId} with no agent/NORC mention — projects don't auto-trigger`, 'NORC', pageId);
+      return;
+    }
     const commentedText = parent?.type === 'block' ? await readBlockText(apiKey, threadBlockId) : '';
     const handled = await triageUnhandled(integration, anchor, {
       text: (triggering?.plainText ?? '').trim(),
@@ -615,11 +623,20 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
     if (await tryForcedChore(integration, anchor, `${title}\n${body}`, title, body, triggeringUserId)) return;
   }
 
-  const candidateIds = [
-    ...extractRelationPageIds(properties),
+  // A project page is a reference record NORC reads when resolving work elsewhere —
+  // it is NOT a work surface in its own right. So on a project we act ONLY on an
+  // explicit @-mention of an agent or NORC (in the title, a text property, or the
+  // body). Relation properties (Team/Owner/Lead/etc.) are structural data, never a
+  // command, so they don't count — and an unmentioned project edit never falls
+  // through to triage (see below). Tasks and free pages are unchanged.
+  const isProject = anchor.kind === 'project';
+  const mentionIds = [
     ...extractPropertyMentionPageIds(properties),
     ...await collectBlockMentionPageIds(apiKey, pageId),
   ];
+  const candidateIds = isProject
+    ? mentionIds
+    : [...extractRelationPageIds(properties), ...mentionIds];
 
   const matched = matchAgents(candidateIds);
   // Human assignees never get a dispatch — notify each once (idempotent per
@@ -646,6 +663,12 @@ async function handlePageEvent(integration: Integration, event: NotionWebhookEve
 
   if (matched.length === 0) {
     if (humans.length > 0 || norcReferenced) return; // handled above — no triage
+    // Project edits with no explicit @-mention stop here: NORC must not proactively
+    // triage/route work just because someone edited the project DB.
+    if (isProject) {
+      emitLog(`webhook ignored: project page ${pageId} edited with no agent/NORC @mention — projects don't auto-trigger`, 'NORC', pageId);
+      return;
+    }
     const thread = await listThreadComments(apiKey, pageId);
     const handled = await triageUnhandled(integration, anchor, { text: '', thread, dedupId: pageId, triggeringUserId });
     if (!handled) emitLog(`webhook discarded: no agent referenced on ${anchor.kind} page ${pageId}`, 'NORC', pageId);
@@ -1111,6 +1134,8 @@ export async function escalateTimedOutRun(run: TaskRun): Promise<void> {
         channel: where.channel, threadTs: where.threadTs, agentName: 'NORC',
         text: `⏱ @${slackAgentName} didn't answer in time. Mention them again to retry, or tag another agent.`,
       }).catch(() => undefined);
+      // Clear the pending ⏳ so it doesn't hang forever on a dead turn.
+      await ackResolved(botToken, where.channel, where.threadTs);
     }
     emitLog(`slack chat run ${run.id} timed out — noted in thread`, 'Triage');
     return;
@@ -1223,6 +1248,9 @@ export async function finalizeAgentReport(run: TaskRun, report: { status?: strin
         iconUrl: await agentSlackIcon(run.agentId),
       }).catch(err => emitLog(`slack reply post failed: ${err instanceof Error ? err.message : 'unknown'}`, slackAgentName));
     }
+    // The async reply has landed — flip the human's ⏳ to ✅ (the synchronous
+    // chat lane leaves it pending precisely for this moment).
+    if (where && botToken) await ackResolved(botToken, where.channel, where.threadTs);
     finalizeRun(run.id, ok ? 'done' : 'failed');
     emitLog(`agent API: slack chat run ${run.id} completed (${ok ? 'done' : 'failed'})`, slackAgentName);
     return;
