@@ -46,6 +46,11 @@ import { dropPendingForAgentPage, agentsWithPending } from './lib/dispatch-queue
 import { getNorcSettingsOrDefault } from './lib/norc-settings.js';
 import { ensureNorcAgent } from './lib/norc-identity.js';
 import { expireStaleChanges } from './lib/self-changes.js';
+import { initFeedback, pruneExpiredFeedbackInvites } from './lib/feedback.js';
+import { pruneOldRuns } from './lib/runs.js';
+import { feedbackRouter } from './routes/feedback.js';
+import { feedbackPublicRouter } from './routes/feedback-public.js';
+import { statsRouter } from './routes/stats.js';
 import { expireStaleCasts, reconcile as reconcileChores } from './chores/index.js';
 
 const app = express();
@@ -102,13 +107,24 @@ app.use('/api/runs', makeRunsRouter());
 app.use('/api/tasks', makeTasksRouter());
 app.use('/api/team', teamRouter);
 app.use('/api/version', versionRouter);
+app.use('/api/feedback', feedbackRouter);
+app.use('/api/stats', statsRouter);
 app.use('/webhooks/notion', notionWebhookRouter);
 app.use('/webhooks/slack', slackWebhookRouter);
 // Public like the webhooks: Slack fetches agent avatars here with no credentials.
 app.use('/icons', iconsRouter);
+// Public too: the feedback form link humans click from Slack/email — the opaque
+// invite token in the path is the credential (7-day TTL, single submission).
+app.use('/feedback', feedbackPublicRouter);
 
-// Drop expired dashboard sessions hourly.
-setInterval(() => pruneExpiredSessions(), 3600_000);
+// Hourly housekeeping: expired dashboard sessions, self-destructing feedback
+// links, and the 90-day task_runs retention cap (small-VPS storage guard).
+setInterval(() => {
+  pruneExpiredSessions();
+  pruneExpiredFeedbackInvites();
+  const prunedRuns = pruneOldRuns();
+  if (prunedRuns > 0) emitLog(`pruned ${prunedRuns} task run(s) older than 90 days`);
+}, 3600_000);
 
 // Expire stale pending handshakes
 setInterval(() => {
@@ -193,6 +209,10 @@ onEvent(event => {
       emitLog(`queue drain error for agent ${event.data.agentId}: ${err instanceof Error ? err.message : 'unknown'}`));
   });
 });
+
+// Post-run human feedback: sample finished work runs and invite the triggering
+// human to rate them (gated by settings.feedbackEnabled + sample rate).
+initFeedback();
 
 // Scheduled / recurring tasks — poll the Tasks DB for due "Scheduled For" dates
 // and dispatch them (gated by the scheduler toggle).

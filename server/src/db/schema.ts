@@ -198,6 +198,11 @@ export const norcSettings = sqliteTable('norc_settings', {
   smtpPass:                 text('smtp_pass'),
   smtpFrom:                 text('smtp_from'),
   smtpSecure:               integer('smtp_secure', { mode: 'boolean' }).notNull().default(false),
+  // Post-run human feedback invites: sampled at feedbackSampleRate (0–1) and
+  // delivered over feedbackChannel ('slack' DM | 'email').
+  feedbackEnabled:          integer('feedback_enabled', { mode: 'boolean' }).notNull().default(false),
+  feedbackSampleRate:       real('feedback_sample_rate').notNull().default(0.25),
+  feedbackChannel:          text('feedback_channel').notNull().default('slack'), // 'slack' | 'email'
   createdAt:                integer('created_at').notNull(),
   updatedAt:                integer('updated_at').notNull(),
 });
@@ -277,6 +282,16 @@ export const taskRuns = sqliteTable('task_runs', {
   origin:           text('origin').notNull().default('notion'), // 'notion' | 'slack'
   slackChannel:     text('slack_channel'),
   slackThreadTs:    text('slack_thread_ts'),
+  // Slack user who triggered a slack-origin run. Separate from triggeringUserId
+  // (a Notion user id, @mentioned on timeout escalation) — the two id spaces
+  // must not mix. Feeds feedback delivery and the top-humans stat.
+  triggeringSlackUserId: text('triggering_slack_user_id'),
+  // Which NORC tools this run touched — a RunTool bitmask (lib/run-tools.ts),
+  // OR-ed in place at the call sites. Drives the per-tool feedback questions.
+  toolFlags:        integer('tool_flags').notNull().default(0),
+  // Agent-self-reported total token usage from /complete. Best-effort: null
+  // when the agent's runtime doesn't report it.
+  tokensUsed:       integer('tokens_used'),
   createdAt:        integer('created_at').notNull(),
   completedAt:      integer('completed_at'),
 });
@@ -357,6 +372,52 @@ export const projectMemo = sqliteTable('project_memo', {
   signalHash:  text('signal_hash'),                   // hash of last cycle's signals → skip-if-unchanged
   lastProbeAt: integer('last_probe_at'),              // Phase 2: last live progress probe dispatched
   updatedAt:   integer('updated_at').notNull(),
+});
+
+// Pending post-run feedback invites — one row per sampled run, deleted on
+// submission or expiry (7 days), so the table stays tiny on small VPSes. The
+// token is stored PLAINTEXT (unlike invites.tokenHash): the dashboard needs to
+// reconstruct the copy-link/resend URL, and the token only grants "submit one
+// rating" — same trust level as taskRuns.token. runId is a plain text snapshot
+// key (no FK) so invites survive task_runs pruning; run/agent display fields
+// are denormalized for the same reason.
+export const feedbackInvites = sqliteTable('feedback_invites', {
+  id:            text('id').primaryKey(),
+  runId:         text('run_id').notNull(),
+  token:         text('token').notNull().unique(),
+  channel:       text('channel').notNull(),         // 'slack' | 'email'
+  recipient:     text('recipient'),                 // slack user id or email; null = unresolved (copy-link only)
+  recipientName: text('recipient_name'),            // display name snapshot
+  runTitle:      text('run_title'),
+  agentId:       text('agent_id'),
+  agentName:     text('agent_name'),
+  runStatus:     text('run_status'),                // done|failed|timed_out at mint time
+  questionsJson: text('questions_json').notNull(),  // up to 3 {key,label} snapshotted at mint time
+  createdAt:     integer('created_at').notNull(),
+  expiresAt:     integer('expires_at').notNull(),   // mint + 7 days; the link self-destructs
+  sentAt:        integer('sent_at'),                // null = delivery failed / never sent
+});
+
+// Submitted feedback. Run/agent fields are denormalized snapshots copied from
+// the invite so history survives run pruning and agent deletion.
+export const feedbackSubmissions = sqliteTable('feedback_submissions', {
+  id:        text('id').primaryKey(),
+  runId:     text('run_id'),
+  runTitle:  text('run_title'),
+  agentId:   text('agent_id'),
+  agentName: text('agent_name'),
+  rating:    integer('rating').notNull(),           // 1–5 stars
+  comment:   text('comment'),
+  createdAt: integer('created_at').notNull(),
+});
+
+// Per-tool star ratings attached to a submission — normalized (not JSON) so
+// the per-tool happiness aggregate is one AVG … GROUP BY tool_key.
+export const feedbackToolRatings = sqliteTable('feedback_tool_ratings', {
+  id:           text('id').primaryKey(),
+  submissionId: text('submission_id').notNull().references(() => feedbackSubmissions.id, { onDelete: 'cascade' }),
+  toolKey:      text('tool_key').notNull(),         // 'slack' | 'propose_tasks' | 'remote_worker' | 'triage'
+  rating:       integer('rating').notNull(),        // 1–5
 });
 
 // A chore whose cast (the resolved step→agent plan) is awaiting human approval

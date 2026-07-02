@@ -5,10 +5,11 @@
 // work came from. Mirrors the handshake nonce + timeout-sweep pattern.
 
 import { randomUUID, randomBytes } from 'node:crypto';
-import { eq, and } from 'drizzle-orm';
+import { eq, and, sql, lt, ne } from 'drizzle-orm';
 import { db } from '../db/client.js';
 import { agents, taskRuns } from '../db/schema.js';
 import { emitEvent } from './events.js';
+import { RunTool } from './run-tools.js';
 
 export type RunStatus = 'in_flight' | 'done' | 'failed' | 'timed_out';
 
@@ -33,6 +34,11 @@ export interface NewRun {
   origin?: 'notion' | 'slack';
   slackChannel?: string | null;
   slackThreadTs?: string | null;
+  /** The Slack user who triggered a slack-origin run (feedback DMs + stats).
+   * Kept apart from triggeringUserId — that one is a Notion user id. */
+  triggeringSlackUserId?: string | null;
+  /** Initial RunTool bitmask (lib/run-tools.ts) — e.g. TRIAGE when auto-routed. */
+  toolFlags?: number;
 }
 
 /** Create an in-flight run and return its id + opaque token. */
@@ -40,6 +46,14 @@ export function createRun(input: NewRun): { id: string; token: string } {
   const id = randomUUID();
   const token = randomBytes(24).toString('hex');
   const createdAt = Date.now();
+  const agent = db.select().from(agents).where(eq(agents.id, input.agentId)).all()[0];
+  // Remote-worker detection at mint time: the OpenClaw adapter and the remote
+  // Claude Code worker both execute off-box. Cheaper here than plumbing a flag
+  // through every dispatch path.
+  let remoteWorker = agent?.adapterType === 'openclaw';
+  if (!remoteWorker && agent) {
+    try { remoteWorker = (JSON.parse(agent.metadata) as { kind?: string }).kind === 'remote-claude-code'; } catch { /* malformed metadata — not remote */ }
+  }
   db.insert(taskRuns).values({
     id,
     token,
@@ -55,12 +69,16 @@ export function createRun(input: NewRun): { id: string; token: string } {
     origin: input.origin ?? 'notion',
     slackChannel: input.slackChannel ?? null,
     slackThreadTs: input.slackThreadTs ?? null,
+    triggeringSlackUserId: input.triggeringSlackUserId ?? null,
+    toolFlags: (input.toolFlags ?? 0)
+      | (input.origin === 'slack' ? RunTool.SLACK : 0)
+      | (remoteWorker ? RunTool.REMOTE_WORKER : 0),
     status: 'in_flight',
     agentActed: false,
     lastProgressAt: createdAt,
     createdAt,
   }).run();
-  const agentName = db.select().from(agents).where(eq(agents.id, input.agentId)).all()[0]?.name ?? 'unknown';
+  const agentName = agent?.name ?? 'unknown';
   emitEvent({
     type: 'run.started',
     data: {
@@ -106,6 +124,28 @@ export function setOpenclawRunId(id: string, openclawRunId: string): void {
  * Not guarded to in_flight — failed runs keep their session for post-mortem. */
 export function setRunSessionId(id: string, sessionId: string): void {
   db.update(taskRuns).set({ sessionId }).where(eq(taskRuns.id, id)).run();
+}
+
+/** OR a RunTool bit (lib/run-tools.ts) into the run's toolFlags, in place. */
+export function markRunTool(id: string, bit: number): void {
+  db.update(taskRuns).set({ toolFlags: sql`tool_flags | ${bit}` })
+    .where(eq(taskRuns.id, id)).run();
+}
+
+/** Store the agent-self-reported token usage from /complete. Not guarded to
+ * in_flight — /complete may race the finalizer and the count is still valid. */
+export function setRunTokens(id: string, tokensUsed: number): void {
+  db.update(taskRuns).set({ tokensUsed }).where(eq(taskRuns.id, id)).run();
+}
+
+/** Retention: drop finalized runs older than 90 days (small-VPS constraint —
+ * task_runs is the only unbounded ledger; 90d covers the largest stats window).
+ * Returns the number of pruned rows. */
+export const RUN_RETENTION_MS = 90 * 24 * 3600_000;
+export function pruneOldRuns(): number {
+  return db.delete(taskRuns)
+    .where(and(ne(taskRuns.status, 'in_flight'), lt(taskRuns.createdAt, Date.now() - RUN_RETENTION_MS)))
+    .run().changes;
 }
 
 export function getRun(id: string): TaskRun | null {

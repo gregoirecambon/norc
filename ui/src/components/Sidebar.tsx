@@ -62,6 +62,25 @@ function LogsIcon() {
   );
 }
 
+function StatisticsIcon() {
+  // Rising bar chart
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <path d="M2.5 13V9M7.5 13V5.5M12.5 13V2.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"/>
+    </svg>
+  );
+}
+
+function FeedbackIcon() {
+  // Speech bubble with a star
+  return (
+    <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+      <path d="M2 3.5A1.5 1.5 0 0 1 3.5 2h8A1.5 1.5 0 0 1 13 3.5v5A1.5 1.5 0 0 1 11.5 10H8l-3 3v-3H3.5A1.5 1.5 0 0 1 2 8.5v-5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round"/>
+      <path d="m7.5 3.8.65 1.32 1.45.21-1.05 1.02.25 1.45L7.5 7.12l-1.3.68.25-1.45L5.4 5.33l1.45-.21L7.5 3.8Z" fill="currentColor"/>
+    </svg>
+  );
+}
+
 function SettingsIcon() {
   return (
     <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
@@ -178,6 +197,8 @@ export default function Sidebar({ currentPage, onNavigate, user, onLogout }: Pro
         <div style={{ ...sectionLabel, marginTop: 16 }}>Monitor</div>
         <NavItem id="dashboard" Icon={DashboardIcon} label="Dashboard" />
         <NavItem id="logs" Icon={LogsIcon} label="Logs" />
+        <NavItem id="statistics" Icon={StatisticsIcon} label="Statistics" />
+        <NavItem id="feedback" Icon={FeedbackIcon} label="Feedback" />
 
         <div style={{ ...sectionLabel, marginTop: 16 }}>Configure</div>
         <NavItem id="team" Icon={TeamIcon} label="Team" />

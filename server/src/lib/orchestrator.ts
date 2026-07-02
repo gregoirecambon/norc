@@ -33,6 +33,7 @@ import { isInertTaskStatus } from './notion-provision.js';
 import { assembleContext, buildPrompt, type PageRef } from './context-assembler.js';
 import { dispatch, dispatchSupported } from '../adapters/index.js';
 import { createRun, getRun, finalizeRun, setOpenclawRunId, setRunSessionId, hasPriorRunOnPage, timedOutAgentIdsForPage, activeRunCount, hasRunConflict, type TaskRun } from './runs.js';
+import { RunTool } from './run-tools.js';
 import { resolveSession } from './agent-sessions.js';
 import { enqueueTurn, nextEligible, claimAndCheck, dropItem, dropPendingForAgentPage, agentsWithPending, pendingCount, type QueuedTurn, type DispatchQueueRow } from './dispatch-queue.js';
 import { unmetDependencies, detectDependencyCycle, getDependsOnIds } from './task-deps.js';
@@ -953,6 +954,7 @@ async function runTriage(integration: Integration, anchor: Anchor, ctx: TriageCt
       discussionId: ctx.discussionId, commentedText: ctx.commentedText,
       triggeringUserId: ctx.triggeringUserId,
       manageTaskStatus: anchor.kind === 'task', how: 'orchestrator auto-route',
+      viaTriage: true,
     });
     return 'routed';
   }
@@ -1722,6 +1724,11 @@ interface TurnOpts {
    * status notes are mirrored back to this thread. Persisted on the run. */
   slackChannel?: string | null;
   slackThreadTs?: string | null;
+  /** The Slack user behind a slack-origin turn — persisted for feedback DMs + stats. */
+  triggeringSlackUserId?: string | null;
+  /** True when the triage agent auto-routed this turn (no explicit @mention) —
+   * sets the TRIAGE tool flag on the run. */
+  viaTriage?: boolean;
 }
 
 /** The Notion project a turn belongs to — the per-(agent, project) serialization key. */
@@ -1756,7 +1763,8 @@ function mintReservation(anchor: Anchor, agentRef: AgentRef, opts: TurnOpts, pro
     lane,
     triggeringUserId: opts.triggeringUserId,
     manageTaskStatus: opts.manageTaskStatus,
-    ...(opts.slackChannel ? { origin: 'slack' as const, slackChannel: opts.slackChannel, slackThreadTs: opts.slackThreadTs ?? null } : {}),
+    toolFlags: opts.viaTriage ? RunTool.TRIAGE : 0,
+    ...(opts.slackChannel ? { origin: 'slack' as const, slackChannel: opts.slackChannel, slackThreadTs: opts.slackThreadTs ?? null, triggeringSlackUserId: opts.triggeringSlackUserId ?? null } : {}),
   });
   return { runId: id, token, firstVisit, lane };
 }
@@ -1812,7 +1820,8 @@ export async function requestAgentTurn(integration: Integration, anchor: Anchor,
       ...(opts.commentedText ? { commentedText: opts.commentedText } : {}),
       ...(opts.triggeringUserId !== undefined ? { triggeringUserId: opts.triggeringUserId } : {}),
       ...(opts.threadBlockId ? { threadBlockId: opts.threadBlockId } : {}),
-      ...(opts.slackChannel ? { slackChannel: opts.slackChannel, slackThreadTs: opts.slackThreadTs ?? null } : {}),
+      ...(opts.slackChannel ? { slackChannel: opts.slackChannel, slackThreadTs: opts.slackThreadTs ?? null, triggeringSlackUserId: opts.triggeringSlackUserId ?? null } : {}),
+      ...(opts.viaTriage ? { viaTriage: true } : {}),
       manageTaskStatus: opts.manageTaskStatus,
       how: opts.how,
     };
@@ -2027,7 +2036,8 @@ async function dispatchQueuedItem(integration: Integration, agentRow: typeof age
     ...(payload.commentedText ? { commentedText: payload.commentedText } : {}),
     ...(payload.triggeringUserId !== undefined ? { triggeringUserId: payload.triggeringUserId } : {}),
     ...(payload.threadBlockId ? { threadBlockId: payload.threadBlockId } : {}),
-    ...(payload.slackChannel ? { slackChannel: payload.slackChannel, slackThreadTs: payload.slackThreadTs ?? null } : {}),
+    ...(payload.slackChannel ? { slackChannel: payload.slackChannel, slackThreadTs: payload.slackThreadTs ?? null, triggeringSlackUserId: payload.triggeringSlackUserId ?? null } : {}),
+    ...(payload.viaTriage ? { viaTriage: true } : {}),
     manageTaskStatus: payload.manageTaskStatus,
     how: `${payload.how} (dequeued)`,
   };

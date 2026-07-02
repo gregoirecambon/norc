@@ -236,7 +236,7 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   if (isThreadReply) {
     const replier = await displayName(slack.botToken, ev.user);
     if (await resumeThreadTask({
-      botToken: slack.botToken, channel: ev.channel, threadRoot, target, request, asker: replier,
+      botToken: slack.botToken, channel: ev.channel, threadRoot, target, request, asker: replier, askerId: ev.user,
     })) return;
     if (await relinkProjectFromReply({
       botToken: slack.botToken, channel: ev.channel, threadRoot, request,
@@ -281,7 +281,7 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
     try {
       await handleTaskAsk({
         botToken: slack.botToken, channel: ev.channel, threadRoot,
-        target, request, asker, thread,
+        target, request, asker, askerId: ev.user, thread,
         title: taskVerdict.title || request.slice(0, 80),
         kpis: taskVerdict.kpis ?? '',
       });
@@ -301,7 +301,7 @@ export async function handleSlackEvent(envelope: SlackEventEnvelope): Promise<vo
   }
   await runSlackChatTurn({
     botToken: slack.botToken, agentRef: target,
-    channel: ev.channel, threadRoot, request, asker, thread,
+    channel: ev.channel, threadRoot, request, asker, askerId: ev.user, thread,
   });
 }
 
@@ -319,8 +319,9 @@ async function resumeThreadTask(args: {
   target: AgentRef | null;
   request: string;
   asker: string;
+  askerId: string;
 }): Promise<boolean> {
-  const { botToken, channel, threadRoot, target, request, asker } = args;
+  const { botToken, channel, threadRoot, target, request, asker, askerId } = args;
   const prior = db.select().from(taskRuns)
     .where(and(eq(taskRuns.slackChannel, channel), eq(taskRuns.slackThreadTs, threadRoot), eq(taskRuns.lane, 'work')))
     .all()
@@ -357,6 +358,7 @@ async function resumeThreadTask(args: {
     thread: [],
     request: `${asker} replied in Slack to your blocked report: ${request}`,
     triggeringUserId: null,
+    triggeringSlackUserId: askerId,
     lane: 'work',
     manageTaskStatus: prior.manageTaskStatus,
     how: 'slack follow-up on blocked task',
@@ -475,9 +477,10 @@ async function runSlackChatTurn(args: {
   threadRoot: string;
   request: string;
   asker: string;
+  askerId: string;
   thread: SlackThreadLine[];
 }): Promise<void> {
-  const { botToken, agentRef, channel, threadRoot, request, asker, thread } = args;
+  const { botToken, agentRef, channel, threadRoot, request, asker, askerId, thread } = args;
   // Flip the human's ⏳ to ✅ once this turn concludes in the thread. The async
   // (openclaw) branch is the lone exception — it stays ⏳ until the Agent-API
   // reply lands, where finalizeAgentReport flips it.
@@ -521,6 +524,7 @@ async function runSlackChatTurn(args: {
     origin: 'slack',
     slackChannel: channel,
     slackThreadTs: threadRoot,
+    triggeringSlackUserId: askerId,
   });
 
   const sections: Section[] = [];
@@ -762,11 +766,12 @@ async function handleTaskAsk(args: {
   target: AgentRef | null;
   request: string;
   asker: string;
+  askerId: string;
   thread: SlackThreadLine[];
   title: string;
   kpis: string;
 }): Promise<void> {
-  const { botToken, channel, threadRoot, target, request, asker, thread, title, kpis } = args;
+  const { botToken, channel, threadRoot, target, request, asker, askerId, thread, title, kpis } = args;
   const say = (text: string, agentName = 'NORC') =>
     postAsAgent(botToken, { channel, text, threadTs: threadRoot, agentName }).catch(() => undefined);
 
@@ -855,6 +860,7 @@ async function handleTaskAsk(args: {
       thread: [],
       request,
       triggeringUserId: null,
+      triggeringSlackUserId: askerId,
       lane: 'work',
       manageTaskStatus: true,
       how: 'slack request',
@@ -874,11 +880,13 @@ async function handleTaskAsk(args: {
       thread: [],
       request,
       triggeringUserId: null,
+      triggeringSlackUserId: askerId,
       lane: 'work',
       manageTaskStatus: true,
       how: 'slack request (triage-routed)',
       slackChannel: channel,
       slackThreadTs: threadRoot,
+      viaTriage: true,
     });
     return;
   }

@@ -5,7 +5,9 @@ import { agents, taskRuns } from '../db/schema.js';
 import { onEvent, type NorcEvent } from '../lib/events.js';
 import {
   createRun, touchRun, setOpenclawRunId, setRunSessionId, finalizeRun, findTimeoutCandidates, getRun,
+  markRunTool, setRunTokens, pruneOldRuns, RUN_RETENTION_MS,
 } from '../lib/runs.js';
+import { RunTool } from '../lib/run-tools.js';
 
 const IDLE = 300_000;        // 5 min silence window
 const HARDCAP = 1_800_000;   // 30 min absolute ceiling
@@ -123,5 +125,87 @@ describe('setRunSessionId', () => {
     finalizeRun(id, 'failed');
     setRunSessionId(id, 'agent:alpha:norc:task:p1');
     expect(getRun(id)!.sessionId).toBe('agent:alpha:norc:task:p1');
+  });
+});
+
+describe('toolFlags', () => {
+  it('sets REMOTE_WORKER at mint time for an openclaw agent', () => {
+    const { id } = newRun(); // addAgent() registers a1 as openclaw
+    expect(getRun(id)!.toolFlags & RunTool.REMOTE_WORKER).toBeTruthy();
+  });
+
+  it('does NOT set REMOTE_WORKER for a local adapter', () => {
+    db.insert(agents).values({
+      id: 'a2', name: 'beta', adapterType: 'http', adapterConfig: '{}', status: 'untested',
+      registeredAt: Date.now(), metadata: '{}', maxConcurrentRuns: 1,
+    }).run();
+    const { id } = createRun({ agentId: 'a2', pageId: 'p2', taskPageId: 'p2', anchorKind: 'task', manageTaskStatus: true });
+    expect(getRun(id)!.toolFlags).toBe(0);
+  });
+
+  it('sets REMOTE_WORKER for a remote-claude-code agent regardless of adapter', () => {
+    db.insert(agents).values({
+      id: 'a3', name: 'gamma', adapterType: 'http', adapterConfig: '{}', status: 'untested',
+      registeredAt: Date.now(), metadata: '{"kind":"remote-claude-code"}', maxConcurrentRuns: 1,
+    }).run();
+    const { id } = createRun({ agentId: 'a3', pageId: 'p3', taskPageId: 'p3', anchorKind: 'task', manageTaskStatus: true });
+    expect(getRun(id)!.toolFlags & RunTool.REMOTE_WORKER).toBeTruthy();
+  });
+
+  it('sets SLACK at mint time for slack-origin runs', () => {
+    const { id } = createRun({
+      agentId: 'a1', pageId: 'p1', taskPageId: null, anchorKind: 'slack', manageTaskStatus: false,
+      origin: 'slack', slackChannel: 'C1', slackThreadTs: '1.0', triggeringSlackUserId: 'U1',
+    });
+    const run = getRun(id)!;
+    expect(run.toolFlags & RunTool.SLACK).toBeTruthy();
+    expect(run.triggeringSlackUserId).toBe('U1');
+  });
+
+  it('markRunTool ORs bits in place without clobbering earlier ones', () => {
+    const { id } = newRun();
+    markRunTool(id, RunTool.PROPOSE_TASKS);
+    markRunTool(id, RunTool.SLACK);
+    markRunTool(id, RunTool.SLACK); // idempotent
+    const flags = getRun(id)!.toolFlags;
+    expect(flags & RunTool.PROPOSE_TASKS).toBeTruthy();
+    expect(flags & RunTool.SLACK).toBeTruthy();
+    expect(flags & RunTool.REMOTE_WORKER).toBeTruthy(); // from mint (openclaw)
+  });
+
+  it('mints with the TRIAGE flag when passed as initial toolFlags', () => {
+    const { id } = createRun({
+      agentId: 'a1', pageId: 'p1', taskPageId: 'p1', anchorKind: 'task', manageTaskStatus: true,
+      toolFlags: RunTool.TRIAGE,
+    });
+    expect(getRun(id)!.toolFlags & RunTool.TRIAGE).toBeTruthy();
+  });
+});
+
+describe('setRunTokens', () => {
+  it('stores the agent-reported total, even after finalize (completion race)', () => {
+    const { id } = newRun();
+    finalizeRun(id, 'done');
+    setRunTokens(id, 123_456);
+    expect(getRun(id)!.tokensUsed).toBe(123_456);
+  });
+});
+
+describe('pruneOldRuns — 90-day retention', () => {
+  it('deletes finalized runs past retention, keeps recent and in-flight ones', () => {
+    const old = newRun();
+    finalizeRun(old.id, 'done');
+    setTimes(old.id, { createdAt: Date.now() - RUN_RETENTION_MS - 1000 });
+
+    const oldInFlight = createRun({ agentId: 'a1', pageId: 'p9', taskPageId: 'p9', anchorKind: 'task', manageTaskStatus: true });
+    setTimes(oldInFlight.id, { createdAt: Date.now() - RUN_RETENTION_MS - 1000 });
+
+    const recent = createRun({ agentId: 'a1', pageId: 'p8', taskPageId: 'p8', anchorKind: 'task', manageTaskStatus: true });
+    finalizeRun(recent.id, 'done');
+
+    expect(pruneOldRuns()).toBe(1);
+    expect(getRun(old.id)).toBeNull();
+    expect(getRun(oldInFlight.id)).not.toBeNull(); // never delete live work
+    expect(getRun(recent.id)).not.toBeNull();
   });
 });

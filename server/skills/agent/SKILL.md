@@ -115,9 +115,11 @@ curl -s -X POST <api_base>/artifact -H 'Content-Type: application/json' \
 curl -s -X POST <api_base>/status   -H 'Content-Type: application/json' \
   -d '{"status":"Done","agentOutput":"short summary"}'
 
-# Finish and free yourself (do this last)
+# Finish and free yourself (do this last). If your runtime reports token usage
+# (e.g. Claude Code's total input+output tokens), include it as "tokensUsed" —
+# it powers the operator's consumption stats. Omit it if you don't know it.
 curl -s -X POST <api_base>/complete -H 'Content-Type: application/json' \
-  -d '{"status":"done","summary":"what I did"}'
+  -d '{"status":"done","summary":"what I did","tokensUsed":123456}'
 
 # Genuinely stuck — you need information only a human can give. Do NOT report
 # "done" with an "I couldn't find it" message; report BLOCKED instead. NORC sets
@@ -240,7 +242,9 @@ a decision) — not because the first prompt looked thin. NORC also auto-detects
 give-up replies, so being honest about a real block is always safe.
 
 **Always call `/complete` when you are done** so NORC marks the run finished and
-frees you.
+frees you. If your runtime exposes how many tokens the run consumed, pass the
+total as `tokensUsed` (an integer) — best-effort, but it makes the operator's
+usage statistics real.
 
 **2. If you cannot make HTTP requests:** simply return your answer as your normal
 text output. NORC will post it as a comment on the page for you.

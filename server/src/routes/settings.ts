@@ -32,6 +32,9 @@ function safe(s: NorcSettings) {
     autoProposeProbeCooldownHours: s.autoProposeProbeCooldownHours,
     choresEnabled: s.choresEnabled,
     choresNotionSync: s.choresNotionSync,
+    feedbackEnabled: s.feedbackEnabled,
+    feedbackSampleRate: s.feedbackSampleRate,
+    feedbackChannel: s.feedbackChannel,
     ceoMemoUpdatedAt: s.ceoMemoUpdatedAt,   // observability only — the memo blob is never returned here
     // Email — password hidden, like the orchestrator key.
     smtpHost: s.smtpHost,
@@ -77,6 +80,9 @@ router.post('/', (req, res) => {
   if (typeof b['autoProposeProbeCooldownHours'] === 'number' && b['autoProposeProbeCooldownHours'] >= 1) patch['autoProposeProbeCooldownHours'] = Math.floor(b['autoProposeProbeCooldownHours']);
   if (typeof b['choresEnabled'] === 'boolean') patch['choresEnabled'] = b['choresEnabled'];
   if (typeof b['choresNotionSync'] === 'boolean') patch['choresNotionSync'] = b['choresNotionSync'];
+  if (typeof b['feedbackEnabled'] === 'boolean') patch['feedbackEnabled'] = b['feedbackEnabled'];
+  if (typeof b['feedbackSampleRate'] === 'number') patch['feedbackSampleRate'] = Math.max(0, Math.min(1, b['feedbackSampleRate']));
+  if (b['feedbackChannel'] === 'slack' || b['feedbackChannel'] === 'email') patch['feedbackChannel'] = b['feedbackChannel'];
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
 

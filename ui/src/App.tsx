@@ -1,10 +1,14 @@
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, lazy, useCallback, useEffect, useState } from 'react';
 import Sidebar from './components/Sidebar.js';
 import ActiveRunBubbles from './components/ActiveRunBubbles.js';
 import AgentsPage from './pages/Agents.js';
 import OperationsPage from './pages/Operations.js';
 import DashboardPage from './pages/Dashboard.js';
 import LogsPage from './pages/Logs.js';
+import FeedbackPage from './pages/Feedback.js';
+// Lazy: Statistics pulls in recharts (~130 kB gzip) — split it out of the
+// initial bundle so the dashboard stays light.
+const StatisticsPage = lazy(() => import('./pages/Statistics.js'));
 import SettingsPage from './pages/Settings.js';
 import ChoresPage from './pages/Chores.js';
 import NotionPage from './pages/Notion.js';
@@ -12,7 +16,7 @@ import TeamPage from './pages/Team.js';
 import LoginPage from './pages/Login.js';
 import { getSession, logout, type SessionUser } from './api/auth.js';
 
-export type Page = 'agents' | 'operations' | 'chores' | 'dashboard' | 'logs' | 'team' | 'settings' | 'notion';
+export type Page = 'agents' | 'operations' | 'chores' | 'dashboard' | 'logs' | 'statistics' | 'feedback' | 'team' | 'settings' | 'notion';
 
 export default function App() {
   const [page, setPage] = useState<Page>('agents');
@@ -52,6 +56,8 @@ export default function App() {
         {page === 'chores'     && <ChoresPage />}
         {page === 'dashboard'  && <DashboardPage />}
         {page === 'logs'       && <LogsPage />}
+        {page === 'statistics' && <Suspense fallback={<div style={{ flex: 1 }} />}><StatisticsPage /></Suspense>}
+        {page === 'feedback'   && <FeedbackPage />}
         {page === 'team'     && <TeamPage user={user} />}
         {page === 'settings' && <SettingsPage />}
         {page === 'notion'   && <NotionPage />}

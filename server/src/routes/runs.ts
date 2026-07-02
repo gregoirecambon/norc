@@ -10,7 +10,8 @@ import { zodMiddleware } from '../lib/validate.js';
 import { db } from '../db/client.js';
 import { notionIntegration, agents, orchestratorComments } from '../db/schema.js';
 import { emitLog } from '../lib/logger.js';
-import { getActiveRunByToken, markActed, touchRun, setRunSessionId, type TaskRun } from '../lib/runs.js';
+import { getActiveRunByToken, markActed, touchRun, setRunSessionId, markRunTool, setRunTokens, type TaskRun } from '../lib/runs.js';
+import { RunTool } from '../lib/run-tools.js';
 import {
   postComment, postCommentReply, appendBlocks, setTaskStatus, setTaskFields,
   type TaskStatus,
@@ -142,6 +143,9 @@ const CompleteBody = z.object({
   // The agent's own resumable session id (e.g. a Claude Code `session_id`), recorded
   // on the run so the dashboard shows the id you actually pass to `claude --resume`.
   sessionId: z.string().optional(),
+  // Self-reported total token usage (input + output) for the whole run —
+  // best-effort, only agents whose runtime exposes usage send it.
+  tokensUsed: z.number().int().nonnegative().optional(),
 });
 const SlackBody = z.object({
   channel: z.string().min(1),
@@ -278,6 +282,7 @@ export function makeRunsRouter(): ExpressRouter {
         iconUrl: await agentSlackIcon(run.agentId),
       });
       markActed(run.id);
+      markRunTool(run.id, RunTool.SLACK);
       emitLog(`agent API: Slack message posted to ${membership.name ? '#' + membership.name : channel} (run ${run.id})`, agentTag(run), run.pageId);
       res.json({ ok: true, channel: posted.channel, ts: posted.ts });
     } catch (err) {
@@ -326,6 +331,7 @@ export function makeRunsRouter(): ExpressRouter {
         threadTs: threadTs ?? null,
       });
       markActed(run.id);
+      markRunTool(run.id, RunTool.SLACK);
       emitLog(`agent API: file "${safeName}" (${Math.max(1, Math.round(bytes.length / 1024))} KB) posted to ${membership.name ? '#' + membership.name : channel} (run ${run.id})`, agentTag(run), run.pageId);
       res.json({ ok: true, permalink });
     } catch (err) {
@@ -711,6 +717,7 @@ export function makeRunsRouter(): ExpressRouter {
     try {
       const { created } = await proposeTasks({ sourcePageId: run.pageId, proposerName: proposer, tasks: clean });
       markActed(run.id);
+      markRunTool(run.id, RunTool.PROPOSE_TASKS);
       emitLog(`agent API: ${created.length} task(s) proposed (run ${run.id})`, proposer ?? 'NORC');
       res.json({ ok: true, created });
     } catch (err) {
@@ -724,11 +731,12 @@ export function makeRunsRouter(): ExpressRouter {
   // (so a "can't do it" report never silently flips the task to Done).
   r.post('/:token/complete', zodMiddleware(CompleteBody), async (req, res) => {
     const { run } = req as unknown as { run: TaskRun; apiKey: string };
-    const { status, summary, sessionId } = req.body as z.infer<typeof CompleteBody>;
+    const { status, summary, sessionId, tokensUsed } = req.body as z.infer<typeof CompleteBody>;
     markActed(run.id);
     // Record the agent's resumable session id (overwrites NORC's internal session key)
     // so the dashboard surfaces the id you actually pass to `claude --resume`.
     if (sessionId) setRunSessionId(run.id, sessionId);
+    if (tokensUsed !== undefined) setRunTokens(run.id, tokensUsed);
     try {
       await finalizeAgentReport(run, { status, summary });
       res.json({ ok: true });

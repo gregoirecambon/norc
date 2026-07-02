@@ -371,20 +371,29 @@ async function walkForResources(
   } while (cursor);
 }
 
-// Notion user display names, resolved on demand and cached for the process — so
-// a comment thread reads as "Alice: …" instead of an opaque user id.
-const userNameCache = new Map<string, string>();
-export async function userDisplayName(apiKey: string, userId: string | null): Promise<string> {
-  if (!userId) return '';
-  const cached = userNameCache.get(userId);
+// Notion user profiles (name + person email), resolved on demand and cached for
+// the process — so a comment thread reads as "Alice: …" instead of an opaque
+// user id, and feedback invites can reach the human. `email` is only present
+// for person users AND when the integration has the user-email capability.
+export interface NotionUserProfile { name: string; email: string | null }
+const userProfileCache = new Map<string, NotionUserProfile>();
+export async function userProfile(apiKey: string, userId: string | null): Promise<NotionUserProfile> {
+  if (!userId) return { name: '', email: null };
+  const cached = userProfileCache.get(userId);
   if (cached !== undefined) return cached;
-  let name = '';
+  const profile: NotionUserProfile = { name: '', email: null };
   try {
     const u = await notionGet<Record<string, unknown>>(apiKey, `/users/${userId}`);
-    if (typeof u['name'] === 'string') name = u['name'];
+    if (typeof u['name'] === 'string') profile.name = u['name'];
+    const person = u['person'] as Record<string, unknown> | undefined;
+    if (person && typeof person['email'] === 'string') profile.email = person['email'];
   } catch { /* unknown user → empty */ }
-  userNameCache.set(userId, name);
-  return name;
+  userProfileCache.set(userId, profile);
+  return profile;
+}
+
+export async function userDisplayName(apiKey: string, userId: string | null): Promise<string> {
+  return (await userProfile(apiKey, userId)).name;
 }
 
 /** Flatten a rich_text array to its plain text. */

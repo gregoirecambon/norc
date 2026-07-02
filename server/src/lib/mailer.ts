@@ -111,6 +111,42 @@ export async function sendInviteEmail(
   });
 }
 
+export interface FeedbackEmailParams {
+  formUrl: string;
+  runTitle: string;
+  agentName: string;
+}
+
+/** Send a post-run feedback invite. Never throws — returns { sent, error? }. */
+export async function sendFeedbackEmail(
+  to: string,
+  { formUrl, runTitle, agentName }: FeedbackEmailParams,
+): Promise<{ sent: boolean; error?: string }> {
+  const cfg = resolveSmtpConfig();
+  if (!cfg) return { sent: false, error: 'smtp_not_configured' };
+  return send(cfg, {
+    to,
+    subject: `How did “${runTitle}” go?`,
+    text: `${agentName} just finished "${runTitle}".\n\nHelp us improve NORC — rate this run (takes ~20 seconds):\n${formUrl}\n\nThis link expires in 7 days.`,
+    html: `
+<div style="font-family:-apple-system,Segoe UI,Inter,sans-serif;max-width:480px;margin:0 auto;padding:32px 24px;color:#37352f">
+  <div style="font-size:20px;font-weight:700;letter-spacing:-0.3px;margin-bottom:20px">NORC</div>
+  <p style="font-size:15px;line-height:1.6">
+    <strong>${agentName}</strong> just finished <strong>${runTitle}</strong>.
+  </p>
+  <p style="font-size:15px;line-height:1.6">Help us improve NORC — rate this run. It takes about 20 seconds.</p>
+  <p style="margin:28px 0">
+    <a href="${formUrl}" style="background:#5645d4;color:#fff;text-decoration:none;padding:10px 22px;border-radius:8px;font-size:14px;font-weight:600">Give feedback</a>
+  </p>
+  <p style="font-size:13px;color:#787671;line-height:1.6">
+    Or paste this link in your browser:<br>
+    <a href="${formUrl}" style="color:#5645d4;word-break:break-all">${formUrl}</a>
+  </p>
+  <p style="font-size:12px;color:#787671">This link expires in 7 days.</p>
+</div>`,
+  });
+}
+
 /**
  * Send a test email — used by Settings → Email. `override` carries unsaved
  * form values; omitted fields fall back to the effective config.

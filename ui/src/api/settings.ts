@@ -20,6 +20,9 @@ export interface NorcSettings {
   autoProposeIntervalHours: number;
   choresEnabled: boolean;
   choresNotionSync: boolean;
+  feedbackEnabled: boolean;
+  feedbackSampleRate: number;
+  feedbackChannel: 'slack' | 'email';
   smtpHost: string | null;
   smtpPort: number;
   smtpUser: string | null;
@@ -50,6 +53,9 @@ export interface NorcSettingsPatch {
   autoProposeIntervalHours?: number;
   choresEnabled?: boolean;
   choresNotionSync?: boolean;
+  feedbackEnabled?: boolean;
+  feedbackSampleRate?: number;
+  feedbackChannel?: 'slack' | 'email';
   smtpHost?: string | null;
   smtpPort?: number;
   smtpUser?: string | null;

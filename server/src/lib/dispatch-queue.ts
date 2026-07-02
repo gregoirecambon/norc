@@ -36,6 +36,9 @@ export interface QueuedTurn {
    * back to the originating Slack thread. */
   slackChannel?: string | null;
   slackThreadTs?: string | null;
+  triggeringSlackUserId?: string | null;
+  /** Auto-routed by triage — carried so the drained run keeps its TRIAGE flag. */
+  viaTriage?: boolean;
 }
 
 function emitQueueUpdated(agentId: string): void {
