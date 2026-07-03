@@ -8,7 +8,7 @@ import cors from 'cors';
 import { lt, eq } from 'drizzle-orm';
 import { runMigrations, closeDb } from './db/client.js';
 import { db } from './db/client.js';
-import { handshakes, agents } from './db/schema.js';
+import { handshakes, agents, taskRuns } from './db/schema.js';
 import { ensureActiveToken } from './lib/tokens.js';
 import { emitLog } from './lib/logger.js';
 import { emitEvent, onEvent } from './lib/events.js';
@@ -121,17 +121,30 @@ app.use('/icons', iconsRouter);
 app.use('/api/feedback/form', feedbackPublicRouter);
 app.use('/feedback', feedbackPublicRouter);
 
+// Run a periodic tick body without letting a thrown error kill the process.
+// The v0.15.0 outage was an uncaught SqliteError inside a timer callback
+// crash-looping the whole container: background timers must degrade to logged
+// errors, never take the server down.
+function safeTick(label: string, fn: () => void): () => void {
+  return () => {
+    try { fn(); } catch (err) {
+      const msg = err instanceof Error ? err.message : 'unknown';
+      try { emitLog(`${label} tick failed: ${msg}`); } catch { console.error(`${label} tick failed:`, msg); }
+    }
+  };
+}
+
 // Hourly housekeeping: expired dashboard sessions, self-destructing feedback
 // links, and the 90-day task_runs retention cap (small-VPS storage guard).
-setInterval(() => {
+setInterval(safeTick('housekeeping', () => {
   pruneExpiredSessions();
   pruneExpiredFeedbackInvites();
   const prunedRuns = pruneOldRuns();
   if (prunedRuns > 0) emitLog(`pruned ${prunedRuns} task run(s) older than 90 days`);
-}, 3600_000);
+}), 3600_000);
 
 // Expire stale pending handshakes
-setInterval(() => {
+setInterval(safeTick('handshake sweep', () => {
   const cutoff = Date.now() - 60_000;
   const stale = db.select().from(handshakes)
     .where(lt(handshakes.createdAt, cutoff))
@@ -142,7 +155,7 @@ setInterval(() => {
       .where(eq(handshakes.id, h.id)).run();
     emitEvent({ type: 'handshake.updated', data: { handshakeId: h.id, agentId: h.agentId, status: 'timed_out', latencyMs: null, error: 'Timed out' } });
   }
-}, 15_000);
+}), 15_000);
 
 // Time out agent runs left in flight — but a "real" timeout, not a wall-clock
 // guess. A run is a candidate when it's been SILENT (no Agent-API activity) past
@@ -152,7 +165,7 @@ setInterval(() => {
 // genuinely silent/dead or hard-capped runs are escalated (free the agent, tell
 // the team, re-route). The same pass drains every agent with queued work — the
 // missed-event backstop behind the run.finished listener below.
-setInterval(() => {
+setInterval(safeTick('run timeout sweep', () => {
   const s = getNorcSettingsOrDefault();
   const idleMs = Math.max(60, s.runTimeoutSec) * 1000;
   const hardCapMs = Math.max(idleMs, s.runHardCapSec * 1000); // cap can't undercut the idle window
@@ -170,7 +183,7 @@ setInterval(() => {
   // Pending chore casts awaiting approval expire on the same TTL.
   const expiredCasts = expireStaleCasts();
   if (expiredCasts > 0) emitLog(`expired ${expiredCasts} stale chore cast(s)`);
-}, 60_000);
+}), 60_000);
 
 // Resolve one timeout candidate. Idle OpenClaw runs with a known run handle get a
 // confirm-before-kill liveness probe; everything else (hard-capped, non-openclaw,
@@ -220,21 +233,29 @@ initFeedback();
 
 // Scheduled / recurring tasks — poll the Tasks DB for due "Scheduled For" dates
 // and dispatch them (gated by the scheduler toggle).
-setInterval(() => {
+setInterval(safeTick('scheduler', () => {
   if (!getNorcSettingsOrDefault().schedulerEnabled) return;
   void runScheduler().catch(err => emitLog(`scheduler error: ${err instanceof Error ? err.message : 'unknown'}`, 'Schedule'));
-}, 60_000);
+}), 60_000);
 
 // Heartbeat — self-rescheduling so live settings changes (interval / enable)
-// take effect without a restart.
+// take effect without a restart. Each loop body is fully wrapped and ALWAYS
+// reschedules: a throw outside the try (e.g. the settings read, as in the
+// v0.15.0 outage) would otherwise become an unhandled rejection and kill the
+// process — and a loop that fails to reschedule silently stops forever.
 async function heartbeatLoop(): Promise<void> {
-  const settings = getNorcSettingsOrDefault();
-  if (settings.heartbeatEnabled) {
-    try { await runHeartbeat(); } catch (err) {
-      emitLog(`heartbeat error: ${err instanceof Error ? err.message : 'unknown'}`);
+  let intervalMs = 60_000; // fallback cadence while settings are unreadable
+  try {
+    const settings = getNorcSettingsOrDefault();
+    if (settings.heartbeatEnabled) {
+      try { await runHeartbeat(); } catch (err) {
+        emitLog(`heartbeat error: ${err instanceof Error ? err.message : 'unknown'}`);
+      }
     }
+    intervalMs = Math.max(10, settings.heartbeatIntervalSec) * 1000;
+  } catch (err) {
+    emitLog(`heartbeat loop failed: ${err instanceof Error ? err.message : 'unknown'}`);
   }
-  const intervalMs = Math.max(10, settings.heartbeatIntervalSec) * 1000;
   setTimeout(() => { void heartbeatLoop(); }, intervalMs);
 }
 
@@ -243,26 +264,36 @@ async function heartbeatLoop(): Promise<void> {
 // pattern; gated on the master heartbeat toggle too, so "heartbeat off" means
 // "never probe agents".
 async function deepHeartbeatLoop(): Promise<void> {
-  const settings = getNorcSettingsOrDefault();
-  if (settings.heartbeatEnabled && settings.deepPingEnabled) {
-    try { await runDeepHeartbeat(); } catch (err) {
-      emitLog(`deep heartbeat error: ${err instanceof Error ? err.message : 'unknown'}`);
+  let intervalMs = 600_000;
+  try {
+    const settings = getNorcSettingsOrDefault();
+    if (settings.heartbeatEnabled && settings.deepPingEnabled) {
+      try { await runDeepHeartbeat(); } catch (err) {
+        emitLog(`deep heartbeat error: ${err instanceof Error ? err.message : 'unknown'}`);
+      }
     }
+    intervalMs = Math.max(60, settings.deepPingIntervalSec) * 1000;
+  } catch (err) {
+    emitLog(`deep heartbeat loop failed: ${err instanceof Error ? err.message : 'unknown'}`);
   }
-  const intervalMs = Math.max(60, settings.deepPingIntervalSec) * 1000;
   setTimeout(() => { void deepHeartbeatLoop(); }, intervalMs);
 }
 
 // Recurring co-CEO analysis — self-rescheduling so the interval/enable toggle
 // take effect live. Proposes tasks (as 'Proposed', human-validated) every N hours.
 async function autoProposeLoop(): Promise<void> {
-  const settings = getNorcSettingsOrDefault();
-  if (settings.autoProposeEnabled) {
-    try { await runAutoPropose(); } catch (err) {
-      emitLog(`auto-propose error: ${err instanceof Error ? err.message : 'unknown'}`, 'Co-CEO');
+  let intervalMs = 3600_000;
+  try {
+    const settings = getNorcSettingsOrDefault();
+    if (settings.autoProposeEnabled) {
+      try { await runAutoPropose(); } catch (err) {
+        emitLog(`auto-propose error: ${err instanceof Error ? err.message : 'unknown'}`, 'Co-CEO');
+      }
     }
+    intervalMs = Math.max(1, Math.min(24, settings.autoProposeIntervalHours)) * 3600_000;
+  } catch (err) {
+    emitLog(`auto-propose loop failed: ${err instanceof Error ? err.message : 'unknown'}`, 'Co-CEO');
   }
-  const intervalMs = Math.max(1, Math.min(24, settings.autoProposeIntervalHours)) * 3600_000;
   setTimeout(() => { void autoProposeLoop(); }, intervalMs);
 }
 
@@ -271,11 +302,15 @@ async function autoProposeLoop(): Promise<void> {
 // Chores DB (and pulls human Notion edits back to disk). No-op unless both chores
 // and Notion sync are on.
 async function choreSyncLoop(): Promise<void> {
-  const settings = getNorcSettingsOrDefault();
-  if (settings.choresEnabled && settings.choresNotionSync) {
-    try { await reconcileChores(); } catch (err) {
-      emitLog(`chore sync error: ${err instanceof Error ? err.message : 'unknown'}`, 'NORC');
+  try {
+    const settings = getNorcSettingsOrDefault();
+    if (settings.choresEnabled && settings.choresNotionSync) {
+      try { await reconcileChores(); } catch (err) {
+        emitLog(`chore sync error: ${err instanceof Error ? err.message : 'unknown'}`, 'NORC');
+      }
     }
+  } catch (err) {
+    emitLog(`chore sync loop failed: ${err instanceof Error ? err.message : 'unknown'}`, 'NORC');
   }
   setTimeout(() => { void choreSyncLoop(); }, 5 * 60_000);
 }
@@ -283,7 +318,26 @@ async function choreSyncLoop(): Promise<void> {
 // Startup
 const PORT = parseInt(process.env['PORT'] ?? '3001', 10);
 
+// Fail FAST when the schema doesn't match this build (e.g. a silently skipped
+// migration — the v0.15.0 outage): an immediate, explicit startup error beats
+// booting into a state where the first background timer dies minutes later
+// with a cryptic stack. Probes the two tables every build reads unconditionally.
+function assertSchemaReady(): void {
+  try {
+    getNorcSettingsOrDefault();
+    db.select().from(taskRuns).limit(1).all();
+  } catch (err) {
+    console.error(
+      `FATAL: the database schema does not match this build (${err instanceof Error ? err.message : 'unknown'}).\n` +
+      'A migration likely did not apply. Journal `when` values in ' +
+      'server/src/db/migrations/meta/_journal.json must be strictly increasing — ' +
+      'drizzle silently skips entries at or below the ledger max (see the note in src/db/client.ts).');
+    process.exit(1);
+  }
+}
+
 runMigrations();
+assertSchemaReady();
 await ensureActiveToken();
 
 const server = app.listen(PORT, '0.0.0.0', () => {
