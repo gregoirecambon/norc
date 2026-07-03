@@ -203,6 +203,10 @@ export const norcSettings = sqliteTable('norc_settings', {
   feedbackEnabled:          integer('feedback_enabled', { mode: 'boolean' }).notNull().default(false),
   feedbackSampleRate:       real('feedback_sample_rate').notNull().default(0.25),
   feedbackChannel:          text('feedback_channel').notNull().default('slack'), // 'slack' | 'email'
+  // When true, opening a feedback form requires a signed-in dashboard session.
+  // Default false: the invite token in the URL is the whole credential, so the
+  // human can rate a run without a NORC account.
+  feedbackFormRequiresLogin: integer('feedback_form_requires_login', { mode: 'boolean' }).notNull().default(false),
   createdAt:                integer('created_at').notNull(),
   updatedAt:                integer('updated_at').notNull(),
 });

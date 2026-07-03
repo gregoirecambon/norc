@@ -27,7 +27,10 @@ export const INVITE_TTL_MS = 7 * 24 * 3600_000;
 const RECIPIENT_DEBOUNCE_MS = 24 * 3600_000;
 
 export function feedbackFormUrl(token: string): string {
-  return `${norcBaseUrl()}/feedback/${token}`;
+  // Under /api on purpose: every deployment already proxies /api to the server,
+  // while a bare /feedback path needs an nginx location block that older
+  // installs don't have (it would fall through to the SPA → dashboard).
+  return `${norcBaseUrl()}/api/feedback/form/${token}`;
 }
 
 /** Wire the run.finished → maybe-invite listener. Called once at boot. */

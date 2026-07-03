@@ -35,6 +35,7 @@ function SettingsPanel() {
   const [enabled, setEnabled] = useState(false);
   const [rate, setRate] = useState(25);
   const [channel, setChannel] = useState<'slack' | 'email'>('slack');
+  const [requiresLogin, setRequiresLogin] = useState(false);
   const [status, setStatus] = useState<'loading' | 'idle' | 'busy' | 'saved' | 'error'>('loading');
 
   useEffect(() => {
@@ -42,6 +43,7 @@ function SettingsPanel() {
       setEnabled(s.feedbackEnabled);
       setRate(Math.round(s.feedbackSampleRate * 100));
       setChannel(s.feedbackChannel);
+      setRequiresLogin(s.feedbackFormRequiresLogin);
       setStatus('idle');
     }).catch(() => setStatus('error'));
   }, []);
@@ -52,6 +54,7 @@ function SettingsPanel() {
       feedbackEnabled: enabled,
       feedbackSampleRate: Math.max(0, Math.min(100, rate)) / 100,
       feedbackChannel: channel,
+      feedbackFormRequiresLogin: requiresLogin,
     })
       .then(() => { setStatus('saved'); setTimeout(() => setStatus('idle'), 2000); })
       .catch(() => setStatus('error'));
@@ -69,6 +72,17 @@ function SettingsPanel() {
             <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--text-primary)' }}>Ask for feedback</span>
             <span style={{ display: 'block', fontSize: 12.5, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.5 }}>
               Sample finished work runs and invite the task creator to rate them.
+            </span>
+          </span>
+        </label>
+
+        <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, cursor: 'pointer' }}>
+          <input type="checkbox" checked={requiresLogin} onChange={e => setRequiresLogin(e.target.checked)} style={{ marginTop: 2 }} />
+          <span>
+            <span style={{ fontSize: 13.5, fontWeight: 500, color: 'var(--text-primary)' }}>Require sign-in to open feedback forms</span>
+            <span style={{ display: 'block', fontSize: 12.5, color: 'var(--text-secondary)', marginTop: 2, lineHeight: 1.5 }}>
+              Off (default): the link itself is the credential — anyone who receives an invite can answer, no NORC account needed.
+              On: only signed-in dashboard users can open the form.
             </span>
           </span>
         </label>

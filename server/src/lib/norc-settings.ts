@@ -37,6 +37,7 @@ const DEFAULTS: Omit<NorcSettings, 'id' | 'createdAt' | 'updatedAt'> = {
   feedbackEnabled: false,
   feedbackSampleRate: 0.25,
   feedbackChannel: 'slack',
+  feedbackFormRequiresLogin: false,
   smtpHost: null,
   smtpPort: null,
   smtpUser: null,

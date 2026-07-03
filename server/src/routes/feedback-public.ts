@@ -11,9 +11,20 @@ import { db } from '../db/client.js';
 import { feedbackInvites, feedbackSubmissions, feedbackToolRatings } from '../db/schema.js';
 import { randomUUID } from 'node:crypto';
 import { emitLog } from '../lib/logger.js';
+import { getNorcSettingsOrDefault } from '../lib/norc-settings.js';
+import { getSessionUser } from '../lib/user-auth.js';
+import { norcBaseUrl } from '../lib/base-url.js';
 import type { FeedbackInvite } from '../lib/feedback.js';
+import type { Request } from 'express';
 
 const router: ExpressRouter = Router();
+
+/** The admin toggle: when feedbackFormRequiresLogin is on, only a signed-in
+ * dashboard user may open/submit the form. Off by default — the invite token
+ * is the credential, so any human the invite reaches can answer. */
+function loginRequiredBlocked(req: Request): boolean {
+  return getNorcSettingsOrDefault().feedbackFormRequiresLogin && getSessionUser(req) === null;
+}
 
 const SubmitBody = z.object({
   rating: z.number().int().min(1).max(5),
@@ -38,12 +49,14 @@ function liveInvite(token: string): FeedbackInvite | null {
 
 // GET /feedback/:token — the form (or the tombstone page).
 router.get('/:token', (req, res) => {
+  if (loginRequiredBlocked(req)) { res.status(401).type('html').send(signInPage()); return; }
   const invite = liveInvite(req.params['token'] ?? '');
   res.status(invite ? 200 : 410).type('html').send(invite ? formPage(invite) : expiredPage());
 });
 
 // POST /feedback/:token — one submission, then the invite is gone.
 router.post('/:token', (req, res) => {
+  if (loginRequiredBlocked(req)) { res.status(401).json({ error: 'login_required' }); return; }
   const invite = liveInvite(req.params['token'] ?? '');
   if (!invite) { res.status(410).json({ error: 'expired' }); return; }
   const parsed = SubmitBody.safeParse(req.body);
@@ -165,6 +178,23 @@ document.getElementById('f').addEventListener('submit', async (e) => {
   }
 });
 </script>
+</body></html>`;
+}
+
+function signInPage(): string {
+  return `<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Sign in required — NORC</title>
+<style>${SHELL_CSS}</style>
+</head><body>
+<div class="card">
+  <div class="brand">NORC</div>
+  <h1>Sign in to leave feedback</h1>
+  <div class="sub">This NORC install requires a signed-in account for feedback forms. Sign in to the dashboard, then reopen this link.</div>
+  <p style="margin-top:20px"><a href="${norcBaseUrl()}" style="background:#5645d4;color:#fff;text-decoration:none;padding:10px 22px;border-radius:8px;font-size:14px;font-weight:600">Open the dashboard</a></p>
+</div>
 </body></html>`;
 }
 

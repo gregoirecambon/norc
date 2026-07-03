@@ -147,6 +147,12 @@ const PUBLIC_API: { method: string; test: (p: string) => boolean }[] = [
   { method: 'GET', test: p => p === '/api/skill' || p === '/api/skill/version' },
   // Worker bundle — the copy-paste invite downloads this before it has any credentials.
   { method: 'GET', test: p => p === '/api/worker' },
+  // Public feedback form — the link humans click from Slack/email. Lives under
+  // /api so every install's proxy already forwards it (a bare /feedback path
+  // falls through to the SPA on nginx installs that predate the location
+  // block). The 7-day invite token in the path is the credential; the route
+  // itself additionally enforces the feedbackFormRequiresLogin setting.
+  { method: '*', test: p => p.startsWith('/api/feedback/form/') },
   // Public health check (login page reachability + container healthchecks).
   { method: 'GET', test: p => p === '/api/health' },
   // The auth flow itself.

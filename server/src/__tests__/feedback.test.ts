@@ -5,7 +5,7 @@ import { agents, feedbackInvites, norcSettings, taskRuns } from '../db/schema.js
 import { createRun, finalizeRun } from '../lib/runs.js';
 import { RunTool, questionsForFlags } from '../lib/run-tools.js';
 import { upsertNorcSettings } from '../lib/norc-settings.js';
-import { maybeInviteForRun, pruneExpiredFeedbackInvites, sendInvite, INVITE_TTL_MS } from '../lib/feedback.js';
+import { feedbackFormUrl, maybeInviteForRun, pruneExpiredFeedbackInvites, sendInvite, INVITE_TTL_MS } from '../lib/feedback.js';
 
 function addAgent(id = 'a1', name = 'alpha') {
   db.insert(agents).values({
@@ -27,6 +27,14 @@ beforeEach(() => {
   db.delete(agents).run();
   db.delete(norcSettings).run();
   addAgent();
+});
+
+describe('feedbackFormUrl', () => {
+  it('links under /api so every install proxy already forwards it', () => {
+    // A bare /feedback path 404s into the SPA on nginx installs that predate
+    // the location block — the dashboard-instead-of-form bug.
+    expect(feedbackFormUrl('ab'.repeat(24))).toMatch(/\/api\/feedback\/form\/[0-9a-f]{48}$/);
+  });
 });
 
 describe('questionsForFlags', () => {

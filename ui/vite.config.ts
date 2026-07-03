@@ -25,6 +25,11 @@ export default defineConfig({
         target: process.env['VITE_API_URL'] ?? 'http://localhost:3001',
         changeOrigin: true,
       },
+      // Public feedback forms (short alias; generated links use /api/…).
+      '/feedback': {
+        target: process.env['VITE_API_URL'] ?? 'http://localhost:3001',
+        changeOrigin: true,
+      },
     },
   },
 });

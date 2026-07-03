@@ -1,0 +1,1 @@
+ALTER TABLE `norc_settings` ADD `feedback_form_requires_login` integer DEFAULT false NOT NULL;

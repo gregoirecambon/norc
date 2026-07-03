@@ -35,6 +35,7 @@ function safe(s: NorcSettings) {
     feedbackEnabled: s.feedbackEnabled,
     feedbackSampleRate: s.feedbackSampleRate,
     feedbackChannel: s.feedbackChannel,
+    feedbackFormRequiresLogin: s.feedbackFormRequiresLogin,
     ceoMemoUpdatedAt: s.ceoMemoUpdatedAt,   // observability only — the memo blob is never returned here
     // Email — password hidden, like the orchestrator key.
     smtpHost: s.smtpHost,
@@ -83,6 +84,7 @@ router.post('/', (req, res) => {
   if (typeof b['feedbackEnabled'] === 'boolean') patch['feedbackEnabled'] = b['feedbackEnabled'];
   if (typeof b['feedbackSampleRate'] === 'number') patch['feedbackSampleRate'] = Math.max(0, Math.min(1, b['feedbackSampleRate']));
   if (b['feedbackChannel'] === 'slack' || b['feedbackChannel'] === 'email') patch['feedbackChannel'] = b['feedbackChannel'];
+  if (typeof b['feedbackFormRequiresLogin'] === 'boolean') patch['feedbackFormRequiresLogin'] = b['feedbackFormRequiresLogin'];
   if (b['orchestratorApiKey'] === null) patch['orchestratorApiKey'] = null;
   else if (typeof b['orchestratorApiKey'] === 'string' && b['orchestratorApiKey'].trim()) patch['orchestratorApiKey'] = b['orchestratorApiKey'].trim();
 

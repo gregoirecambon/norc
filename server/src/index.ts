@@ -115,6 +115,10 @@ app.use('/webhooks/slack', slackWebhookRouter);
 app.use('/icons', iconsRouter);
 // Public too: the feedback form link humans click from Slack/email — the opaque
 // invite token in the path is the credential (7-day TTL, single submission).
+// Canonical mount is /api/feedback/form (allowlisted in PUBLIC_API) because
+// every deployment already proxies /api; the bare /feedback alias works when
+// the server is reached directly or the nginx template's location block exists.
+app.use('/api/feedback/form', feedbackPublicRouter);
 app.use('/feedback', feedbackPublicRouter);
 
 // Hourly housekeeping: expired dashboard sessions, self-destructing feedback

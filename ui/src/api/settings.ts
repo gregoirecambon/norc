@@ -23,6 +23,7 @@ export interface NorcSettings {
   feedbackEnabled: boolean;
   feedbackSampleRate: number;
   feedbackChannel: 'slack' | 'email';
+  feedbackFormRequiresLogin: boolean;
   smtpHost: string | null;
   smtpPort: number;
   smtpUser: string | null;
@@ -56,6 +57,7 @@ export interface NorcSettingsPatch {
   feedbackEnabled?: boolean;
   feedbackSampleRate?: number;
   feedbackChannel?: 'slack' | 'email';
+  feedbackFormRequiresLogin?: boolean;
   smtpHost?: string | null;
   smtpPort?: number;
   smtpUser?: string | null;
