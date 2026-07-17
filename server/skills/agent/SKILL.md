@@ -111,6 +111,15 @@ curl -s -X POST <api_base>/artifact -H 'Content-Type: application/json' \
   -d "{\"filename\":\"hero-shot.png\",\"caption\":\"Product hero on white bg, 2048px\",
        \"contentBase64\":\"$(base64 < /path/to/hero-shot.png | tr -d '\n')\"}"
 
+# HTML is special: send a self-contained .html file and NORC attaches it as a
+# native Notion HTML block — Notion renders it interactively in a sandboxed iframe
+# (like the app's /html command), no external host needed. The sandbox blocks
+# outbound network calls, so inline all CSS/JS/data — external URLs won't load.
+# Perfect for dashboards/reports (e.g. an /app-checkup checkup.html).
+curl -s -X POST <api_base>/artifact -H 'Content-Type: application/json' \
+  -d "{\"filename\":\"checkup.html\",\"caption\":\"MemoGo App Checkup — 2026-07-16\",
+       \"contentBase64\":\"$(base64 < /path/to/checkup.html | tr -d '\n')\"}"
+
 # Update the task (task runs only)
 curl -s -X POST <api_base>/status   -H 'Content-Type: application/json' \
   -d '{"status":"Done","agentOutput":"short summary"}'

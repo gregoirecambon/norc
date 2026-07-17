@@ -17,7 +17,7 @@ import {
   type TaskStatus,
 } from '../lib/notion-writeback.js';
 import { markdownToBlocks } from '../lib/notion-blocks-md.js';
-import { uploadFileToNotion, appendArtifactBlock } from '../lib/notion-files.js';
+import { uploadFileToNotion, appendArtifactBlock, NOTION_HTML_VERSION } from '../lib/notion-files.js';
 import { readPageMarkdown, resolveAnchor, listChildResources, normalizeId } from '../lib/notion-anchor.js';
 import { getAnyTitle, getSelect, getRelationIds } from '../lib/notion-props.js';
 import { notionGet, notionPost, notionQuery } from '../lib/notion-client.js';
@@ -179,6 +179,7 @@ function guessContentType(filename: string, mime?: string): string {
     png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
     webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', tiff: 'image/tiff', heic: 'image/heic',
     pdf: 'application/pdf', txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json',
+    html: 'text/html', htm: 'text/html',
   };
   return map[ext] ?? 'application/octet-stream';
 }
@@ -641,12 +642,21 @@ export function makeRunsRouter(): ExpressRouter {
     }
     const safeName = path.basename(filename).replace(/[^\w.\- ]+/g, '_') || 'file';
     const contentType = guessContentType(safeName, mimeType);
-    const kind: 'image' | 'file' = contentType.startsWith('image/') || IMAGE_EXT.test(safeName) ? 'image' : 'file';
+    // An .html artifact becomes a native Notion HTML block (Notion 3.6): an `embed`
+    // block backed by the uploaded file, rendered interactively in a sandboxed
+    // iframe — no external host, no Cloudflare hop. It needs the newer File Upload
+    // API version; everything else stays on the proven image/file path.
+    const isHtml = contentType === 'text/html' || /\.html?$/i.test(safeName);
+    const kind: 'image' | 'file' | 'embed' = isHtml
+      ? 'embed'
+      : (contentType.startsWith('image/') || IMAGE_EXT.test(safeName) ? 'image' : 'file');
+    const version = isHtml ? NOTION_HTML_VERSION : undefined;
     try {
-      const { fileUploadId } = await uploadFileToNotion(apiKey, { filename: safeName, bytes, contentType });
-      await appendArtifactBlock(apiKey, target, { fileUploadId, kind, caption: caption ?? '' });
+      const { fileUploadId } = await uploadFileToNotion(apiKey, { filename: safeName, bytes, contentType, version });
+      await appendArtifactBlock(apiKey, target, { fileUploadId, kind, caption: caption ?? '', version });
       markActed(run.id);
-      emitLog(`agent API: artifact "${safeName}" (${Math.max(1, Math.round(bytes.length / 1024))} KB, ${kind}) attached to page ${target} (run ${run.id})`, agentTag(run), run.pageId);
+      const label = kind === 'embed' ? 'interactive HTML block' : kind;
+      emitLog(`agent API: artifact "${safeName}" (${Math.max(1, Math.round(bytes.length / 1024))} KB, ${label}) attached to page ${target} (run ${run.id})`, agentTag(run), run.pageId);
       res.json({ ok: true, filename: safeName, kind });
     } catch (err) {
       res.status(502).json({ error: 'notion_error', message: err instanceof Error ? err.message : 'failed' });

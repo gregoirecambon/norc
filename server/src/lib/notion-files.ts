@@ -17,12 +17,22 @@ import { NOTION_API } from './notion-client.js';
 /** The File Upload API + file_upload block reference require a recent API version. */
 export const NOTION_UPLOAD_VERSION = '2025-09-03';
 
-export type ArtifactKind = 'image' | 'file';
+/**
+ * HTML blocks — an `embed` block backed by an uploaded `.html` file, which Notion
+ * renders interactively in a sandboxed iframe (same thing the app's /html command
+ * and the Notion MCP agents produce) — shipped with Notion 3.6 (July 2026) and need
+ * a newer version than plain image/file uploads: both a `text/html` file upload and
+ * an `embed.file_upload` block are rejected on 2025-09-03. Scoped to the HTML path so
+ * the proven image/file upload flow keeps its pinned version untouched.
+ */
+export const NOTION_HTML_VERSION = '2026-03-11';
 
-function uploadHeaders(apiKey: string, extra?: Record<string, string>): Record<string, string> {
+export type ArtifactKind = 'image' | 'file' | 'embed';
+
+function uploadHeaders(apiKey: string, version: string, extra?: Record<string, string>): Record<string, string> {
   return {
     'Authorization': `Bearer ${apiKey}`,
-    'Notion-Version': NOTION_UPLOAD_VERSION,
+    'Notion-Version': version,
     ...(extra ?? {}),
   };
 }
@@ -45,11 +55,14 @@ export async function uploadFileToNotion(apiKey: string, args: {
   filename: string;
   bytes: Buffer;
   contentType: string;
+  /** Override the API version — e.g. NOTION_HTML_VERSION for a text/html upload. */
+  version?: string;
 }): Promise<{ fileUploadId: string }> {
+  const version = args.version ?? NOTION_UPLOAD_VERSION;
   // Step 1 — create the file-upload object (single-part is the default mode).
   const createRes = await fetch(`${NOTION_API}/file_uploads`, {
     method: 'POST',
-    headers: uploadHeaders(apiKey, { 'Content-Type': 'application/json' }),
+    headers: uploadHeaders(apiKey, version, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({ filename: args.filename, content_type: args.contentType }),
   });
   const createJson = await createRes.json().catch(() => ({})) as Record<string, unknown>;
@@ -66,7 +79,7 @@ export async function uploadFileToNotion(apiKey: string, args: {
   form.append('file', new Blob([args.bytes], { type: args.contentType }), args.filename);
   const sendRes = await fetch(uploadUrl, {
     method: 'POST',
-    headers: uploadHeaders(apiKey),
+    headers: uploadHeaders(apiKey, version),
     body: form,
   });
   const sendJson = await sendRes.json().catch(() => ({})) as Record<string, unknown>;
@@ -75,15 +88,23 @@ export async function uploadFileToNotion(apiKey: string, args: {
 }
 
 /**
- * Append an image (or generic file) block referencing a completed file_upload to
- * a page. Uses the newer API version. Caption is optional but recommended — it's
- * what a downstream agent and human read to know what the artifact is.
+ * Append a block referencing a completed file_upload to a page. Uses the newer API
+ * version. Caption is optional but recommended — it's what a downstream agent and
+ * human read to know what the artifact is.
+ *
+ * The block shape is identical across kinds — `{ type: kind, [kind]: { type:
+ * 'file_upload', file_upload: { id }, caption } }` — so `'embed'` (an HTML block:
+ * an uploaded .html rendered interactively in a sandboxed iframe) rides the same
+ * path as `'image'`/`'file'`. Pass `version: NOTION_HTML_VERSION` for the embed kind.
  */
 export async function appendArtifactBlock(apiKey: string, pageId: string, args: {
   fileUploadId: string;
   kind: ArtifactKind;
   caption?: string;
+  /** Override the API version — NOTION_HTML_VERSION is required for kind 'embed'. */
+  version?: string;
 }): Promise<void> {
+  const version = args.version ?? NOTION_UPLOAD_VERSION;
   const caption = args.caption && args.caption.trim()
     ? [{ type: 'text', text: { content: args.caption.trim().slice(0, 2000) } }]
     : [];
@@ -91,7 +112,7 @@ export async function appendArtifactBlock(apiKey: string, pageId: string, args: 
   const block = { object: 'block', type: args.kind, [args.kind]: inner };
   const res = await fetch(`${NOTION_API}/blocks/${pageId}/children`, {
     method: 'PATCH',
-    headers: uploadHeaders(apiKey, { 'Content-Type': 'application/json' }),
+    headers: uploadHeaders(apiKey, version, { 'Content-Type': 'application/json' }),
     body: JSON.stringify({ children: [block] }),
   });
   const json = await res.json().catch(() => ({})) as Record<string, unknown>;
