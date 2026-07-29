@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
 import { listAgents, syncAgentToNotion, type AgentRow } from '../api/agents.js';
+import { listApps, type AppRow } from '../api/apps.js';
 import { getNotionConfig, listOrgMembers, type OrgMemberRow } from '../api/notion.js';
 import { AgentTable } from '../components/AgentTable.js';
 import { AddAgentModal } from '../components/AddAgentModal.js';
+import { AppsSection } from '../components/AppsSection.js';
 import { parseSse } from '../lib/sse.js';
 import { timeAgo } from '../lib/time.js';
 
@@ -20,12 +22,18 @@ export default function AgentsPage() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncMsg, setSyncMsg] = useState('');
   const [orgMembers, setOrgMembers] = useState<OrgMemberRow[]>([]);
+  const [apps, setApps] = useState<AppRow[]>([]);
+  const [appsLoaded, setAppsLoaded] = useState(false);
 
   useEffect(() => {
     listAgents()
       .then(setAgents)
       .catch(() => setAgents([]))
       .finally(() => setLoading(false));
+    listApps()
+      .then(setApps)
+      .catch(() => setApps([]))
+      .finally(() => setAppsLoaded(true));
     getNotionConfig()
       .then(cfg => setProvisioned(cfg.integration?.workspaceStatus === 'provisioned'))
       .catch(() => setProvisioned(false));
@@ -72,6 +80,12 @@ export default function AgentsPage() {
       if (!parsed) return;
       setProvisioned(parsed.workspaceStatus === 'provisioned');
     });
+
+    // App events carry only {id, name} — re-fetch the list for the fresh row.
+    const refetchApps = () => { listApps().then(setApps).catch(() => { /* keep current */ }); };
+    es.addEventListener('app.created', refetchApps);
+    es.addEventListener('app.updated', refetchApps);
+    es.addEventListener('app.deleted', refetchApps);
 
     es.addEventListener('handshake.updated', (e: MessageEvent) => {
       const parsed = parseSse<{ agentId: string; status: string; latencyMs: number | null }>(e.data);
@@ -132,8 +146,8 @@ export default function AgentsPage() {
     }
   };
 
-  // Empty state
-  if (!loading && agents.length === 0) {
+  // Empty state — only when there are neither agents nor apps to show.
+  if (!loading && agents.length === 0 && appsLoaded && apps.length === 0) {
     return (
       <>
         <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', padding: 48, textAlign: 'center' }}>
@@ -278,6 +292,11 @@ export default function AgentsPage() {
               />
             </div>
           </>
+        )}
+
+        {/* Apps — non-AI API clients with static keys to /api/ext */}
+        {appsLoaded && (
+          <AppsSection apps={apps} onChanged={setApps} provisioned={provisioned} />
         )}
 
         {/* Org roster — NORC itself + the human team from the Notion Org DB (read-only) */}

@@ -72,11 +72,12 @@ function buildProps(agent: AgentLike, opts: { isCreate: boolean }): Record<strin
   return props;
 }
 
-/** Create the agent's Org DB page, or update it in place when existingPageId is given. */
-export async function upsertAgentPage(
+/** PATCH-then-recreate upsert shared by agent and app pages. */
+async function upsertOrgPage(
   apiKey: string,
   orgDbId: string,
-  agent: AgentLike,
+  name: string,
+  props: (opts: { isCreate: boolean }) => Record<string, unknown>,
   existingPageId?: string,
 ): Promise<{ pageId: string; url: string | null }> {
   // Try to update the existing page first.
@@ -84,7 +85,7 @@ export async function upsertAgentPage(
     const res = await fetch(`${NOTION_API}/pages/${existingPageId}`, {
       method: 'PATCH',
       headers: headers(apiKey),
-      body: JSON.stringify({ properties: buildProps(agent, { isCreate: false }) }),
+      body: JSON.stringify({ properties: props({ isCreate: false }) }),
     });
     const json = await res.json() as Record<string, unknown>;
     if (res.ok) return { pageId: json['id'] as string, url: (json['url'] as string) ?? null };
@@ -94,21 +95,54 @@ export async function upsertAgentPage(
     // any other error (permissions, validation, …).
     const msg = typeof json['message'] === 'string' ? json['message'] as string : '';
     const recreatable = res.status === 404 || /archiv|trash|could not find/i.test(msg);
-    if (!recreatable) throw new Error(msg || `Failed to sync agent "${agent.name}"`);
+    if (!recreatable) throw new Error(msg || `Failed to sync "${name}"`);
   }
 
   // Create a new Org DB page.
   const res = await fetch(`${NOTION_API}/pages`, {
     method: 'POST',
     headers: headers(apiKey),
-    body: JSON.stringify({ parent: { database_id: orgDbId }, properties: buildProps(agent, { isCreate: true }) }),
+    body: JSON.stringify({ parent: { database_id: orgDbId }, properties: props({ isCreate: true }) }),
   });
   const json = await res.json() as Record<string, unknown>;
   if (!res.ok) {
-    const msg = typeof json['message'] === 'string' ? json['message'] : `Failed to sync agent "${agent.name}"`;
+    const msg = typeof json['message'] === 'string' ? json['message'] : `Failed to sync "${name}"`;
     throw new Error(msg);
   }
   return { pageId: json['id'] as string, url: (json['url'] as string) ?? null };
+}
+
+/** Create the agent's Org DB page, or update it in place when existingPageId is given. */
+export async function upsertAgentPage(
+  apiKey: string,
+  orgDbId: string,
+  agent: AgentLike,
+  existingPageId?: string,
+): Promise<{ pageId: string; url: string | null }> {
+  return upsertOrgPage(apiKey, orgDbId, agent.name, opts => buildProps(agent, opts), existingPageId);
+}
+
+/** Create an app's Org DB page (Type = App), or update it in place. Apps are
+ * non-AI API clients — no Technology/Context Level; Specialty is seeded from
+ * the description once on create, then human-owned like agent pages. */
+export async function upsertAppPage(
+  apiKey: string,
+  orgDbId: string,
+  app: { name: string; description?: string | null },
+  existingPageId?: string,
+): Promise<{ pageId: string; url: string | null }> {
+  const props = (opts: { isCreate: boolean }): Record<string, unknown> => {
+    const p: Record<string, unknown> = {
+      'Name': { title: [{ type: 'text', text: { content: app.name } }] },
+      'Type': { select: { name: 'App' } },
+      'Status': { select: { name: 'Available' } },
+    };
+    if (opts.isCreate && app.description?.trim()) {
+      p['Specialty'] = { rich_text: [{ type: 'text', text: { content: app.description.trim().slice(0, 2000) } }] };
+    }
+    return p;
+  };
+  return upsertOrgPage(apiKey, orgDbId, app.name, props, existingPageId);
 }
 
 /** Best-effort archive (Notion trash). Never throws. */

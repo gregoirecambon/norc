@@ -110,7 +110,14 @@ export interface QueueUpdatedEvent {
   data: { agentId: string; pending: number };
 }
 
+/** Public app row (never the key or its hash) — created/updated/revoked from the dashboard. */
+export interface AppChangedEvent {
+  type: 'app.created' | 'app.updated' | 'app.deleted';
+  data: { id: string; name: string };
+}
+
 export type NorcEvent =
+  | AppChangedEvent
   | AgentRegisteredEvent
   | AgentDeletedEvent
   | AgentUpdatedEvent
@@ -140,13 +147,14 @@ export function onEvent(fn: (event: NorcEvent) => void): () => void {
   return () => listeners.delete(fn);
 }
 
-export function attachEventListener(res: Response): void {
+export function attachEventListener(res: Response, filter?: (event: NorcEvent) => boolean): void {
   res.setHeader('Content-Type', 'text/event-stream');
   res.setHeader('Cache-Control', 'no-cache');
   res.setHeader('Connection', 'keep-alive');
   res.flushHeaders();
 
   const send = (event: NorcEvent) => {
+    if (filter && !filter(event)) return;
     res.write(`event: ${event.type}\ndata: ${JSON.stringify(event.data)}\n\n`);
   };
   listeners.add(send);

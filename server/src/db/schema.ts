@@ -445,3 +445,34 @@ export const pendingChoreCasts = sqliteTable('pending_chore_casts', {
   resolvedAt:        integer('resolved_at'),
   resolvedByUserId:  text('resolved_by_user_id'),
 });
+
+// Non-AI API clients ("apps": n8n flows, custom services…) holding a static key
+// to drive NORC headlessly via /api/ext. Deliberately NOT rows in `agents`:
+// agents are dispatch targets (heartbeat pings, org routing, handshakes) —
+// apps only ever CALL NORC. The key itself is never stored: keyHash is its
+// sha256, keyPrefix the short display stub the dashboard shows after creation.
+export const apps = sqliteTable('apps', {
+  id:          text('id').primaryKey(),
+  name:        text('name').notNull().unique(),
+  description: text('description'),
+  keyHash:     text('key_hash').notNull().unique(),
+  keyPrefix:   text('key_prefix').notNull(),
+  scopes:      text('scopes').notNull().default('["read"]'), // JSON array: 'read' | 'tasks:write' | 'tasks:approve'
+  createdBy:   text('created_by'),        // dashboard user id (informational)
+  createdAt:   integer('created_at').notNull(),
+  lastUsedAt:  integer('last_used_at'),
+  revokedAt:   integer('revoked_at'),     // set → key refused; row kept for audit
+  orgDbPageId: text('org_db_page_id'),    // Notion Org DB page, kind "App"
+});
+
+// Per-request access trail for app keys — the audit the dashboard shows per
+// app. Time-pruned like task_runs so it never grows unbounded.
+export const appAccessLog = sqliteTable('app_access_log', {
+  id:     text('id').primaryKey(),
+  appId:  text('app_id').notNull().references(() => apps.id, { onDelete: 'cascade' }),
+  method: text('method').notNull(),
+  path:   text('path').notNull(),
+  status: integer('status').notNull(),
+  ip:     text('ip'),
+  at:     integer('at').notNull(),
+});

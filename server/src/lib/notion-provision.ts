@@ -142,8 +142,10 @@ export function isInertTaskStatus(status: string | null | undefined): boolean {
 
 // Org DB member types. 'Orchestrator' is NORC's own singleton page — kept out of
 // 'AI Agent' so Type-based sweeps (the humans roster, the agents sync) never pick
-// it up, and out of 'Human' so it's never treated as a person.
-export const ORG_TYPE_OPTIONS = ['Human', 'AI Agent', 'Orchestrator'] as const;
+// it up, and out of 'Human' so it's never treated as a person. 'App' is a non-AI
+// API client (n8n, custom service…) — present in the org for visibility, never a
+// dispatch target (no agents-table row backs it).
+export const ORG_TYPE_OPTIONS = ['Human', 'AI Agent', 'Orchestrator', 'App'] as const;
 
 const orgProps: Record<string, unknown> = {
   'Name': { title: {} },

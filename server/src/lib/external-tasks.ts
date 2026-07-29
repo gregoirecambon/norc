@@ -16,7 +16,7 @@ import { resolveAnchor } from './notion-anchor.js';
 import { getNorcSettings } from './norc-settings.js';
 import { judgeTaskSimilarity } from './orchestrator-agent.js';
 import { heuristicCandidates, titleSimilarity } from './task-similarity.js';
-import { claimExternalTask, type ExternalClaim } from './orchestrator.js';
+import { claimExternalTask, dispatchScheduledTask, type ExternalClaim } from './orchestrator.js';
 import { createSemaphore } from './semaphore.js';
 import { emitLog } from './logger.js';
 
@@ -156,6 +156,13 @@ async function resolveProject(apiKey: string, input: string):
   return { ok: false, projects };
 }
 
+/** All projects for API consumers — null when the Notion integration isn't active. */
+export async function listAllProjects(): Promise<ProjectRef[] | null> {
+  const integration = activeIntegration();
+  if (!integration) return null;
+  return listProjects(integration.apiKey);
+}
+
 /** Open (non-terminal) tasks — project-scoped when a project id is given. */
 export async function listOpenTasks(apiKey: string, tasksDbId: string, projectId?: string): Promise<OpenTask[]> {
   const statusOr = { or: OPEN_STATUSES.map(s => ({ property: 'Status', select: { equals: s } })) };
@@ -247,6 +254,86 @@ export async function listExternalTasks(projectInput?: string, q?: string): Prom
  */
 export async function intakeExternalTask(agentRow: AgentRow, input: IntakeInput): Promise<IntakeOutcome> {
   return intakeSemaphore.run(() => intakeLocked(agentRow, input));
+}
+
+export interface AppIntakeInput {
+  title?: string;
+  description?: string;
+  kpis?: string;
+  /** Project page id (dashed or bare) or project name. */
+  project?: string;
+  force?: boolean;
+  /** true → create straight into Backlog and hand to the orchestrator for
+   * routing (requires the caller to have checked the tasks:approve scope);
+   * false/omitted → land as Proposed for human validation. */
+  route?: boolean;
+  source?: string;
+}
+
+export type AppIntakeOutcome =
+  | { outcome: 'not_active' }
+  | { outcome: 'no_tasks_db' }
+  | { outcome: 'title_required' }
+  | { outcome: 'project_not_found'; projects: ProjectRef[] }
+  | { outcome: 'similar'; candidates: SimilarHit[] }
+  | { outcome: 'created'; task: { id: string; title: string; url: string }; status: string };
+
+/**
+ * Task intake for app principals (non-AI API clients). Same duplicate gate and
+ * serialization as agent intake, but apps never CLAIM work — they are not in
+ * the org and cannot execute runs — so a created task is unassigned and lands
+ * as Proposed (human triage) or, with route=true, as Backlog handed straight
+ * to the orchestrator.
+ */
+export async function intakeAppTask(app: { name: string }, input: AppIntakeInput): Promise<AppIntakeOutcome> {
+  return intakeSemaphore.run(() => appIntakeLocked(app, input));
+}
+
+async function appIntakeLocked(app: { name: string }, input: AppIntakeInput): Promise<AppIntakeOutcome> {
+  const integration = activeIntegration();
+  if (!integration) return { outcome: 'not_active' };
+  const tasksDbId = dbId('tasks');
+  if (!tasksDbId) return { outcome: 'no_tasks_db' };
+
+  const apiKey = integration.apiKey;
+  const source = (input.source ?? 'api').slice(0, 50);
+  const title = (input.title ?? '').trim();
+  if (!title) return { outcome: 'title_required' };
+
+  let project: ProjectRef | null = null;
+  if (input.project && input.project.trim()) {
+    const resolved = await resolveProject(apiKey, input.project);
+    if (!resolved.ok) return { outcome: 'project_not_found', projects: resolved.projects };
+    project = resolved.project;
+  }
+
+  if (input.force !== true) {
+    const open = await listOpenTasks(apiKey, tasksDbId, project?.id);
+    const blocking = await findBlockingSimilar(title, input.description, open);
+    if (blocking.length > 0) {
+      emitLog(`app task "${title}" from "${app.name}" blocked: ${blocking.length} similar open task(s)`, 'NORC');
+      return { outcome: 'similar', candidates: blocking };
+    }
+  }
+
+  const status = input.route === true ? 'Backlog' : 'Proposed';
+  const { pageId, url } = await createTaskPage(apiKey, tasksDbId, {
+    title,
+    kpis: input.kpis ?? '',
+    projectId: project?.id ?? null,
+    status,
+  });
+  const body = [
+    input.description?.trim() ?? '',
+    `_Created by app "${app.name}" via the NORC API (${source})._`,
+  ].filter(Boolean).join('\n\n');
+  if (body) await appendBlocks(apiKey, pageId, markdownToBlocks(body)).catch(() => { /* best-effort */ });
+
+  if (status === 'Backlog') {
+    await dispatchScheduledTask(integration, pageId, `app "${app.name}" API request`, `app:${pageId}:${Date.now()}`);
+  }
+  emitLog(`app task: "${app.name}" created "${title}" (${status}${project ? `, project "${project.name}"` : ''}, via ${source})`, 'NORC', pageId);
+  return { outcome: 'created', task: { id: pageId, title, url }, status };
 }
 
 async function intakeLocked(agentRow: AgentRow, input: IntakeInput): Promise<IntakeOutcome> {

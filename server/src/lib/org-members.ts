@@ -35,7 +35,7 @@ export interface AgentRosterEntry {
   description: string;
 }
 
-export type OrgMemberType = 'human' | 'ai_agent' | 'orchestrator' | 'unknown';
+export type OrgMemberType = 'human' | 'ai_agent' | 'orchestrator' | 'app' | 'unknown';
 
 export interface OrgMember {
   /** Raw (dashed) Notion page id — usable directly in relation values and mentions. */
@@ -69,6 +69,7 @@ function memberType(typeSelect: string | null): OrgMemberType {
     case 'Human': return 'human';
     case 'AI Agent': return 'ai_agent';
     case 'Orchestrator': return 'orchestrator';
+    case 'App': return 'app';
     default: return 'unknown';
   }
 }

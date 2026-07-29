@@ -51,6 +51,9 @@ import { pruneOldRuns } from './lib/runs.js';
 import { feedbackRouter } from './routes/feedback.js';
 import { feedbackPublicRouter } from './routes/feedback-public.js';
 import { statsRouter } from './routes/stats.js';
+import { appsRouter } from './routes/apps.js';
+import { makeExtRouter } from './routes/ext.js';
+import { pruneAppAccessLog } from './lib/apps.js';
 import { expireStaleCasts, reconcile as reconcileChores } from './chores/index.js';
 
 const app = express();
@@ -109,6 +112,8 @@ app.use('/api/team', teamRouter);
 app.use('/api/version', versionRouter);
 app.use('/api/feedback', feedbackRouter);
 app.use('/api/stats', statsRouter);
+app.use('/api/apps', appsRouter);
+app.use('/api/ext', makeExtRouter());
 app.use('/webhooks/notion', notionWebhookRouter);
 app.use('/webhooks/slack', slackWebhookRouter);
 // Public like the webhooks: Slack fetches agent avatars here with no credentials.
@@ -139,6 +144,7 @@ function safeTick(label: string, fn: () => void): () => void {
 setInterval(safeTick('housekeeping', () => {
   pruneExpiredSessions();
   pruneExpiredFeedbackInvites();
+  pruneAppAccessLog();
   const prunedRuns = pruneOldRuns();
   if (prunedRuns > 0) emitLog(`pruned ${prunedRuns} task run(s) older than 90 days`);
 }), 3600_000);

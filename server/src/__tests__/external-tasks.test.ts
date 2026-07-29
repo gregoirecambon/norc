@@ -371,3 +371,40 @@ describe('intakeExternalTask — claim path', () => {
       .toEqual({ outcome: 'not_a_task' });
   });
 });
+
+// ─── App intake: create-only, never claim ─────────────────────────────────────
+
+describe('intakeAppTask', () => {
+  it('creates an unassigned Proposed task by default', async () => {
+    const { intakeAppTask } = await import('../lib/external-tasks.js');
+    const out = await intakeAppTask({ name: 'n8n' }, { title: 'Weekly digest', project: 'Site v2' });
+    expect(out).toMatchObject({ outcome: 'created', status: 'Proposed', task: { id: 'new-task' } });
+    expect(createTaskPageMock).toHaveBeenCalledWith('k', 'tasks-db', expect.objectContaining({
+      title: 'Weekly digest', status: 'Proposed', projectId: 'proj-a',
+    }));
+    // No claim: no run, no queue item, no assignee.
+    expect(db.select().from(taskRuns).all()).toHaveLength(0);
+    expect(createTaskPageMock.mock.calls[0]![2]).not.toHaveProperty('assigneeIds');
+  });
+
+  it('is blocked by the duplicate gate like agent intake, and force bypasses it', async () => {
+    const { intakeAppTask } = await import('../lib/external-tasks.js');
+    queryByDb.set('tasks-db', [taskRow('t1', 'Weekly digest', 'Backlog')]);
+    const blocked = await intakeAppTask({ name: 'n8n' }, { title: 'Weekly digest' });
+    expect(blocked.outcome).toBe('similar');
+
+    const forced = await intakeAppTask({ name: 'n8n' }, { title: 'Weekly digest', force: true });
+    expect(forced.outcome).toBe('created');
+  });
+
+  it('surfaces the project roster on an unknown project', async () => {
+    const { intakeAppTask } = await import('../lib/external-tasks.js');
+    const out = await intakeAppTask({ name: 'n8n' }, { title: 'X', project: 'nope' });
+    expect(out).toMatchObject({ outcome: 'project_not_found', projects: [{ id: 'proj-a', name: 'Site v2' }] });
+  });
+
+  it('requires a title', async () => {
+    const { intakeAppTask } = await import('../lib/external-tasks.js');
+    expect(await intakeAppTask({ name: 'n8n' }, {})).toEqual({ outcome: 'title_required' });
+  });
+});

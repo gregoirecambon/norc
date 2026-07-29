@@ -59,7 +59,7 @@ router.get('/tasks', async (req, res) => {
   }
 });
 
-const ExternalTaskSchema = z.object({
+export const ExternalTaskSchema = z.object({
   title: z.string().max(300).optional(),
   description: z.string().max(10_000).optional(),
   kpis: z.string().max(2_000).optional(),
@@ -69,8 +69,8 @@ const ExternalTaskSchema = z.object({
   source: z.string().max(50).optional(),
 });
 
-/** Map an intake outcome to its HTTP response. */
-function sendIntake(res: Response, out: IntakeOutcome): void {
+/** Map an intake outcome to its HTTP response. Shared with /api/ext/tasks. */
+export function sendIntake(res: Response, out: IntakeOutcome): void {
   switch (out.outcome) {
     case 'not_active': res.status(503).json({ error: 'notion_not_active' }); return;
     case 'no_tasks_db': res.status(503).json({ error: 'no_tasks_db' }); return;
