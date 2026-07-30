@@ -24,7 +24,7 @@ export const btnStyle: CSSProperties = {
 };
 
 /** A bordered card with a header (title + optional description) and a body. */
-export function Section({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
+export function Section({ title, description, actions, children }: { title: string; description?: string; actions?: ReactNode; children: ReactNode }) {
   return (
     <div style={{
       background: 'var(--surface2)',
@@ -33,11 +33,14 @@ export function Section({ title, description, children }: { title: string; descr
       overflow: 'hidden',
       marginBottom: 16,
     }}>
-      <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--border)' }}>
-        <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>{title}</div>
-        {description && (
-          <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 3, lineHeight: 1.5 }}>{description}</div>
-        )}
+      <div style={{ padding: '18px 22px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ fontSize: 15, fontWeight: 600, color: 'var(--text-primary)' }}>{title}</div>
+          {description && (
+            <div style={{ fontSize: 13, color: 'var(--text-secondary)', marginTop: 3, lineHeight: 1.5 }}>{description}</div>
+          )}
+        </div>
+        {actions}
       </div>
       <div style={{ padding: '18px 22px' }}>{children}</div>
     </div>

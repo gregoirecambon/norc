@@ -171,6 +171,7 @@ export default function DashboardPage() {
   const [data, setData] = useState<DashboardData | null>(null);
   const [scheduled, setScheduled] = useState<ScheduledTask[] | null>(null);
   const [proposed, setProposed] = useState<ProposedTask[] | null>(null);
+  const [errorsOnly, setErrorsOnly] = useState(false);
 
   // Snapshot + Notion-backed counts (the latter run once: slow/rate-limited,
   // and a 400 simply means the workspace isn't provisioned yet → show "—").
@@ -272,12 +273,38 @@ export default function DashboardPage() {
         )}
 
         {/* Recent runs */}
-        <Section title="Recent runs" description="Last 20 completed dispatches.">
-          {!data || data.recentRuns.length === 0 ? (
-            <div style={emptyStyle}>No runs yet.</div>
-          ) : (
-            data.recentRuns.map((run, i) => (
-              <div key={run.id} style={{ ...rowStyle, borderBottom: i === data.recentRuns.length - 1 ? 'none' : rowStyle.borderBottom }}>
+        <Section
+          title="Recent runs"
+          description="Last 20 completed dispatches."
+          actions={
+            <button
+              onClick={() => setErrorsOnly(v => !v)}
+              title="Only show failed and timed-out runs"
+              style={{
+                fontSize: 12, fontWeight: 600, padding: '4px 11px', borderRadius: 5,
+                border: '1px solid ' + (errorsOnly ? 'var(--accent-red)' : 'var(--border)'),
+                background: errorsOnly ? '#fde8e8' : 'var(--surface1)',
+                color: errorsOnly ? 'var(--accent-red)' : 'var(--text-secondary)',
+                cursor: 'pointer', whiteSpace: 'nowrap',
+              }}
+            >
+              Errors only
+            </button>
+          }
+        >
+          {(() => {
+            const runs = (data?.recentRuns ?? []).filter(
+              run => !errorsOnly || run.status === 'failed' || run.status === 'timed_out',
+            );
+            if (!data || runs.length === 0) {
+              return (
+                <div style={emptyStyle}>
+                  {errorsOnly && data && data.recentRuns.length > 0 ? 'No failed runs. 🎉' : 'No runs yet.'}
+                </div>
+              );
+            }
+            return runs.map((run, i) => (
+              <div key={run.id} style={{ ...rowStyle, borderBottom: i === runs.length - 1 ? 'none' : rowStyle.borderBottom }}>
                 <span style={{ fontWeight: 600, whiteSpace: 'nowrap' }}>{run.agentName}</span>
                 <RunTitle run={run} />
                 <span style={{ flex: 1 }} />
@@ -287,8 +314,8 @@ export default function DashboardPage() {
                   {timeAgo(run.completedAt)}
                 </span>
               </div>
-            ))
-          )}
+            ));
+          })()}
         </Section>
 
         {/* Upcoming scheduled — only when the Notion workspace answers */}

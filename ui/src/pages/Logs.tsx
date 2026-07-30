@@ -95,9 +95,10 @@ export default function LogsPage() {
   const [now, setNow] = useState(() => Date.now());
   const idRef = useRef(0);
 
-  // Filters: free-text search, source tag, and time range (preset or custom).
+  // Filters: free-text search, source tag, level, and time range (preset or custom).
   const [query, setQuery] = useState('');
   const [tagFilter, setTagFilter] = useState('all');
+  const [levelFilter, setLevelFilter] = useState<'all' | ParsedLine['level']>('all');
   const [range, setRange] = useState('all'); // 'all' | preset id | 'custom'
   const [customFrom, setCustomFrom] = useState(''); // datetime-local values
   const [customTo, setCustomTo] = useState('');
@@ -155,8 +156,8 @@ export default function LogsPage() {
     return (tag: string): Tint => FIXED_TINT[tag] ?? map.get(tag) ?? AGENT_TINTS[0]!;
   }, [availableTags]);
 
-  const filtersActive = query.trim() !== '' || tagFilter !== 'all' || range !== 'all';
-  const resetFilters = () => { setQuery(''); setTagFilter('all'); setRange('all'); setCustomFrom(''); setCustomTo(''); };
+  const filtersActive = query.trim() !== '' || tagFilter !== 'all' || levelFilter !== 'all' || range !== 'all';
+  const resetFilters = () => { setQuery(''); setTagFilter('all'); setLevelFilter('all'); setRange('all'); setCustomFrom(''); setCustomTo(''); };
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -172,10 +173,11 @@ export default function LogsPage() {
     }
     return lines.filter(l =>
       (tagFilter === 'all' || l.tag === tagFilter) &&
+      (levelFilter === 'all' || l.level === levelFilter) &&
       l.epoch >= fromMs && l.epoch <= toMs &&
       (!q || l.raw.toLowerCase().includes(q) || l.tag.toLowerCase().includes(q)),
     );
-  }, [lines, query, tagFilter, range, customFrom, customTo, now]);
+  }, [lines, query, tagFilter, levelFilter, range, customFrom, customTo, now]);
 
   // One webhook produces several lines for the same page (received / payload /
   // ignored…) — repeating the link on each would be noise. Only the most recent
@@ -259,6 +261,18 @@ export default function LogsPage() {
         >
           <option value="all">All types</option>
           {availableTags.map(t => <option key={t} value={t}>{t}</option>)}
+        </select>
+        <select
+          aria-label="Filter by level"
+          value={levelFilter}
+          onChange={e => setLevelFilter(e.target.value as 'all' | ParsedLine['level'])}
+          style={filterInput}
+        >
+          <option value="all">All levels</option>
+          <option value="error">Errors</option>
+          <option value="warn">Warnings</option>
+          <option value="success">Success</option>
+          <option value="info">Info</option>
         </select>
         <select
           aria-label="Filter by time range"
