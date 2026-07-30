@@ -53,6 +53,7 @@ import { feedbackPublicRouter } from './routes/feedback-public.js';
 import { statsRouter } from './routes/stats.js';
 import { appsRouter } from './routes/apps.js';
 import { makeExtRouter } from './routes/ext.js';
+import { docsRouter } from './routes/docs.js';
 import { pruneAppAccessLog } from './lib/apps.js';
 import { expireStaleCasts, reconcile as reconcileChores } from './chores/index.js';
 
@@ -114,6 +115,7 @@ app.use('/api/feedback', feedbackRouter);
 app.use('/api/stats', statsRouter);
 app.use('/api/apps', appsRouter);
 app.use('/api/ext', makeExtRouter());
+app.use('/api/docs', docsRouter);
 app.use('/webhooks/notion', notionWebhookRouter);
 app.use('/webhooks/slack', slackWebhookRouter);
 // Public like the webhooks: Slack fetches agent avatars here with no credentials.

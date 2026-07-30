@@ -96,6 +96,15 @@ export function AppsSection({ apps, onChanged, provisioned }: {
         </div>
         <div style={{ flex: 1 }} />
         {err && <span style={{ fontSize: 12, color: 'var(--accent-red)' }}>{err}</span>}
+        <a
+          href="/api/docs"
+          target="_blank"
+          rel="noreferrer"
+          title="The public API reference for /api/ext — share this URL with integrators"
+          style={{ ...smallBtn, textDecoration: 'none', display: 'inline-block' }}
+        >
+          API docs ↗
+        </a>
         <button onClick={() => setShowAdd(true)} style={{ ...smallBtn, background: 'var(--surface2)' }}>
           + Add App
         </button>

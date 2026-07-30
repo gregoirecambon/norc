@@ -145,6 +145,8 @@ const PUBLIC_API: { method: string; test: (p: string) => boolean }[] = [
   { method: '*', test: p => p === '/api/me' || p.startsWith('/api/me/') },
   // Machine surface — extAuthGuard (Bearer agentSecret or app key) inside.
   { method: '*', test: p => p.startsWith('/api/ext/') },
+  // Public API reference — shareable with integrators, like the skill doc.
+  { method: 'GET', test: p => p === '/api/docs' },
   // Protocol doc — agents re-fetch it autonomously.
   { method: 'GET', test: p => p === '/api/skill' || p === '/api/skill/version' },
   // Worker bundle — the copy-paste invite downloads this before it has any credentials.
